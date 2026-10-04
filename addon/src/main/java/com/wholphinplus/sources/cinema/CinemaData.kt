@@ -600,6 +600,8 @@ data class PlayTarget(
     val label: String,
     val progress: Float?,
     val remaining: String?,
+    /** True until the real target is known (a show's next episode); Play waits for it. */
+    val pending: Boolean = false,
 )
 
 @androidx.compose.runtime.Immutable

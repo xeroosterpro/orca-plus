@@ -29,7 +29,7 @@ internal fun PlusListItem(
             ListItemDefaults.colors(
                 containerColor = Color.White.copy(alpha = 0.04f),
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                focusedContainerColor = Color(0xFF1E1E2A),
+                focusedContainerColor = if (com.wholphinplus.sources.cinema.cinemaModeOn()) Color(0xFF2A2A2A) else Color(0xFF1E1E2A),
                 focusedContentColor = Color.White,
             ),
         border = ListItemDefaults.border(focusedBorder = Border(BorderStroke(2.dp, MaterialTheme.colorScheme.primary), shape = shape)),

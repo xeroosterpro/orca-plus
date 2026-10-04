@@ -180,7 +180,8 @@ fun CinemaHome(
                                 Spacer(Modifier.height(12.dp))
                                 Button(onClick = { hook.store.setCinemaMode(false) }) { Text("Use the classic home") }
                             }
-                        d == null -> Wordmark(Modifier.align(Alignment.Center), size = 34)
+                        // The logo only shows while the app starts; other tabs just fade in
+                        d == null -> if (t == CinemaTab.HOME) Wordmark(Modifier.align(Alignment.Center), size = 34)
                         t == CinemaTab.MY_LIST -> MyListScreen(d.rows.firstOrNull()?.items.orEmpty(), onOpen)
                         else -> {
                             val focusPlay = grabFocus && t == CinemaTab.HOME
@@ -262,7 +263,13 @@ private fun CinemaScreen(
     }
 
     val onCard = remember(focus) { { item: CinemaItem -> focus.onCard(item) } }
-    val onCardClick = remember(onOpen) { { item: CinemaItem -> onOpen(item.detailsId, item.detailsKind) } }
+    val onCardClick =
+        remember(onOpen) {
+            { item: CinemaItem ->
+                DetailsPreview.put(item)
+                onOpen(item.detailsId, item.detailsKind)
+            }
+        }
     val density = LocalDensity.current
     val rowSpec = remember(density) { pivot(with(density) { 40.dp.toPx() }) }
     val cardSpec = remember(density) { pivot(with(density) { 48.dp.toPx() }) }
@@ -276,7 +283,12 @@ private fun CinemaScreen(
                 billboard = focus.billboard,
                 playFocus = playFocus,
                 onPlay = { shown?.let { onPlay(it.id, it.resumeMs) } },
-                onMoreInfo = { shown?.let { onOpen(it.detailsId, it.detailsKind) } },
+                onMoreInfo = {
+                    shown?.let {
+                        DetailsPreview.put(it)
+                        onOpen(it.detailsId, it.detailsKind)
+                    }
+                },
                 onButtonsFocused = { focus.billboard = true },
             )
             CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
@@ -487,6 +499,30 @@ internal fun CinemaCard(
     }
 }
 
+/**
+ * What a card already knows about a title, handed to its Cinema page so the page draws at once
+ * (art, logo, overview, Play) while the rest loads. Episodes aren't handed over: their card
+ * opens the series.
+ */
+internal object DetailsPreview {
+    private val map = java.util.concurrent.ConcurrentHashMap<UUID, CinemaItem>()
+
+    fun put(item: CinemaItem) {
+        if (item.id == item.detailsId) map[item.id] = item
+    }
+
+    operator fun get(id: UUID): CinemaItem? = map[id]
+}
+
+/** Titles to suggest before you search: what's on your home, billboard first. */
+internal fun homeSuggestions(): List<CinemaItem> {
+    val home = TabCache.data[CinemaTab.HOME] ?: return emptyList()
+    return (home.featured + home.rows.flatMap { it.items })
+        .filter { it.kind != BaseItemKind.EPISODE && (it.backdropUrl != null || it.cardUrl != null) }
+        .distinctBy { it.detailsId }
+        .take(18)
+}
+
 /** Each tab's last page, kept for the life of the app so returning to it is instant. */
 private object TabCache {
     val data = java.util.concurrent.ConcurrentHashMap<CinemaTab, CinemaHomeData>()
@@ -533,11 +569,37 @@ private fun MyListScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         gridItems(items, key = { it.key }, contentType = { "card" }) { item ->
-                            CinemaCard(item, onFocused = { focused = it }, onClick = { onOpen(it.detailsId, it.detailsKind) }, width = 204.dp)
+                            CinemaCard(
+                                item,
+                                onFocused = { focused = it },
+                                onClick = {
+                                    DetailsPreview.put(it)
+                                    onOpen(it.detailsId, it.detailsKind)
+                                },
+                                width = 204.dp,
+                            )
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/** Settings' left side in Cinema mode: a faded billboard image, the wordmark and the heading. */
+@Composable
+fun CinemaSettingsSide(modifier: Modifier = Modifier) {
+    val backdrop = remember { TabCache.data[CinemaTab.HOME]?.featured?.randomOrNull()?.backdropUrl }
+    Box(modifier) {
+        StableBackdrop(backdrop, drift = true, widthFraction = 1f, heightFraction = 1f)
+        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0.55f to Color.Transparent, 1f to Stage)))
+        Box(Modifier.fillMaxSize().background(Stage.copy(alpha = 0.35f)))
+        Column(Modifier.align(Alignment.BottomStart).padding(start = 56.dp, bottom = 64.dp)) {
+            Wordmark(size = 26)
+            Spacer(Modifier.height(14.dp))
+            Text("Settings", color = Ink, fontSize = 46.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(6.dp))
+            Text("Playback, subtitles, servers and Orca+ extras", color = InkDim, fontSize = 15.sp)
         }
     }
 }

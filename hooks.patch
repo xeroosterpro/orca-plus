@@ -186,7 +186,7 @@ index 06607cf9..3afb4d7f 100644
      @Provides
      @Singleton
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
-index 0cf42622..4cfebe26 100644
+index 0cf42622..490726a5 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
 @@ -78,7 +78,10 @@ fun ApplicationContent(
@@ -195,14 +195,14 @@ index 0cf42622..4cfebe26 100644
                  NavEntry(key, contentKey = contentKey) {
 -                    if (key.fullScreen) {
 +                    // Orca+: Cinema mode draws its own full-screen home (top menu instead of the side drawer)
-+                    if (key.fullScreen || ((key is Destination.Home ||
++                    if (key.fullScreen || ((key is Destination.Home || key is Destination.Search ||
 +                            (key is Destination.MediaItem && (key.type == org.jellyfin.sdk.model.api.BaseItemKind.MOVIE || key.type == org.jellyfin.sdk.model.api.BaseItemKind.SERIES))) &&
 +                            com.wholphinplus.sources.cinema.cinemaModeOn())) {
                          DestinationContent(
                              destination = key,
                              preferences = preferences,
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
-index 63789d6c..fe5c29de 100644
+index 63789d6c..77822a04 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
 @@ -70,10 +70,33 @@ fun DestinationContent(
@@ -265,7 +265,7 @@ index 63789d6c..fe5c29de 100644
              when (destination.type) {
                  BaseItemKind.SERIES -> {
                      SeriesDetails(
-@@ -364,11 +402,23 @@ fun DestinationContent(
+@@ -364,11 +402,38 @@ fun DestinationContent(
  
          is Destination.Search -> {
              LaunchedEffect(Unit) { onClearBackdrop.invoke() }
@@ -273,6 +273,21 @@ index 63789d6c..fe5c29de 100644
 +            // Orca+: smart search when a TMDB key is set, else Wholphin's own page
 +            val searchViewModel: com.github.damontecres.wholphin.ui.search.SearchViewModel =
 +                androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++            if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++                com.wholphinplus.sources.cinema.CinemaSearch(
++                    initialQuery = destination.query,
++                    onOpen = { id, kind -> searchViewModel.navigateTo(Destination.MediaItem(id, kind)) },
++                    modifier = modifier,
++                ) {
++                    SearchPage(
++                        initialQuery = destination.query,
++                        userPreferences = preferences,
++                        modifier = modifier,
++                        viewModel = searchViewModel,
++                    )
++                }
++                return
++            }
 +            com.wholphinplus.sources.ui.SmartSearchPage(
                  initialQuery = destination.query,
 -                userPreferences = preferences,
@@ -406,7 +421,7 @@ index 79d2ae57..196f34b1 100644
                              withContext(WholphinDispatchers.Main) {
                                  player.prepare()
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
-index c97117b7..4436a39e 100644
+index c97117b7..9e54975c 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 @@ -248,6 +248,10 @@ fun PreferencesContent(
@@ -431,6 +446,63 @@ index c97117b7..4436a39e 100644
                          val isLast =
                              groupIndex == prefList.lastIndex && prefIndex == groupPreferences.lastIndex
                          item {
+@@ -816,6 +822,10 @@ fun PreferencesPage(
+     Box(
+         modifier = modifier.background(MaterialTheme.colorScheme.background),
+     ) {
++        // Orca+: Cinema mode fills the left side with the title art and a big heading
++        if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++            com.wholphinplus.sources.cinema.CinemaSettingsSide(Modifier.fillMaxWidth(.6f).fillMaxHeight().align(Alignment.TopStart))
++        }
+         when (preferenceScreenOption) {
+             PreferenceScreenOption.BASIC,
+             PreferenceScreenOption.ADVANCED,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
+index daf6fa07..0de10d2a 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
+@@ -67,6 +67,14 @@ fun SwitchPreference(
+ @Composable
+ fun SwitchColors(): SwitchColors {
+     val theme = LocalTheme.current
++    // Orca+: Cinema mode's switch keeps a red track so it shows on a white focused row too
++    if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++        return SwitchDefaults.colors(
++            checkedThumbColor = androidx.compose.ui.graphics.Color.White,
++            checkedTrackColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
++            checkedBorderColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
++        )
++    }
+     return when (theme) {
+         AppThemeColors.UNRECOGNIZED,
+         AppThemeColors.PURPLE,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
+index 8ae95b25..e24401d1 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
+@@ -37,6 +37,8 @@ fun WholphinTheme(
+     content: @Composable () -> Unit,
+ ) {
+     val themeColors = getThemeColors(appThemeColors)
++    // Orca+: Cinema mode's black-and-white look replaces the app theme while it's on
++    val cinema = com.wholphinplus.sources.cinema.cinemaModeOn()
+ 
+     val colorScheme =
+         when {
+@@ -45,11 +47,11 @@ fun WholphinTheme(
+         }
+     CompositionLocalProvider(LocalTheme provides appThemeColors) {
+         androidx.compose.material3.MaterialTheme(
+-            colorScheme = if (darkTheme) themeColors.darkSchemeMaterial else themeColors.lightSchemeMaterial,
++            colorScheme = if (cinema) com.wholphinplus.sources.cinema.CinemaColors.material else if (darkTheme) themeColors.darkSchemeMaterial else themeColors.lightSchemeMaterial,
+             typography = androidx.compose.material3.Typography(),
+         ) {
+             MaterialTheme(
+-                colorScheme = colorScheme,
++                colorScheme = if (cinema) com.wholphinplus.sources.cinema.CinemaColors.tv else colorScheme,
+                 typography = AppTypography,
+                 content = content,
+             )
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
 index cff98add..38579bb2 100644
 --- a/app/src/main/res/values/strings.xml

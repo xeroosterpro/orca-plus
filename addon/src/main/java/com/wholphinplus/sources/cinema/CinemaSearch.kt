@@ -1,0 +1,356 @@
+package com.wholphinplus.sources.cinema
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.ClickableSurfaceDefaults
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Surface
+import androidx.tv.material3.Text
+import com.wholphinplus.sources.Availability
+import com.wholphinplus.sources.core.TmdbItem
+import com.wholphinplus.sources.core.TmdbSearch
+import com.wholphinplus.sources.core.TmdbType
+import com.wholphinplus.sources.ui.SourcesEntryPoint
+import com.wholphinplus.sources.ui.TMDB_NOTICE
+import com.wholphinplus.sources.ui.TitleSheet
+import dagger.hilt.android.EntryPointAccessors
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
+import org.jellyfin.sdk.model.api.BaseItemKind
+import java.util.UUID
+
+/**
+ * Cinema mode's search: an on-screen keyboard on the left, title cards on the right. Before you
+ * type it suggests titles from your home; results come from smart search (TMDB), and a title
+ * that's on your server opens its Cinema page, otherwise the other-servers sheet.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun CinemaSearch(
+    initialQuery: String,
+    onOpen: (UUID, BaseItemKind) -> Unit,
+    modifier: Modifier = Modifier,
+    fallback: @Composable () -> Unit,
+) {
+    val context = LocalContext.current
+    val entry = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java) }
+    val service = remember { entry.searchService() }
+    val art = remember { entry.cinemaArt() }
+    if (!service.enabled) return fallback()
+    DisposableEffect(Unit) { onDispose { art.save() } }
+
+    var query by rememberSaveable { mutableStateOf(initialQuery) }
+    var results by remember { mutableStateOf<TmdbSearch?>(null) }
+    var searching by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    var sheet by remember { mutableStateOf<TmdbItem?>(null) }
+    val scope = rememberCoroutineScope()
+    val firstKey = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { firstKey.requestFocus() } }
+
+    // Search as you type, once typing pauses
+    LaunchedEffect(Unit) {
+        snapshotFlow { query.trim() }.distinctUntilChanged().collectLatest { q ->
+            if (q.length < 2) {
+                results = null
+                searching = false
+                return@collectLatest
+            }
+            delay(300)
+            searching = true
+            failed = false
+            results =
+                try {
+                    service.search(q)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    failed = true
+                    null
+                }
+            searching = false
+            // Look the first results up on the server now, so opening one is instant
+            results?.items?.take(12)?.forEach { launch { runCatching { service.availability(it) } } }
+        }
+    }
+
+    fun open(item: TmdbItem) {
+        scope.launch {
+            when (val a = runCatching { service.availability(item) }.getOrNull()) {
+                is Availability.Library -> {
+                    val kind = if (a.series) BaseItemKind.SERIES else BaseItemKind.MOVIE
+                    DetailsPreview.put(item.toCinemaItem().copy(id = a.itemId, detailsId = a.itemId, kind = kind, detailsKind = kind))
+                    onOpen(a.itemId, kind)
+                }
+                else -> sheet = item
+            }
+        }
+    }
+
+    Box(modifier.fillMaxSize().background(Stage)) {
+        Row(Modifier.fillMaxSize().padding(start = 48.dp, top = 36.dp)) {
+            // ---- keyboard column
+            Column(Modifier.width(300.dp).fillMaxHeight()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Search, contentDescription = null, tint = InkDim, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        query.ifEmpty { "Search" },
+                        color = if (query.isEmpty()) InkDim else Ink,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Color.White.copy(alpha = 0.18f)))
+                Spacer(Modifier.height(16.dp))
+                Keyboard(
+                    firstKey = firstKey,
+                    onKey = { query += it },
+                    onSpace = { if (query.isNotEmpty() && !query.endsWith(" ")) query += " " },
+                    onDelete = { query = query.dropLast(1) },
+                    onClear = { query = "" },
+                )
+                Spacer(Modifier.height(18.dp))
+                // Netflix-style "explore" list: people the search matched
+                results?.people?.filter { p -> p.knownFor.count { it.backdropPath != null } >= 2 }?.take(4)?.takeIf { it.isNotEmpty() }?.let { people ->
+                    Text("Explore titles related to:", color = InkDim, fontSize = 13.sp)
+                    Spacer(Modifier.height(6.dp))
+                    people.forEach { p -> Suggestion(p.name) { query = p.name } }
+                }
+                Spacer(Modifier.weight(1f))
+                Text(TMDB_NOTICE, color = InkDim.copy(alpha = 0.6f), fontSize = 9.sp, lineHeight = 12.sp, modifier = Modifier.padding(bottom = 18.dp, end = 12.dp))
+            }
+            Spacer(Modifier.width(36.dp))
+            // ---- results
+            val r = results
+            val heading: String
+            val cards: List<CinemaItem>
+            val tmdbByKey: Map<String, TmdbItem>
+            when {
+                r != null -> {
+                    // Titles without any art are obscure noise; a streaming app wouldn't show them
+                    val all = (r.items + r.people.flatMap { it.knownFor }).distinctBy { it.key }.filter { it.backdropPath != null }
+                    heading = r.interpretation ?: if (all.isEmpty()) "No results for \"${query.trim()}\"" else "Top Results"
+                    cards = all.map { it.toCinemaItem() }
+                    tmdbByKey = all.associateBy { "tmdb:" + it.key }
+                }
+                query.trim().length >= 2 -> {
+                    heading = if (failed) "Search isn't working right now" else ""
+                    cards = emptyList()
+                    tmdbByKey = emptyMap()
+                }
+                else -> {
+                    heading = "Recommended for You"
+                    cards = homeSuggestions()
+                    tmdbByKey = emptyMap()
+                }
+            }
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+                Text(heading, color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.height(28.dp))
+                AnimatedContent(
+                    targetState = cards,
+                    transitionSpec = { fadeIn(tween(280, delayMillis = 60, easing = CinemaEase)) togetherWith fadeOut(tween(140)) },
+                    contentKey = { list -> list.map { it.key } },
+                    label = "results",
+                ) { list ->
+                    val density = LocalDensity.current
+                    val spec = remember(density) { pivot(with(density) { 12.dp.toPx() }) }
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides spec, LocalArt provides art) {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(3),
+                            contentPadding = PaddingValues(top = 10.dp, end = 48.dp, bottom = 80.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            items(list, key = { it.key }, contentType = { "card" }) { item ->
+                                CinemaCard(
+                                    item,
+                                    onFocused = {},
+                                    onClick = { c ->
+                                        val t = tmdbByKey["tmdb:" + c.tmdbKey()]
+                                        if (t != null) {
+                                            open(t)
+                                        } else {
+                                            DetailsPreview.put(c)
+                                            onOpen(c.detailsId, c.detailsKind)
+                                        }
+                                    },
+                                    width = 166.dp,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (searching && results == null) {
+            Text("Searching…", color = InkDim, fontSize = 14.sp, modifier = Modifier.align(Alignment.TopStart).padding(start = 384.dp, top = 80.dp))
+        }
+    }
+    sheet?.let { TitleSheet(it, service, onDismiss = { sheet = null }) }
+}
+
+private const val KEYS = "abcdefghijklmnopqrstuvwxyz1234567890"
+
+@Composable
+private fun Keyboard(
+    firstKey: FocusRequester,
+    onKey: (String) -> Unit,
+    onSpace: () -> Unit,
+    onDelete: () -> Unit,
+    onClear: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Key("SPACE", width = 146.dp, onClick = onSpace)
+            Key("", icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, width = 70.dp, onClick = onDelete, onLongClick = onClear)
+            Key("CLEAR", width = 70.dp, small = true, onClick = onClear)
+        }
+        KEYS.chunked(6).forEachIndexed { row, chars ->
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                chars.forEachIndexed { col, c ->
+                    Key(
+                        c.toString(),
+                        modifier = if (row == 0 && col == 0) Modifier.focusRequester(firstKey) else Modifier,
+                        onClick = { onKey(c.toString()) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Key(
+    text: String,
+    modifier: Modifier = Modifier,
+    width: Dp = 46.dp,
+    small: Boolean = false,
+    icon: ImageVector? = null,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        onLongClick = onLongClick,
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(4.dp)),
+        colors =
+            ClickableSurfaceDefaults.colors(
+                containerColor = Color.Transparent,
+                contentColor = Ink,
+                focusedContainerColor = Ink,
+                focusedContentColor = Stage,
+            ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        modifier = modifier.width(width).height(40.dp),
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (icon != null) {
+                Icon(icon, contentDescription = "Delete", modifier = Modifier.size(24.dp))
+            } else {
+                Text(text, fontSize = if (small || text.length > 1) 12.sp else 18.sp, fontWeight = FontWeight.Bold, letterSpacing = if (text.length > 1) 1.sp else 0.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Suggestion(
+    text: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(4.dp)),
+        colors = ClickableSurfaceDefaults.colors(containerColor = Color.Transparent, contentColor = InkDim, focusedContainerColor = Ink, focusedContentColor = Stage),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+    }
+}
+
+/** A TMDB result as a card. Its id is a placeholder; clicks map back to the TMDB item. */
+private fun TmdbItem.toCinemaItem(): CinemaItem {
+    val tv = type == TmdbType.TV
+    val placeholder = UUID(0L, (if (tv) 1L shl 40 else 0L) + id)
+    val kind = if (tv) BaseItemKind.SERIES else BaseItemKind.MOVIE
+    return CinemaItem(
+        id = placeholder,
+        kind = kind,
+        detailsId = placeholder,
+        detailsKind = kind,
+        title = title,
+        subtitle = null,
+        meta = listOfNotNull(year?.toString(), if (tv) "Series" else null),
+        rating = null,
+        overview = overview,
+        backdropUrl = backdropUrl(),
+        cardUrl = backdropUrl(780),
+        cardHasTitleArt = false,
+        logoUrl = null,
+        badge = null,
+        resumeMs = 0L,
+        progress = null,
+        tmdbId = id,
+        tmdbTv = tv,
+    )
+}
+
+private fun CinemaItem.tmdbKey(): String = (if (tmdbTv) TmdbType.TV else TmdbType.MOVIE).name + ":" + tmdbId

@@ -103,7 +103,8 @@ fun CinemaDetails(
     DisposableEffect(Unit) { onDispose { art.save() } }
 
     // Back from playback shows the page at once; the Play button's position refreshes quietly
-    var data by remember(itemId) { mutableStateOf(DetailsCache[itemId]) }
+    // ...or, opened from a card, draws from what the card knew while the rest loads
+    var data by remember(itemId) { mutableStateOf(DetailsCache[itemId] ?: DetailsPreview[itemId]?.let { preview(it) }) }
     var error by remember(itemId) { mutableStateOf<String?>(null) }
     LaunchedEffect(itemId) {
         runCatching { repo.details(itemId, kind) }
@@ -118,7 +119,6 @@ fun CinemaDetails(
         when {
             d != null -> CompositionLocalProvider(LocalArt provides art) { DetailsScreen(d, repo, onPlay, onOpen) }
             error != null -> Text(error!!, color = Ink, modifier = Modifier.align(Alignment.Center))
-            else -> Wordmark(Modifier.align(Alignment.Center), size = 34)
         }
     }
 }
@@ -230,7 +230,14 @@ private fun DetailsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                             ) {
                                 items(d.similar, key = { it.key }) { s ->
-                                    CinemaCard(s, onFocused = {}, onClick = { onOpen(it.detailsId, it.detailsKind) })
+                                    CinemaCard(
+                                        s,
+                                        onFocused = {},
+                                        onClick = {
+                                            DetailsPreview.put(it)
+                                            onOpen(it.detailsId, it.detailsKind)
+                                        },
+                                    )
                                 }
                             }
                         }
@@ -261,10 +268,9 @@ private fun Hero(
     }
     Spacer(Modifier.height(18.dp))
     MetaLine(Meta(item.meta, item.rating, d.quality))
-    if (d.genres.isNotEmpty()) {
-        Spacer(Modifier.height(6.dp))
-        Text(d.genres.joinToString("  •  "), color = InkDim, fontSize = 13.sp, maxLines = 1)
-    }
+    // Always takes its line, so the overview doesn't jump when the genres arrive
+    Spacer(Modifier.height(6.dp))
+    Text(d.genres.joinToString("  •  ").ifEmpty { " " }, color = InkDim, fontSize = 13.sp, maxLines = 1)
     Spacer(Modifier.height(14.dp))
     Text(
         item.overview.trim().replace(Regex("\\s+"), " "),
@@ -279,7 +285,7 @@ private fun Hero(
     Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
         val play = d.play
         if (play != null) {
-            HeroButton(play.label, Icons.Filled.PlayArrow, primary = true, modifier = Modifier.focusRequester(playFocus)) { onPlay(play.id, play.positionMs) }
+            HeroButton(play.label, Icons.Filled.PlayArrow, primary = true, modifier = Modifier.focusRequester(playFocus)) { if (!play.pending) onPlay(play.id, play.positionMs) }
             if (play.positionMs > 0) HeroButton("Restart", Icons.Filled.Refresh, primary = false) { onPlay(play.id, 0L) }
         }
         HeroButton(
@@ -484,4 +490,24 @@ private object DetailsCache {
     @Synchronized fun remove(id: UUID) {
         map.remove(id)
     }
+}
+
+/** The page drawn from a card's item before the full details arrive. */
+private fun preview(item: CinemaItem): CinemaDetailsData {
+    val series = item.kind == BaseItemKind.SERIES
+    return CinemaDetailsData(
+        item = item,
+        genres = emptyList(),
+        cast = emptyList(),
+        makers = emptyList(),
+        makersLabel = "",
+        quality = null,
+        favorite = false,
+        series = series,
+        seasons = emptyList(),
+        // A show's Play needs the episode you're up to, so it waits for the load
+        play = PlayTarget(item.id, item.resumeMs, if (item.resumeMs > 0 && !series) "Resume" else "Play", if (series) null else item.progress, null, pending = series),
+        similar = emptyList(),
+        startSeason = null,
+    )
 }

@@ -262,7 +262,7 @@ private fun ResultCard(
 
 /** A title that isn't on the main server: find it on the extra servers and play it there. */
 @Composable
-private fun TitleSheet(
+internal fun TitleSheet(
     item: TmdbItem,
     service: SearchService,
     onDismiss: () -> Unit,

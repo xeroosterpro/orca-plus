@@ -32,6 +32,12 @@ class CinemaArt
 
         val enabled: Boolean get() = search.tmdb.hasKey
 
+        /** Already-known art, readable on the first frame (no flash from server art to TMDB art). */
+        fun cached(
+            tv: Boolean,
+            tmdbId: Int,
+        ): TitleArt? = if (enabled) cache[(if (tv) "tv:" else "movie:") + tmdbId] else null
+
         suspend fun art(
             tv: Boolean,
             tmdbId: Int,

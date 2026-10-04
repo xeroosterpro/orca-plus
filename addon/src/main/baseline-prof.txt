@@ -1,0 +1,4 @@
+# Orca+ baseline profile: pre-compile the addon's code at install, so Cinema mode, the source
+# picker and smart search run at full speed from the first session (no JIT warm-up jank).
+HSPLcom/wholphinplus/sources/**;->**(**)**
+Lcom/wholphinplus/sources/**;

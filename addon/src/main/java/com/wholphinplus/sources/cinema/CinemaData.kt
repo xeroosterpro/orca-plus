@@ -9,6 +9,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.jellyfin.sdk.api.client.extensions.itemsApi
+import org.jellyfin.sdk.api.client.extensions.libraryApi
 import org.jellyfin.sdk.api.client.extensions.tvShowsApi
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
 import org.jellyfin.sdk.api.client.extensions.userViewsApi
@@ -28,6 +29,7 @@ import java.time.LocalDateTime
 import java.util.UUID
 
 /** One title as Cinema mode shows it. Episodes carry their series' art. */
+@androidx.compose.runtime.Immutable
 data class CinemaItem(
     val id: UUID,
     val kind: BaseItemKind,
@@ -53,6 +55,7 @@ data class CinemaItem(
     val key: String get() = "$kind:$id"
 }
 
+@androidx.compose.runtime.Immutable
 data class CinemaRow(
     val title: String,
     val items: List<CinemaItem>,
@@ -65,6 +68,7 @@ data class CinemaLibrary(
     val collectionType: CollectionType?,
 )
 
+@androidx.compose.runtime.Immutable
 data class CinemaHomeData(
     val featured: List<CinemaItem>,
     val rows: List<CinemaRow>,
@@ -177,6 +181,147 @@ internal class CinemaRepository(
             }
         }
 
+    // ------------------------------------------------------------ details page
+
+    suspend fun details(
+        id: UUID,
+        kind: BaseItemKind,
+    ): CinemaDetailsData =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+            val d = api.userLibraryApi.getItem(id, userId).content
+            val series = d.type == BaseItemKind.SERIES
+            coroutineScope {
+                val similar =
+                    async {
+                        safe {
+                            api.libraryApi.getSimilarItems(itemId = id, userId = userId, limit = 16, fields = fields).content.items
+                        }.map(::toItem)
+                    }
+                val seasons =
+                    async {
+                        if (!series) {
+                            emptyList()
+                        } else {
+                            safe { api.tvShowsApi.getSeasons(seriesId = id, userId = userId).content.items }
+                                .map { CinemaSeason(it.id, it.name.orEmpty().ifBlank { "Season ${it.indexNumber}" }, it.indexNumber ?: 0) }
+                                .sortedBy { if (it.number == 0) Int.MAX_VALUE else it.number }
+                        }
+                    }
+                val next =
+                    async {
+                        if (!series) {
+                            null
+                        } else {
+                            safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, seriesId = id, limit = 1, enableResumable = true)).content.items }.firstOrNull()
+                        }
+                    }
+                tmdbOf(d)?.let { if (series) seriesTmdb[d.id] = it }
+                val base = toItem(d)
+                val video = d.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO }
+                    ?: d.mediaSources?.firstOrNull()?.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO }
+                val quality =
+                    listOfNotNull(
+                        video?.let { if ((it.width ?: 0) >= 3800 || (it.height ?: 0) >= 2000) "4K" else if ((it.width ?: 0) >= 1900) "HD" else null },
+                        video?.videoRangeType?.name?.let { r ->
+                            when {
+                                r.startsWith("DOVI") -> "Dolby Vision"
+                                r.startsWith("HDR10_PLUS") -> "HDR10+"
+                                r.startsWith("HDR") || r == "HLG" -> "HDR"
+                                else -> null
+                            }
+                        },
+                    ).joinToString(" · ").ifBlank { null }
+                val people = d.people.orEmpty()
+                // Nothing in progress: start from the very first episode
+                val nextEp =
+                    next.await() ?: if (series) {
+                        safe {
+                            api.tvShowsApi.getEpisodes(org.jellyfin.sdk.model.api.request.GetEpisodesRequest(seriesId = id, userId = userId, limit = 1, isMissing = false)).content.items
+                        }.firstOrNull()
+                    } else {
+                        null
+                    }
+                val play =
+                    if (!series) {
+                        val pos = (d.userData?.playbackPositionTicks ?: 0L) / 10_000L
+                        PlayTarget(d.id, pos, if (pos > 0) "Resume" else "Play", base.progress, remaining(d.runTimeTicks, d.userData?.playbackPositionTicks))
+                    } else if (nextEp != null) {
+                        val pos = (nextEp.userData?.playbackPositionTicks ?: 0L) / 10_000L
+                        val label = "S${nextEp.parentIndexNumber ?: 1}:E${nextEp.indexNumber ?: 1}"
+                        PlayTarget(nextEp.id, pos, if (pos > 0) "Resume $label" else "Play $label", nextEp.userData?.playedPercentage?.let { (it / 100).toFloat() }, remaining(nextEp.runTimeTicks, nextEp.userData?.playbackPositionTicks))
+                    } else {
+                        null
+                    }
+                CinemaDetailsData(
+                    item = base,
+                    genres = d.genres.orEmpty().take(4),
+                    cast = people.filter { it.type == org.jellyfin.sdk.model.api.PersonKind.ACTOR }.take(4).map { it.name.orEmpty() },
+                    makers = people.filter { it.type == org.jellyfin.sdk.model.api.PersonKind.DIRECTOR || it.type == org.jellyfin.sdk.model.api.PersonKind.CREATOR }.take(2).map { it.name.orEmpty() },
+                    makersLabel = if (series) "Created by" else "Director",
+                    quality = quality,
+                    favorite = d.userData?.isFavorite == true,
+                    series = series,
+                    seasons = seasons.await(),
+                    play = play,
+                    similar = similar.await().filter { it.backdropUrl != null || it.cardUrl != null },
+                    startSeason = nextEp?.parentIndexNumber,
+                )
+            }
+        }
+
+    suspend fun episodes(
+        seriesId: UUID,
+        seasonId: UUID,
+    ): List<CinemaEpisode> =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+            safe {
+                api.tvShowsApi.getEpisodes(
+                    org.jellyfin.sdk.model.api.request.GetEpisodesRequest(
+                        seriesId = seriesId,
+                        userId = userId,
+                        seasonId = seasonId,
+                        fields = listOf(ItemFields.OVERVIEW),
+                        enableImageTypes = listOf(ImageType.PRIMARY),
+                        imageTypeLimit = 1,
+                    ),
+                ).content.items
+            }.map { e ->
+                CinemaEpisode(
+                    id = e.id,
+                    number = e.indexNumber ?: 0,
+                    title = e.name.orEmpty(),
+                    overview = e.overview.orEmpty(),
+                    runtime = e.runTimeTicks?.let { "${it / 600_000_000L}m" },
+                    stillUrl = e.imageTags?.get(ImageType.PRIMARY)?.let { image(e.id, "Primary", it, 480) },
+                    progress = e.userData?.playedPercentage?.takeIf { it > 0 }?.let { (it / 100).toFloat() },
+                    played = e.userData?.played == true,
+                    resumeMs = (e.userData?.playbackPositionTicks ?: 0L) / 10_000L,
+                )
+            }
+        }
+
+    suspend fun setFavorite(
+        id: UUID,
+        favorite: Boolean,
+    ) = withContext(Dispatchers.IO) {
+        val userId = userId()
+        if (favorite) api.userLibraryApi.markFavoriteItem(id, userId) else api.userLibraryApi.unmarkFavoriteItem(id, userId)
+    }
+
+    private fun userId(): UUID =
+        hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() } ?: error("Not signed in")
+
+    private fun remaining(
+        runTicks: Long?,
+        posTicks: Long?,
+    ): String? {
+        if (runTicks == null || posTicks == null || posTicks <= 0) return null
+        val min = ((runTicks - posTicks) / 600_000_000L).coerceAtLeast(1)
+        return if (min >= 60) "${min / 60}h ${min % 60}m left" else "${min}m left"
+    }
+
     private suspend fun <T> safe(block: suspend () -> List<T>): List<T> =
         try {
             block()
@@ -284,3 +429,49 @@ internal class CinemaRepository(
             )
     }
 }
+
+@androidx.compose.runtime.Immutable
+data class CinemaSeason(
+    val id: UUID,
+    val name: String,
+    val number: Int,
+)
+
+@androidx.compose.runtime.Immutable
+data class CinemaEpisode(
+    val id: UUID,
+    val number: Int,
+    val title: String,
+    val overview: String,
+    val runtime: String?,
+    val stillUrl: String?,
+    val progress: Float?,
+    val played: Boolean,
+    val resumeMs: Long,
+)
+
+/** What the big Play button plays: the movie, or the episode you're up to. */
+@androidx.compose.runtime.Immutable
+data class PlayTarget(
+    val id: UUID,
+    val positionMs: Long,
+    val label: String,
+    val progress: Float?,
+    val remaining: String?,
+)
+
+@androidx.compose.runtime.Immutable
+data class CinemaDetailsData(
+    val item: CinemaItem,
+    val genres: List<String>,
+    val cast: List<String>,
+    val makers: List<String>,
+    val makersLabel: String,
+    val quality: String?,
+    val favorite: Boolean,
+    val series: Boolean,
+    val seasons: List<CinemaSeason>,
+    val play: PlayTarget?,
+    val similar: List<CinemaItem>,
+    val startSeason: Int?,
+)

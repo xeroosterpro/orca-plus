@@ -182,21 +182,23 @@ index 06607cf9..3afb4d7f 100644
      @Provides
      @Singleton
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
-index 0cf42622..1bc991aa 100644
+index 0cf42622..4cfebe26 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
-@@ -78,7 +78,8 @@ fun ApplicationContent(
+@@ -78,7 +78,10 @@ fun ApplicationContent(
                  key as Destination
                  val contentKey = "${key}_${server?.id}_${user?.id}"
                  NavEntry(key, contentKey = contentKey) {
 -                    if (key.fullScreen) {
 +                    // Orca+: Cinema mode draws its own full-screen home (top menu instead of the side drawer)
-+                    if (key.fullScreen || (key is Destination.Home && com.wholphinplus.sources.cinema.cinemaModeOn())) {
++                    if (key.fullScreen || ((key is Destination.Home ||
++                            (key is Destination.MediaItem && (key.type == org.jellyfin.sdk.model.api.BaseItemKind.MOVIE || key.type == org.jellyfin.sdk.model.api.BaseItemKind.SERIES))) &&
++                            com.wholphinplus.sources.cinema.cinemaModeOn())) {
                          DestinationContent(
                              destination = key,
                              preferences = preferences,
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
-index 63789d6c..b2820c34 100644
+index 63789d6c..fe5c29de 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
 @@ -70,10 +70,33 @@ fun DestinationContent(
@@ -237,7 +239,29 @@ index 63789d6c..b2820c34 100644
          }
  
          is Destination.HomeSettings -> {
-@@ -364,11 +387,23 @@ fun DestinationContent(
+@@ -144,6 +167,21 @@ fun DestinationContent(
+         }
+ 
+         is Destination.MediaItem -> {
++            // Orca+: Cinema mode title page for movies and shows
++            if (com.wholphinplus.sources.cinema.cinemaModeOn() &&
++                (destination.type == BaseItemKind.MOVIE || destination.type == BaseItemKind.SERIES)
++            ) {
++                val nav: com.github.damontecres.wholphin.ui.search.SearchViewModel =
++                    androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++                com.wholphinplus.sources.cinema.CinemaDetails(
++                    itemId = destination.itemId,
++                    kind = destination.type,
++                    onPlay = { id, positionMs -> nav.navigateTo(Destination.Playback(id, positionMs)) },
++                    onOpen = { id, kind -> nav.navigateTo(Destination.MediaItem(id, kind)) },
++                    modifier = modifier,
++                )
++                return
++            }
+             when (destination.type) {
+                 BaseItemKind.SERIES -> {
+                     SeriesDetails(
+@@ -364,11 +402,23 @@ fun DestinationContent(
  
          is Destination.Search -> {
              LaunchedEffect(Unit) { onClearBackdrop.invoke() }

@@ -61,6 +61,17 @@ data class TmdbEpisode(
     val stillPath: String?,
 )
 
+@kotlinx.serialization.Serializable
+data class TitleArt(
+    val logo: String? = null,
+    val titledBackdrop: String? = null,
+    val cleanBackdrop: String? = null,
+) {
+    fun logoUrl(): String? = logo?.let { "https://image.tmdb.org/t/p/w500$it" }
+
+    fun cardUrl(): String? = titledBackdrop?.let { "https://image.tmdb.org/t/p/w780$it" }
+}
+
 data class TmdbIds(
     val imdb: String?,
     val tvdb: Int?,
@@ -160,6 +171,25 @@ class TmdbClient(
     fun externalIds(item: TmdbItem): TmdbIds {
         val o = get("${if (item.type == TmdbType.TV) "tv" else "movie"}/${item.id}/external_ids")
         return TmdbIds(o.string("imdb_id").ifBlank { null }, o.int("tvdb_id"))
+    }
+
+    /**
+     * Title art for streaming-style cards: the best English (or language-free) title logo, and a
+     * backdrop with the title baked in (TMDB tags those with a language). Paths, not URLs.
+     */
+    fun titleArt(
+        tv: Boolean,
+        id: Int,
+    ): TitleArt {
+        val o = get("${if (tv) "tv" else "movie"}/$id/images", "include_image_language" to "en,null")
+        fun best(list: List<JsonObject>) = list.sortedByDescending { it.string("vote_average").toDoubleOrNull() ?: 0.0 }.firstOrNull()?.string("file_path")
+        val logos = o.objects("logos")
+        val backdrops = o.objects("backdrops")
+        return TitleArt(
+            logo = best(logos.filter { it.string("iso_639_1") == "en" }) ?: best(logos),
+            titledBackdrop = best(backdrops.filter { it.string("iso_639_1") == "en" }),
+            cleanBackdrop = best(backdrops.filter { it.string("iso_639_1").isBlank() }),
+        )
     }
 
     fun seasons(tvId: Int): List<TmdbSeason> =

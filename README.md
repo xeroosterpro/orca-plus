@@ -40,6 +40,7 @@
 | **Smart search**: typos, actors, *"movies like …"*, *"best horror movies"* | | ✓ |
 | Play titles that exist **only on your other servers** | | ✓ |
 | **Home rows from Trakt and MDBList**, kept up to date | | ✓ |
+| **Cinema mode**: a big-screen streaming home with title art, switchable any time | | ✓ |
 | Installs alongside Wholphin and updates itself | | ✓ |
 
 <br>
@@ -83,6 +84,18 @@ everything Orca+ adds.
 <br>
 
 ## ◆ Features
+
+### Cinema mode
+
+Switch on **Cinema mode** (Settings → Orca+) for a streaming-style home. A featured billboard
+rotates through new arrivals with **Play** and **More Info**. Below it are wide cards with title
+art. As you browse, the backdrop, title logo and details of the focused title fade in at the top.
+Title logos and title-art tiles come from TMDB when your server doesn't have them. Switch it off
+any time for the classic home.
+
+<p align="center"><img src="docs/screenshots/cinema.jpg" alt="Cinema mode: Zootopia 2 focused, with its title logo and backdrop above rows of title-art cards" width="88%"></p>
+
+<br>
 
 ### Every copy, one choice
 

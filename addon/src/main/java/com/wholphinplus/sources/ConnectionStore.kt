@@ -33,6 +33,16 @@ class ConnectionStore
 
         private val _tmdbKey = MutableStateFlow(decrypt(prefs.getString(TMDB_KEY, "").orEmpty()))
 
+        private val _cinemaMode = MutableStateFlow(prefs.getBoolean(CINEMA_KEY, false))
+
+        /** Cinema mode: the big-screen streaming home instead of Wholphin's home page. */
+        val cinemaMode: StateFlow<Boolean> = _cinemaMode.asStateFlow()
+
+        fun setCinemaMode(on: Boolean) {
+            prefs.edit().putBoolean(CINEMA_KEY, on).apply()
+            _cinemaMode.value = on
+        }
+
         /** The user's own TMDB API key, for smart search. Empty = Wholphin's normal search. */
         val tmdbKey: StateFlow<String> = _tmdbKey.asStateFlow()
 
@@ -118,6 +128,7 @@ class ConnectionStore
         private companion object {
             const val KEY = "connections_v1"
             const val TMDB_KEY = "tmdb_key_v1"
+            const val CINEMA_KEY = "cinema_mode"
             const val ALIAS = "wholphinplus_sources_v1"
             const val PREFIX = "enc1:"
         }

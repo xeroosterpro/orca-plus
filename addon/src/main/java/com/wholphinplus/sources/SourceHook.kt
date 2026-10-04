@@ -52,7 +52,7 @@ class SourceHook
     @Inject
     constructor(
         @param:ApplicationContext private val context: Context,
-        private val jellyfin: ApiClient,
+        internal val jellyfin: ApiClient,
         val store: ConnectionStore,
         internal val overlay: ProgressOverlay,
         val collections: HomeCollections,

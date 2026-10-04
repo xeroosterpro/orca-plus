@@ -181,11 +181,63 @@ index 06607cf9..3afb4d7f 100644
  
      @Provides
      @Singleton
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
+index 0cf42622..1bc991aa 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
+@@ -78,7 +78,8 @@ fun ApplicationContent(
+                 key as Destination
+                 val contentKey = "${key}_${server?.id}_${user?.id}"
+                 NavEntry(key, contentKey = contentKey) {
+-                    if (key.fullScreen) {
++                    // Orca+: Cinema mode draws its own full-screen home (top menu instead of the side drawer)
++                    if (key.fullScreen || (key is Destination.Home && com.wholphinplus.sources.cinema.cinemaModeOn())) {
+                         DestinationContent(
+                             destination = key,
+                             preferences = preferences,
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
-index 63789d6c..32097013 100644
+index 63789d6c..b2820c34 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
-@@ -364,11 +364,23 @@ fun DestinationContent(
+@@ -70,10 +70,33 @@ fun DestinationContent(
+     }
+     when (destination) {
+         is Destination.Home -> {
+-            HomePage(
+-                preferences = preferences,
+-                modifier = modifier,
+-            )
++            // Orca+: Cinema mode home when it's switched on in Settings → Orca+
++            if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++                val nav: com.github.damontecres.wholphin.ui.search.SearchViewModel =
++                    androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++                com.wholphinplus.sources.cinema.CinemaHome(
++                    onOpen = { id, kind -> nav.navigateTo(Destination.MediaItem(id, kind)) },
++                    onPlay = { id, positionMs -> nav.navigateTo(Destination.Playback(id, positionMs)) },
++                    onNavigate = { target ->
++                        nav.navigateTo(
++                            when (target) {
++                                is com.wholphinplus.sources.cinema.CinemaNav.Library ->
++                                    Destination.MediaItem(target.id, target.kind, target.collectionType)
++                                com.wholphinplus.sources.cinema.CinemaNav.MyList -> Destination.Favorites
++                                com.wholphinplus.sources.cinema.CinemaNav.Search -> Destination.Search()
++                                com.wholphinplus.sources.cinema.CinemaNav.Settings ->
++                                    Destination.Settings(com.github.damontecres.wholphin.ui.preferences.PreferenceScreenOption.BASIC)
++                            },
++                        )
++                    },
++                    modifier = modifier,
++                )
++            } else {
++                HomePage(
++                    preferences = preferences,
++                    modifier = modifier,
++                )
++            }
+         }
+ 
+         is Destination.HomeSettings -> {
+@@ -364,11 +387,23 @@ fun DestinationContent(
  
          is Destination.Search -> {
              LaunchedEffect(Unit) { onClearBackdrop.invoke() }

@@ -65,6 +65,8 @@ interface SourcesEntryPoint {
     fun sourceHook(): SourceHook
 
     fun searchService(): com.wholphinplus.sources.SearchService
+
+    fun cinemaArt(): com.wholphinplus.sources.cinema.CinemaArt
 }
 
 private fun Context.sourceHook(): SourceHook = EntryPointAccessors.fromApplication(applicationContext, SourcesEntryPoint::class.java).sourceHook()
@@ -511,6 +513,18 @@ private fun MenuScreen(
             MenuItem("Search", if (tmdb.isBlank()) "Wholphin's search  ·  add a TMDB key for smart search" else "Smart search is on") {
                 go(Screen.TmdbKey)
             }
+        }
+        item {
+            val cinema by hook.store.cinemaMode.collectAsState()
+            PlusListItem(
+                onClick = { hook.store.setCinemaMode(!cinema) },
+                headlineContent = { Text("Cinema mode", style = MaterialTheme.typography.titleMedium) },
+                supportingContent = {
+                    Text(if (cinema) "On: big-screen streaming home with a featured billboard and wide rows" else "Off: Wholphin's classic home")
+                },
+                trailingContent = { androidx.tv.material3.Switch(checked = cinema, onCheckedChange = null) },
+                modifier = Modifier.width(720.dp),
+            )
         }
         item {
             MenuItem(

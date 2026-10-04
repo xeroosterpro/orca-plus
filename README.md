@@ -17,6 +17,7 @@
 
 <p align="center">
   <a href="#-install"><b>Install</b> (Downloader code 3075012)</a> &nbsp;·&nbsp;
+  <a href="#-updates"><b>Updates</b></a> &nbsp;·&nbsp;
   <a href="#-features"><b>Features</b></a> &nbsp;·&nbsp;
   <a href="#-setup"><b>Setup</b></a> &nbsp;·&nbsp;
   <a href="#-faq"><b>FAQ</b></a> &nbsp;·&nbsp;
@@ -66,6 +67,18 @@ Works on Android TV, Google TV, NVIDIA Shield and Fire TV.
 
 The link always delivers the newest version. Wholphin+ runs **next to** Wholphin rather than
 replacing it, and offers its own updates from then on.
+
+<br>
+
+## ◆ Updates
+
+Wholphin+ stays in step with Wholphin automatically. When Wholphin releases a new version, a new
+Wholphin+ is built from it and published within a few hours: Wholphin's latest improvements, plus
+everything Wholphin+ adds.
+
+- **Already installed?** Wholphin+ tells you when an update is ready (*Install update* at the top of
+  Settings). One click and you're current.
+- **New install?** Downloader code `3075012` always gets the newest version.
 
 <br>
 
@@ -198,7 +211,9 @@ Wholphin+ is designed to keep pace with Wholphin rather than fork away from it.
 - **`addon/`** holds every Wholphin+ feature as a separate module.
 - **`hooks.patch`** is the only change to Wholphin itself: about 120 lines across a dozen files.
 - **`build.sh`** checks out a Wholphin release, applies the patch and builds.
-- **GitHub Actions** runs it automatically whenever Wholphin publishes a new version.
+- **GitHub Actions** runs it automatically whenever Wholphin publishes a new version. If a Wholphin
+  release reworks the code around one of the hooks, that build stops (nothing already released is
+  affected) until `hooks.patch` is updated.
 
 <details>
 <summary><b>Build it yourself</b></summary>

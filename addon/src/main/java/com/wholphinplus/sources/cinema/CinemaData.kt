@@ -107,7 +107,14 @@ internal class CinemaRepository(
         )
     private val images = listOf(ImageType.PRIMARY, ImageType.BACKDROP, ImageType.THUMB, ImageType.LOGO)
 
-    suspend fun load(): CinemaHomeData =
+    /**
+     * The home page. [onFirst] gets it without the genre rows as soon as the quick rows are in:
+     * the genre rows come from one random 500-title pool, the slowest request by far (~1.4 s of
+     * the ~1.75 s on Silo, which shuffles the whole library for it), so they're added after.
+     */
+    suspend fun load(onFirst: (CinemaHomeData) -> Unit = {}): CinemaHomeData = timed("home", onFirst) { first -> loadHome(first) }
+
+    private suspend fun loadHome(onFirst: (CinemaHomeData) -> Unit): CinemaHomeData =
         withContext(Dispatchers.IO) {
             val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() }
                 ?: error("Not signed in")
@@ -150,10 +157,7 @@ internal class CinemaRepository(
                 val cw = (resume.await() + nextUp.await()).distinctBy { it.seriesId ?: it.id }
                 // Episodes borrow their series' TMDB id for title art
                 val seriesIds = cw.mapNotNull { it.seriesId }.distinct()
-                // One by one: some servers only honour the first id of a multi-id request
-                seriesIds.take(30).map { id ->
-                    async { runCatching { api.userLibraryApi.getItem(id, userId).content }.getOrNull() }
-                }.awaitAll().filterNotNull().forEach { s -> tmdbOf(s)?.let { seriesTmdb[s.id] = it } }
+                fillSeriesTmdb(cw, userId)
                 val continueWatching = cw.map(::toItem)
                 val latestRows =
                     latest.awaitAll().map { (lib, items) ->
@@ -162,12 +166,11 @@ internal class CinemaRepository(
                             items.map(::toItem),
                         )
                     }
-                val rows =
+                val quickRows =
                     buildList {
                         add(CinemaRow(continueTitle(userId), continueWatching))
                         lists.awaitAll().forEach { (name, items) -> add(listRow(name, items)) }
                         addAll(latestRows)
-                        addAll(genreRows(pool.await(), GENRE_ROWS, 5))
                     }.filter { it.items.isNotEmpty() }
 
                 // The billboard: recent titles that have both a backdrop and title art
@@ -178,8 +181,11 @@ internal class CinemaRepository(
                         .distinctBy { it.detailsId }
                         .shuffled()
                         .take(6)
-                        .ifEmpty { rows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
+                        .ifEmpty { quickRows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
 
+                // Show the page now; the genre rows join at the bottom (same billboard, no jump)
+                onFirst(ranked(CinemaHomeData(featured, quickRows, showLibs.firstOrNull(), movieLibs.firstOrNull())))
+                val rows = quickRows + genreRows(pool.await(), GENRE_ROWS, 5)
                 ranked(CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull()))
             }
         }
@@ -187,7 +193,16 @@ internal class CinemaRepository(
     // ------------------------------------------------------------ Shows / Movies / My List tabs
 
     /** A Shows or Movies page: the home's layout, every row narrowed to one kind of title. */
-    suspend fun loadKind(series: Boolean): CinemaHomeData =
+    /** A Shows or Movies page; like [load], [onFirst] gets it before the genre rows. */
+    suspend fun loadKind(
+        series: Boolean,
+        onFirst: (CinemaHomeData) -> Unit = {},
+    ): CinemaHomeData = timed(if (series) "shows" else "movies", onFirst) { first -> loadKindNow(series, first) }
+
+    private suspend fun loadKindNow(
+        series: Boolean,
+        onFirst: (CinemaHomeData) -> Unit,
+    ): CinemaHomeData =
         withContext(Dispatchers.IO) {
             val userId = userId()
             val kind = if (series) BaseItemKind.SERIES else BaseItemKind.MOVIE
@@ -234,12 +249,11 @@ internal class CinemaRepository(
                         CinemaRow(if (series) "New Episodes in ${lib.name}" else "Recently Added in ${lib.name}", items.map(::toItem))
                     }
                 val fresh = CinemaRow("New Releases", newReleases.await().map(::toItem))
-                val rows =
+                val quickRows =
                     buildList {
                         add(CinemaRow(continueTitle(userId), cw.map(::toItem)))
                         add(fresh)
                         addAll(latestRows)
-                        addAll(genreRows(pool.await(), if (series) SHOW_GENRES else MOVIE_GENRES, 8))
                     }.filter { it.items.isNotEmpty() }.distinctBy { it.title }
 
                 val featured =
@@ -248,8 +262,12 @@ internal class CinemaRepository(
                         .distinctBy { it.detailsId }
                         .shuffled()
                         .take(6)
-                        .ifEmpty { rows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
-                ranked(CinemaHomeData(featured, rows, libs.firstOrNull { it.collectionType == CollectionType.TVSHOWS }, libs.firstOrNull { it.collectionType == CollectionType.MOVIES }))
+                        .ifEmpty { quickRows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
+                val showLib = libs.firstOrNull { it.collectionType == CollectionType.TVSHOWS }
+                val movieLib = libs.firstOrNull { it.collectionType == CollectionType.MOVIES }
+                onFirst(ranked(CinemaHomeData(featured, quickRows, showLib, movieLib)))
+                val rows = (quickRows + genreRows(pool.await(), if (series) SHOW_GENRES else MOVIE_GENRES, 8)).distinctBy { it.title }
+                ranked(CinemaHomeData(featured, rows, showLib, movieLib))
             }
         }
 
@@ -401,15 +419,38 @@ internal class CinemaRepository(
             .take(max)
     }
 
-    /** Episodes borrow their series' TMDB id for title art; fetched one by one (see load). */
+    /**
+     * Episodes borrow their series' TMDB id for title art. All the series in one request (it
+     * holds up the page, so it used to be up to 30 one-by-one lookups); any the answer leaves
+     * out are asked for alone.
+     */
     private suspend fun fillSeriesTmdb(
         items: List<BaseItemDto>,
         userId: UUID,
     ) = coroutineScope {
-        items.mapNotNull { it.seriesId }.distinct().filter { !seriesTmdb.containsKey(it) }.take(30).map { id ->
+        val ids = items.mapNotNull { it.seriesId }.distinct().filter { !seriesTmdb.containsKey(it) }.take(30)
+        if (ids.isEmpty()) return@coroutineScope
+        val got = runCatching { itemsByIds(ids, userId, "ProviderIds") }.getOrDefault(emptyList())
+        got.forEach { s -> tmdbOf(s)?.let { seriesTmdb[s.id] = it } }
+        val missing = ids - got.map { it.id }.toSet()
+        missing.map { id ->
             async { runCatching { api.userLibraryApi.getItem(id, userId).content }.getOrNull() }
         }.awaitAll().filterNotNull().forEach { s -> tmdbOf(s)?.let { seriesTmdb[s.id] = it } }
     }
+
+    /**
+     * Several items by id in one request. The ids go as one comma-joined value: the SDK repeats
+     * the parameter per id and some servers (Silo) read only the first copy.
+     */
+    private suspend fun itemsByIds(
+        ids: List<UUID>,
+        userId: UUID,
+        fields: String,
+    ): List<BaseItemDto> =
+        api.get<org.jellyfin.sdk.model.api.BaseItemDtoQueryResult>(
+            "/Items",
+            queryParameters = mapOf("userId" to userId, "ids" to ids.joinToString(","), "fields" to fields, "enableImages" to false, "limit" to ids.size),
+        ).content.items
 
     // ------------------------------------------------------------ details page
 
@@ -551,20 +592,7 @@ internal class CinemaRepository(
         withContext(Dispatchers.IO) {
             if (ids.isEmpty()) return@withContext emptyMap()
             val started = System.currentTimeMillis()
-            // One comma-joined ids value: the SDK repeats the parameter per id, and the server
-            // reads only the first copy (that's the "only honours the first id" quirk)
-            val items =
-                api.get<org.jellyfin.sdk.model.api.BaseItemDtoQueryResult>(
-                    "/Items",
-                    queryParameters =
-                        mapOf(
-                            "userId" to userId(),
-                            "ids" to ids.joinToString(","),
-                            "fields" to "MediaStreams",
-                            "enableImages" to false,
-                            "limit" to ids.size,
-                        ),
-                ).content.items
+            val items = itemsByIds(ids, userId(), "MediaStreams")
             Timber.i("Cinema badges: %d of %d titles in one request, %d ms", items.size, ids.size, System.currentTimeMillis() - started)
             items.associate { it.id to streamTags(it.mediaStreams) }
         }
@@ -575,6 +603,22 @@ internal class CinemaRepository(
     ) = withContext(Dispatchers.IO) {
         val userId = userId()
         if (favorite) api.userLibraryApi.markFavoriteItem(id, userId) else api.userLibraryApi.unmarkFavoriteItem(id, userId)
+    }
+
+    /** Logs how long a page took to show (first rows) and to finish, for performance checks. */
+    private suspend fun timed(
+        page: String,
+        onFirst: (CinemaHomeData) -> Unit,
+        block: suspend ((CinemaHomeData) -> Unit) -> CinemaHomeData,
+    ): CinemaHomeData {
+        val started = System.currentTimeMillis()
+        val d =
+            block { first ->
+                Timber.i("Cinema load %s: first rows in %d ms (%d rows)", page, System.currentTimeMillis() - started, first.rows.size)
+                onFirst(first)
+            }
+        Timber.i("Cinema load %s: done in %d ms, %d rows, %d titles", page, System.currentTimeMillis() - started, d.rows.size, d.rows.sumOf { it.items.size })
+        return d
     }
 
     private fun userId(): UUID =

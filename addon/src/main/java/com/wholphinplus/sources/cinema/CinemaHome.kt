@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -153,27 +154,41 @@ fun CinemaHome(
     val overlays by hook.store.overlays.collectAsState()
     LaunchedEffect(tab) {
         if (tab != CinemaTab.MY_LIST && pages[tab] != null && System.currentTimeMillis() - (TabCache.at[tab] ?: 0L) < 2 * 60_000) return@LaunchedEffect
+        // Warm the title art and badge facts for what's on screen first (badges: a few requests
+        // per row, batched by the server, not one per card)
+        fun warm(d: CinemaHomeData) {
+            d.rows.forEach { row -> row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } } }
+            if (overlays.needsStreams) {
+                d.rows.forEach { row ->
+                    launch { StreamCache.prefetch(row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }, repo::streamTagsBatch) }
+                }
+            }
+        }
+        // A first visit shows the quick rows at once; the genre rows join when they arrive
+        var partial = false
+        val onFirst = { first: CinemaHomeData ->
+            launch {
+                if (pages[tab] == null) {
+                    pages[tab] = first
+                    partial = true
+                }
+                warm(first)
+            }
+            Unit
+        }
         runCatching {
             when (tab) {
-                CinemaTab.HOME -> repo.load()
-                CinemaTab.SHOWS -> repo.loadKind(series = true)
-                CinemaTab.MOVIES -> repo.loadKind(series = false)
+                CinemaTab.HOME -> repo.load(onFirst)
+                CinemaTab.SHOWS -> repo.loadKind(series = true, onFirst = onFirst)
+                CinemaTab.MOVIES -> repo.loadKind(series = false, onFirst = onFirst)
                 CinemaTab.NEW_POPULAR -> repo.loadNewPopular()
                 CinemaTab.MY_LIST -> CinemaHomeData(emptyList(), listOf(CinemaRow("My List", repo.myList())), null, null)
             }
         }.onSuccess {
             TabCache.data[tab] = it
             TabCache.at[tab] = System.currentTimeMillis()
-            if (pages[tab] == null || tab == CinemaTab.MY_LIST) pages[tab] = it
-            // Warm the title-art cache for what's on screen first
-            it.rows.forEach { row -> row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } } }
-            // And the badge facts for those cards, so badges arrive with the cards
-            // One request per row (the server batches it), not one per card
-            if (overlays.needsStreams) {
-                it.rows.forEach { row ->
-                    launch { StreamCache.prefetch(row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }, repo::streamTagsBatch) }
-                }
-            }
+            if (pages[tab] == null || partial || tab == CinemaTab.MY_LIST) pages[tab] = it
+            warm(it)
         }.onFailure { if (pages[tab] == null) error = it.message ?: "Couldn't load your library" }
     }
     // Once Home is up, quietly load Shows and Movies so switching tabs is instant
@@ -273,7 +288,9 @@ private fun CinemaScreen(
     // Read only in layout/draw, so the animation never recomposes the screen.
     // The first row (Continue Watching) still shows the full billboard for the focused card;
     // it rolls up from the second row down
-    val roll = animateFloatAsState(if (rollUp && !focus.billboard && focus.row >= 1) 1f else 0f, tween(320, easing = CinemaEase), label = "roll")
+    // Derived so moving between rows only recomposes when "rolled" actually flips, not on every row
+    val rolled by remember(rollUp) { derivedStateOf { rollUp && !focus.billboard && focus.row >= 1 } }
+    val roll = animateFloatAsState(if (rolled) 1f else 0f, tween(320, easing = CinemaEase), label = "roll")
     // 1 while the buttons are hidden (browsing rows): the panel drops their space so the first
     // row moves up instead of leaving a gap
     val noButtons = animateFloatAsState(if (focus.billboard) 0f else 1f, tween(320, easing = CinemaEase), label = "noButtons")
@@ -305,7 +322,8 @@ private fun CinemaScreen(
     // Back, or Up from the first row: bring the buttons back first. They aren't on screen while
     // browsing, so they can only take focus a frame after the billboard returns (otherwise Up
     // skips past them to the top menu and the billboard stays rolled up)
-    val toBillboard = {
+    val toBillboard = remember(focus, scope, playFocus, columnState) {
+        {
         focus.billboard = true
         scope.launch {
             // Retry each frame until Play is attached and actually takes focus (up to ~0.5 s)
@@ -316,15 +334,19 @@ private fun CinemaScreen(
             columnState.animateScrollToItem(0)
         }
         Unit
+        }
     }
     BackHandler(enabled = !focus.billboard) { toBillboard() }
+    // Remembered: a new modifier each pass would recompose the first row on every key press
     val upToBillboard =
-        Modifier.onPreviewKeyEvent {
-            if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionUp && !focus.billboard) {
-                toBillboard()
-                true
-            } else {
-                false
+        remember(focus, toBillboard) {
+            Modifier.onPreviewKeyEvent {
+                if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionUp && !focus.billboard) {
+                    toBillboard()
+                    true
+                } else {
+                    false
+                }
             }
         }
 

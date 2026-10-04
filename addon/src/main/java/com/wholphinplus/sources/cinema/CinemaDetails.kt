@@ -170,7 +170,7 @@ private fun DetailsScreen(
     var favorite by remember(d) { mutableStateOf(d.favorite) }
 
     Box(Modifier.fillMaxSize()) {
-        StableBackdrop(item.backdropUrl ?: art?.cleanBackdrop?.let { "https://image.tmdb.org/t/p/w1280$it" }, drift = true, widthFraction = 0.78f, heightFraction = 0.9f)
+        StableBackdrop(item.backdropUrl ?: art?.cleanBackdrop?.let { "https://image.tmdb.org/t/p/w1280$it" }, drift = true, widthFraction = 0.84f, heightFraction = 1f)
         // Below the hero the art sinks back so episode text stays readable
         val dim by animateFloatAsState(if (focus.hero) 0f else 0.78f, tween(420, easing = CinemaEase), label = "dim")
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = dim }.background(Stage))

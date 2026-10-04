@@ -3,6 +3,7 @@ package com.wholphinplus.sources.cinema
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -200,6 +201,8 @@ private fun CinemaScreen(
         }
     }
     BackHandler(enabled = !focus.billboard) {
+        focus.billboard = true
+        focus.focused = null
         scope.launch { columnState.animateScrollToItem(0) }
         runCatching { playFocus.requestFocus() }
     }
@@ -210,10 +213,13 @@ private fun CinemaScreen(
     val rowSpec = remember(density) { pivot(with(density) { 40.dp.toPx() }) }
     val cardSpec = remember(density) { pivot(with(density) { 48.dp.toPx() }) }
 
+    val rowDim by animateFloatAsState(if (focus.billboard) 0f else 0.42f, tween(420, easing = CinemaEase), label = "rowDim")
+
     Box(Modifier.fillMaxSize()) {
         StableBackdrop(shown?.backdropUrl, drift = focus.billboard)
+        Box(Modifier.fillMaxSize().background(Stage.copy(alpha = rowDim)))
         Column(Modifier.fillMaxSize()) {
-            TopNav(data, onNavigate)
+            TopNav(data, onNavigate, scrim = !focus.billboard)
             InfoPanel(
                 item = shown,
                 billboard = focus.billboard,
@@ -242,9 +248,18 @@ private fun CinemaScreen(
 private fun TopNav(
     data: CinemaHomeData,
     onNavigate: (CinemaNav) -> Unit,
+    scrim: Boolean = false,
 ) {
-    Row(
-        Modifier.fillMaxWidth().padding(start = 48.dp, end = 40.dp, top = 18.dp),
+    Box(Modifier.fillMaxWidth()) {
+        if (scrim) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background(Brush.verticalGradient(0f to Stage.copy(alpha = 0.92f), 0.65f to Stage.copy(alpha = 0.55f), 1f to Color.Transparent)),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(start = 48.dp, end = 40.dp, top = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -256,6 +271,7 @@ private fun TopNav(
         Spacer(Modifier.weight(1f))
         NavIcon(Icons.Filled.Search, "Search") { onNavigate(CinemaNav.Search) }
         NavIcon(Icons.Filled.Settings, "Settings") { onNavigate(CinemaNav.Settings) }
+        }
     }
 }
 
@@ -353,15 +369,17 @@ private fun CinemaRowView(
     onItemFocused: (CinemaItem) -> Unit,
     onItemClick: (CinemaItem) -> Unit,
 ) {
+    val wideRow = row.title == "Continue Watching"
+    val cardWidth = if (wideRow) 292.dp else 208.dp
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(row.title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 48.dp))
+        Text(row.title, color = Ink, fontSize = if (wideRow) 20.sp else 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 48.dp))
         CompositionLocalProvider(LocalBringIntoViewSpec provides cardSpec) {
             LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (wideRow) 12.dp else 10.dp),
                 contentPadding = PaddingValues(start = 48.dp, end = 400.dp, top = 8.dp, bottom = 8.dp),
             ) {
                 items(row.items, key = { it.key }, contentType = { "card" }) { item ->
-                    CinemaCard(item, onItemFocused, onItemClick)
+                    CinemaCard(item, onItemFocused, onItemClick, width = cardWidth)
                 }
             }
         }
@@ -391,8 +409,9 @@ internal fun CinemaCard(
     ) {
         Box(Modifier.fillMaxSize()) {
             if (url != null) {
-                // Decoded at card size: small, fast, and cached for the next visit
-                AsyncImage(model = request(context, url, 416, 234), contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                val w = width.value.toInt().coerceAtLeast(208)
+                val h = (w * 9 / 16).coerceAtLeast(117)
+                AsyncImage(model = request(context, url, w, h), contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             }
             if (titled == null && !item.cardHasTitleArt) {
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.85f))))

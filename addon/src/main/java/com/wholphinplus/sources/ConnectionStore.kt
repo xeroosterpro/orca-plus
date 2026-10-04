@@ -43,6 +43,30 @@ class ConnectionStore
             _cinemaMode.value = on
         }
 
+        private val _cinemaRollUp = MutableStateFlow(prefs.getBoolean(ROLL_UP_KEY, true))
+
+        /** Cinema mode: shrink the billboard to a quarter while browsing rows, for more room. */
+        val cinemaRollUp: StateFlow<Boolean> = _cinemaRollUp.asStateFlow()
+
+        fun setCinemaRollUp(on: Boolean) {
+            prefs.edit().putBoolean(ROLL_UP_KEY, on).apply()
+            _cinemaRollUp.value = on
+        }
+
+        private val _overlays =
+            MutableStateFlow(
+                runCatching { json.decodeFromString<com.wholphinplus.sources.cinema.PosterOverlays>(prefs.getString(OVERLAYS_KEY, null) ?: "") }
+                    .getOrDefault(com.wholphinplus.sources.cinema.PosterOverlays()),
+            )
+
+        /** Cinema mode's poster overlays: quality, HDR, audio, rating, Top 10 and watched badges. */
+        val overlays: StateFlow<com.wholphinplus.sources.cinema.PosterOverlays> = _overlays.asStateFlow()
+
+        fun setOverlays(o: com.wholphinplus.sources.cinema.PosterOverlays) {
+            prefs.edit().putString(OVERLAYS_KEY, json.encodeToString(o)).apply()
+            _overlays.value = o
+        }
+
         /** The user's own TMDB API key, for smart search. Empty = Wholphin's normal search. */
         val tmdbKey: StateFlow<String> = _tmdbKey.asStateFlow()
 
@@ -129,6 +153,8 @@ class ConnectionStore
             const val KEY = "connections_v1"
             const val TMDB_KEY = "tmdb_key_v1"
             const val CINEMA_KEY = "cinema_mode"
+            const val ROLL_UP_KEY = "cinema_roll_up"
+            const val OVERLAYS_KEY = "poster_overlays"
             const val ALIAS = "wholphinplus_sources_v1"
             const val PREFIX = "enc1:"
         }

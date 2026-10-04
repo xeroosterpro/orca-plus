@@ -151,6 +151,9 @@ private sealed interface Screen {
     ) : Screen
 
     data object TmdbKey : Screen
+
+    /** Cinema mode's poster overlays. */
+    data object Overlays : Screen
 }
 
 @Composable
@@ -165,7 +168,7 @@ private fun ExtraSourcesScreen(
         screen =
             when (screen) {
                 Screen.Menu -> return@BackHandler onClose()
-                Screen.List, Screen.TmdbKey, Screen.Collections -> Screen.Menu
+                Screen.List, Screen.TmdbKey, Screen.Collections, Screen.Overlays -> Screen.Menu
                 Screen.AddCollection, is Screen.Collection, Screen.TraktKey -> Screen.Collections
                 else -> Screen.List
             }
@@ -204,6 +207,7 @@ private fun ExtraSourcesScreen(
             when (screen) {
                 Screen.Menu -> "Orca+" to "Everything Orca+ adds to Wholphin. Press Back to leave."
                 Screen.TmdbKey -> "Search" to "Smart search."
+                Screen.Overlays -> "Poster overlays" to "Badges on every poster and card in Cinema mode. Quality badges show for movies once the server knows the file."
                 Screen.Collections, Screen.AddCollection, is Screen.Collection, Screen.TraktKey ->
                     "Home collections" to "Trakt and MDBList lists as rows on your home screen. They follow the list as it changes " +
                         "(checked every 6 hours) and show the titles you have on your Jellyfin server."
@@ -220,6 +224,8 @@ private fun ExtraSourcesScreen(
             Screen.Menu -> MenuScreen(hook) { screen = it }
 
             Screen.Collections -> CollectionsScreen(hook) { screen = it }
+
+            Screen.Overlays -> OverlaysScreen(hook)
 
             Screen.AddCollection -> AddCollectionScreen(hook, onDone = { screen = Screen.Collections })
 
@@ -527,6 +533,39 @@ private fun MenuScreen(
             )
         }
         item {
+            val cinema by hook.store.cinemaMode.collectAsState()
+            val rollUp by hook.store.cinemaRollUp.collectAsState()
+            if (cinema) {
+                PlusListItem(
+                    onClick = { hook.store.setCinemaRollUp(!rollUp) },
+                    headlineContent = { Text("Roll up the billboard while browsing", style = MaterialTheme.typography.titleMedium) },
+                    supportingContent = {
+                        Text(if (rollUp) "On: the title details shrink to a quarter when you scroll into the rows" else "Off: the title details stay full size")
+                    },
+                    trailingContent = { androidx.tv.material3.Switch(checked = rollUp, onCheckedChange = null) },
+                    modifier = Modifier.width(720.dp),
+                )
+            }
+        }
+        item {
+            val cinema by hook.store.cinemaMode.collectAsState()
+            val overlays by hook.store.overlays.collectAsState()
+            if (cinema) {
+                val on =
+                    listOf(
+                        overlays.resolution to "Resolution",
+                        overlays.hdr to "HDR",
+                        overlays.audio to "Audio",
+                        overlays.rating to "Rating",
+                        overlays.top10 to "Top 10",
+                        overlays.watched to "Watched",
+                    ).filter { it.first }.map { it.second }
+                MenuItem("Poster overlays", if (on.isEmpty()) "Add quality, HDR, audio, rating, Top 10 and watched badges to posters" else on.joinToString(" · ")) {
+                    go(Screen.Overlays)
+                }
+            }
+        }
+        item {
             MenuItem(
                 "Home collections",
                 if (lists.isEmpty()) "Add Trakt or MDBList lists as home rows" else "${lists.count { it.showOnHome }} of ${lists.size} on the home screen",
@@ -705,3 +744,67 @@ private fun TraktKeyScreen(
 
 /** Required by TMDB's API terms wherever TMDB data is used. */
 internal const val TMDB_NOTICE = "Search data and images from TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB."
+
+// ---------------------------------------------------------------- poster overlays
+
+@Composable
+private fun OverlaysScreen(hook: SourceHook) {
+    val o by hook.store.overlays.collectAsState()
+    val first = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
+    val set = { n: com.wholphinplus.sources.cinema.PosterOverlays -> hook.store.setOverlays(n) }
+    Row(horizontalArrangement = Arrangement.spacedBy(32.dp)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(vertical = 8.dp), modifier = Modifier.width(480.dp)) {
+            item { Toggle("Resolution", "4K, HD or SD", o.resolution, Modifier.focusRequester(first)) { set(o.copy(resolution = it)) } }
+            item { Toggle("HDR", "Dolby Vision, HDR10+ or HDR", o.hdr) { set(o.copy(hdr = it)) } }
+            item { Toggle("Audio", "Atmos, 7.1 or 5.1", o.audio) { set(o.copy(audio = it)) } }
+            item { Toggle("Maturity rating", "PG-13, TV-MA…", o.rating) { set(o.copy(rating = it)) } }
+            item { Toggle("Top 10", "A red TOP 10 corner on titles in your Top lists", o.top10) { set(o.copy(top10 = it)) } }
+            item { Toggle("Watched", "A check on titles you've finished", o.watched) { set(o.copy(watched = it)) } }
+            item { Toggle("New labels", "Recently Added and New Episodes along the bottom edge", o.newLabels) { set(o.copy(newLabels = it)) } }
+            item {
+                val next = com.wholphinplus.sources.cinema.OverlayCorner.entries.let { it[(o.corner.ordinal + 1) % it.size] }
+                Choice("Badge corner", o.corner.label) { set(o.copy(corner = next)) }
+            }
+            item {
+                val next = com.wholphinplus.sources.cinema.OverlayStyle.entries.let { it[(o.style.ordinal + 1) % it.size] }
+                Choice("Badge style", if (o.style == com.wholphinplus.sources.cinema.OverlayStyle.MINIMAL) "Minimal: dark glass chips" else "Colour: each badge in its own colour") { set(o.copy(style = next)) }
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 12.dp)) {
+            Text("Preview", style = MaterialTheme.typography.titleMedium)
+            com.wholphinplus.sources.cinema.OverlayPreview(o)
+        }
+    }
+}
+
+@Composable
+private fun Toggle(
+    title: String,
+    summary: String,
+    checked: Boolean,
+    modifier: Modifier = Modifier,
+    onChange: (Boolean) -> Unit,
+) {
+    PlusListItem(
+        onClick = { onChange(!checked) },
+        headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
+        supportingContent = { Text(summary) },
+        trailingContent = { androidx.tv.material3.Switch(checked = checked, onCheckedChange = null) },
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun Choice(
+    title: String,
+    value: String,
+    onClick: () -> Unit,
+) {
+    PlusListItem(
+        onClick = onClick,
+        headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
+        supportingContent = { Text(value) },
+        trailingContent = { Text("⇄", style = MaterialTheme.typography.titleLarge) },
+    )
+}

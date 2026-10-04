@@ -1,5 +1,20 @@
 package com.wholphinplus.sources.cinema
 
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.addPathNodes
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreInterceptKeyBeforeSoftKeyboard
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -22,14 +37,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -77,7 +95,7 @@ import java.util.UUID
  * type it suggests titles from your home; results come from smart search (TMDB), and a title
  * that's on your server opens its Cinema page, otherwise the other-servers sheet.
  */
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun CinemaSearch(
     initialQuery: String,
@@ -89,6 +107,7 @@ fun CinemaSearch(
     val entry = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java) }
     val service = remember { entry.searchService() }
     val art = remember { entry.cinemaArt() }
+    val overlays by entry.sourceHook().store.overlays.collectAsState()
     if (!service.enabled) return fallback()
     DisposableEffect(Unit) { onDispose { art.save() } }
 
@@ -99,7 +118,27 @@ fun CinemaSearch(
     var sheet by remember { mutableStateOf<TmdbItem?>(null) }
     val scope = rememberCoroutineScope()
     val firstKey = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { firstKey.requestFocus() } }
+    val micFocus = remember { FocusRequester() }
+    val (voice, toggleVoice) = rememberCinemaVoice { heard -> query = heard }
+    // The mic takes focus when search opens (the keyboard's first key if voice isn't available)
+    LaunchedEffect(Unit) { runCatching { if (voice.available) micFocus.requestFocus() else firstKey.requestFocus() } }
+    // The device's own keyboard (Gboard etc.), on request: a hidden text field bound to the query
+    val imeField = remember { FocusRequester() }
+    val imeKey = remember { FocusRequester() }
+    var imeFocused by remember { mutableStateOf(false) }
+    val softKeyboard = LocalSoftwareKeyboardController.current
+    val openSystemKeyboard = {
+        runCatching { imeField.requestFocus() }
+        softKeyboard?.show()
+        Unit
+    }
+    val closeSystemKeyboard = {
+        softKeyboard?.hide()
+        runCatching { imeKey.requestFocus() }
+        Unit
+    }
+    // After voice search, focus goes back to the mic
+    LaunchedEffect(voice.active) { if (!voice.active && voice.available) runCatching { micFocus.requestFocus() } }
 
     // Search as you type, once typing pauses
     LaunchedEffect(Unit) {
@@ -144,16 +183,24 @@ fun CinemaSearch(
             // ---- keyboard column
             Column(Modifier.width(300.dp).fillMaxHeight()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.Search, contentDescription = null, tint = InkDim, modifier = Modifier.size(22.dp))
-                    Spacer(Modifier.width(10.dp))
+                    if (voice.available) {
+                        MicButton(onClick = toggleVoice, modifier = Modifier.focusRequester(micFocus))
+                        Spacer(Modifier.width(12.dp))
+                    } else {
+                        Icon(Icons.Filled.Search, contentDescription = null, tint = InkDim, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(10.dp))
+                    }
                     Text(
-                        query.ifEmpty { "Search" },
+                        query.ifEmpty { if (imeFocused) "" else "Search" },
                         color = if (query.isEmpty()) InkDim else Ink,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
+                    // Typing on the device keyboard: a caret shows where the text goes
+                    if (imeFocused) Box(Modifier.padding(start = 2.dp).width(2.dp).height(26.dp).background(Ink))
                 }
                 Spacer(Modifier.height(8.dp))
                 Box(Modifier.fillMaxWidth().height(2.dp).background(Color.White.copy(alpha = 0.18f)))
@@ -164,6 +211,8 @@ fun CinemaSearch(
                     onSpace = { if (query.isNotEmpty() && !query.endsWith(" ")) query += " " },
                     onDelete = { query = query.dropLast(1) },
                     onClear = { query = "" },
+                    imeKey = imeKey,
+                    onSystemKeyboard = openSystemKeyboard,
                 )
                 Spacer(Modifier.height(18.dp))
                 // Netflix-style "explore" list: people the search matched
@@ -178,39 +227,52 @@ fun CinemaSearch(
             Spacer(Modifier.width(36.dp))
             // ---- results
             val r = results
-            val heading: String
-            val cards: List<CinemaItem>
+            val heading: String?
+            // Labelled groups of cards; a null label is an unlabelled group
+            val sections: List<Pair<String?, List<CinemaItem>>>
             val tmdbByKey: Map<String, TmdbItem>
             when {
                 r != null -> {
                     // Titles without any art are obscure noise; a streaming app wouldn't show them
                     val all = (r.items + r.people.flatMap { it.knownFor }).distinctBy { it.key }.filter { it.backdropPath != null }
-                    heading = r.interpretation ?: if (all.isEmpty()) "No results for \"${query.trim()}\"" else "Top Results"
-                    cards = all.map { it.toCinemaItem() }
+                    heading = r.interpretation ?: if (all.isEmpty()) "No results for \"${query.trim()}\"" else null
+                    val cards = all.map { it.toCinemaItem() }
+                    // The best few matches first, then everything else split into movies and shows
+                    val top = cards.take(TOP_RESULTS)
+                    val rest = cards.drop(TOP_RESULTS)
+                    sections =
+                        listOf(
+                            "Top Results" to top,
+                            "Movies" to rest.filter { it.kind == BaseItemKind.MOVIE },
+                            "TV Shows" to rest.filter { it.kind != BaseItemKind.MOVIE },
+                        ).filter { it.second.isNotEmpty() }
                     tmdbByKey = all.associateBy { "tmdb:" + it.key }
                 }
                 query.trim().length >= 2 -> {
                     heading = if (failed) "Search isn't working right now" else ""
-                    cards = emptyList()
+                    sections = emptyList()
                     tmdbByKey = emptyMap()
                 }
                 else -> {
                     heading = "Recommended for You"
-                    cards = homeSuggestions()
+                    sections = listOf(null to homeSuggestions())
                     tmdbByKey = emptyMap()
                 }
             }
             Column(Modifier.weight(1f).fillMaxHeight()) {
-                Text(heading, color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.height(28.dp))
+                if (heading != null) {
+                    Text(heading, color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.height(28.dp))
+                }
                 AnimatedContent(
-                    targetState = cards,
+                    targetState = sections,
                     transitionSpec = { fadeIn(tween(280, delayMillis = 60, easing = CinemaEase)) togetherWith fadeOut(tween(140)) },
-                    contentKey = { list -> list.map { it.key } },
+                    contentKey = { list -> list.map { (label, items) -> label to items.map { it.key } } },
                     label = "results",
-                ) { list ->
+                ) { groups ->
                     val density = LocalDensity.current
-                    val spec = remember(density) { pivot(with(density) { 12.dp.toPx() }) }
-                    CompositionLocalProvider(LocalBringIntoViewSpec provides spec, LocalArt provides art) {
+                    // Room above the focused row for its group's label (Movies, TV Shows)
+                    val spec = remember(density) { pivot(with(density) { 52.dp.toPx() }) }
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides spec, LocalArt provides art, LocalOverlays provides overlays) {
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(3),
                             contentPadding = PaddingValues(top = 10.dp, end = 48.dp, bottom = 80.dp),
@@ -218,7 +280,19 @@ fun CinemaSearch(
                             verticalArrangement = Arrangement.spacedBy(16.dp),
                             modifier = Modifier.fillMaxSize(),
                         ) {
-                            items(list, key = { it.key }, contentType = { "card" }) { item ->
+                            groups.forEachIndexed { g, (label, groupItems) ->
+                                if (label != null) {
+                                    item(key = "label:$label", span = { GridItemSpan(maxLineSpan) }, contentType = "label") {
+                                        Text(
+                                            label,
+                                            color = Ink,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(top = if (g == 0) 0.dp else 12.dp),
+                                        )
+                                    }
+                                }
+                                items(groupItems, key = { it.key }, contentType = { "card" }) { item ->
                                 CinemaCard(
                                     item,
                                     onFocused = {},
@@ -233,18 +307,95 @@ fun CinemaSearch(
                                     },
                                     width = 166.dp,
                                 )
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        // Bound to the query; only the device keyboard ever focuses it
+        BasicTextField(
+            value = query,
+            onValueChange = { query = it },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { closeSystemKeyboard() }, onDone = { closeSystemKeyboard() }),
+            modifier =
+                Modifier
+                    .size(1.dp)
+                    .alpha(0f)
+                    // Back is caught before the keyboard and the text field see it (the field would
+                    // drop focus and let Back leave search): one press closes the keyboard and
+                    // returns to the on-screen one
+                    .onPreInterceptKeyBeforeSoftKeyboard { e ->
+                        if (e.key == Key.Back) {
+                            if (e.type == KeyEventType.KeyUp) closeSystemKeyboard()
+                            true
+                        } else {
+                            false
+                        }
+                    }.focusRequester(imeField)
+                    .onFocusChanged { imeFocused = it.isFocused }
+                    // Up/Down only arrive here once the keyboard is closed (it takes them while open)
+                    .onPreviewKeyEvent { e ->
+                        if (e.key == Key.DirectionDown || e.key == Key.DirectionUp) {
+                            if (e.type == KeyEventType.KeyUp) closeSystemKeyboard()
+                            true
+                        } else {
+                            false
+                        }
+                    },
+        )
         if (searching && results == null) {
             Text("Searching…", color = InkDim, fontSize = 14.sp, modifier = Modifier.align(Alignment.TopStart).padding(start = 384.dp, top = 80.dp))
         }
     }
+    VoiceOverlay(voice, onRetry = toggleVoice)
     sheet?.let { TitleSheet(it, service, onDismiss = { sheet = null }) }
 }
+
+/** The dedicated mic: a round button in front of the search field. */
+@Composable
+private fun MicButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        shape = ClickableSurfaceDefaults.shape(CircleShape),
+        colors =
+            ClickableSurfaceDefaults.colors(
+                containerColor = Color.White.copy(alpha = 0.12f),
+                contentColor = Ink,
+                focusedContainerColor = Ink,
+                focusedContentColor = Stage,
+            ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.08f),
+        modifier = modifier.size(44.dp),
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(MicIcon, contentDescription = "Search by voice", modifier = Modifier.size(24.dp))
+        }
+    }
+}
+
+/** Material's keyboard icon (not in the core icon set). */
+private val KeyboardIcon: ImageVector by lazy {
+    ImageVector
+        .Builder("Keyboard", 24.dp, 24.dp, 24f, 24f)
+        .addPath(
+            addPathNodes(
+                "M20,5H4c-1.1,0 -1.99,0.9 -1.99,2L2,17c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V7c0,-1.1 -0.9,-2 -2,-2z" +
+                    "M11,8h2v2h-2V8zM11,11h2v2h-2v-2zM8,8h2v2H8V8zM8,11h2v2H8v-2zM7,13H5v-2h2v2zM7,10H5V8h2v2z" +
+                    "M16,17H8v-2h8v2zM16,13h-2v-2h2v2zM16,10h-2V8h2v2zM19,13h-2v-2h2v2zM19,10h-2V8h2v2z",
+            ),
+            fill = SolidColor(Color.Black),
+        ).build()
+}
+
+/** How many best matches lead the results, one grid row. */
+private const val TOP_RESULTS = 3
 
 private const val KEYS = "abcdefghijklmnopqrstuvwxyz1234567890"
 
@@ -255,12 +406,16 @@ private fun Keyboard(
     onSpace: () -> Unit,
     onDelete: () -> Unit,
     onClear: () -> Unit,
+    imeKey: FocusRequester,
+    onSystemKeyboard: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Key("SPACE", width = 146.dp, onClick = onSpace)
-            Key("", icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, width = 70.dp, onClick = onDelete, onLongClick = onClear)
-            Key("CLEAR", width = 70.dp, small = true, onClick = onClear)
+            Key("SPACE", width = 110.dp, onClick = onSpace)
+            Key("", icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, iconLabel = "Delete", width = 54.dp, onClick = onDelete, onLongClick = onClear)
+            Key("CLEAR", width = 64.dp, small = true, onClick = onClear)
+            // Opens the device's own keyboard, for anyone who prefers it
+            Key("", icon = KeyboardIcon, iconLabel = "Use the device keyboard", width = 56.dp, modifier = Modifier.focusRequester(imeKey), onClick = onSystemKeyboard)
         }
         KEYS.chunked(6).forEachIndexed { row, chars ->
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -283,6 +438,7 @@ private fun Key(
     width: Dp = 46.dp,
     small: Boolean = false,
     icon: ImageVector? = null,
+    iconLabel: String? = null,
     onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -302,7 +458,7 @@ private fun Key(
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (icon != null) {
-                Icon(icon, contentDescription = "Delete", modifier = Modifier.size(24.dp))
+                Icon(icon, contentDescription = iconLabel, modifier = Modifier.size(24.dp))
             } else {
                 Text(text, fontSize = if (small || text.length > 1) 12.sp else 18.sp, fontWeight = FontWeight.Bold, letterSpacing = if (text.length > 1) 1.sp else 0.sp)
             }

@@ -44,6 +44,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -100,6 +101,8 @@ fun CinemaDetails(
     val hook = remember { entry.sourceHook() }
     val art = remember { entry.cinemaArt() }
     val repo = remember { CinemaRepository(hook, hook.collections) }
+    val overlays by hook.store.overlays.collectAsState()
+    remember { StreamCache.attach(context) }
     DisposableEffect(Unit) { onDispose { art.save() } }
 
     // Back from playback shows the page at once; the Play button's position refreshes quietly
@@ -111,13 +114,15 @@ fun CinemaDetails(
             .onSuccess {
                 DetailsCache[itemId] = it
                 data = it
+                // More Like This badges in one request
+                if (overlays.needsStreams) launch { StreamCache.prefetch(it.similar.filter { s -> s.kind != BaseItemKind.SERIES }.map { s -> s.id }, repo::streamTagsBatch) }
             }.onFailure { if (data == null) error = it.message ?: "Couldn't load this title" }
     }
 
     Box(modifier.fillMaxSize().background(Stage)) {
         val d = data
         when {
-            d != null -> CompositionLocalProvider(LocalArt provides art) { DetailsScreen(d, repo, onPlay, onOpen) }
+            d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf)) { DetailsScreen(d, repo, onPlay, onOpen) }
             error != null -> Text(error!!, color = Ink, modifier = Modifier.align(Alignment.Center))
         }
     }
@@ -259,6 +264,8 @@ private fun Hero(
     onEpisodes: () -> Unit,
 ) {
     val item = d.item
+    KindTag(item.kind)
+    Spacer(Modifier.height(6.dp))
     Box(Modifier.height(120.dp).widthIn(max = 460.dp), contentAlignment = Alignment.BottomStart) {
         if (logo != null) {
             AsyncImage(model = logo, contentDescription = item.title, contentScale = ContentScale.Fit, alignment = Alignment.BottomStart, modifier = Modifier.fillMaxSize())

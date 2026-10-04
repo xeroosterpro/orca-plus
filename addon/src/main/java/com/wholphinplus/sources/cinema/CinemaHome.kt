@@ -61,6 +61,23 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.lerp
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -124,6 +141,7 @@ fun CinemaHome(
     val art = remember { entry.cinemaArt() }
     val repo = remember { CinemaRepository(hook, hook.collections) }
     DisposableEffect(Unit) { onDispose { art.save() } }
+    remember { StreamCache.attach(context) }
 
     // The tab you were on survives a trip to a details page and back
     var tab by rememberSaveable { mutableStateOf(CinemaTab.HOME) }
@@ -131,6 +149,8 @@ fun CinemaHome(
     val pages = remember { mutableStateMapOf<CinemaTab, CinemaHomeData>().apply { putAll(TabCache.data) } }
     var error by remember { mutableStateOf<String?>(null) }
     var grabFocus by remember { mutableStateOf(true) }
+    val rollUp by hook.store.cinemaRollUp.collectAsState()
+    val overlays by hook.store.overlays.collectAsState()
     LaunchedEffect(tab) {
         if (tab != CinemaTab.MY_LIST && pages[tab] != null && System.currentTimeMillis() - (TabCache.at[tab] ?: 0L) < 2 * 60_000) return@LaunchedEffect
         runCatching {
@@ -138,6 +158,7 @@ fun CinemaHome(
                 CinemaTab.HOME -> repo.load()
                 CinemaTab.SHOWS -> repo.loadKind(series = true)
                 CinemaTab.MOVIES -> repo.loadKind(series = false)
+                CinemaTab.NEW_POPULAR -> repo.loadNewPopular()
                 CinemaTab.MY_LIST -> CinemaHomeData(emptyList(), listOf(CinemaRow("My List", repo.myList())), null, null)
             }
         }.onSuccess {
@@ -146,6 +167,13 @@ fun CinemaHome(
             if (pages[tab] == null || tab == CinemaTab.MY_LIST) pages[tab] = it
             // Warm the title-art cache for what's on screen first
             it.rows.forEach { row -> row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } } }
+            // And the badge facts for those cards, so badges arrive with the cards
+            // One request per row (the server batches it), not one per card
+            if (overlays.needsStreams) {
+                it.rows.forEach { row ->
+                    launch { StreamCache.prefetch(row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }, repo::streamTagsBatch) }
+                }
+            }
         }.onFailure { if (pages[tab] == null) error = it.message ?: "Couldn't load your library" }
     }
     // Once Home is up, quietly load Shows and Movies so switching tabs is instant
@@ -165,7 +193,7 @@ fun CinemaHome(
     BackHandler(enabled = tab != CinemaTab.HOME) { tab = CinemaTab.HOME }
 
     Box(modifier.fillMaxSize().background(Stage)) {
-        CompositionLocalProvider(LocalArt provides art) {
+        CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf)) {
             AnimatedContent(
                 targetState = tab,
                 transitionSpec = { fadeIn(tween(360, delayMillis = 80, easing = CinemaEase)) togetherWith fadeOut(tween(180)) },
@@ -185,7 +213,7 @@ fun CinemaHome(
                         t == CinemaTab.MY_LIST -> MyListScreen(d.rows.firstOrNull()?.items.orEmpty(), onOpen)
                         else -> {
                             val focusPlay = grabFocus && t == CinemaTab.HOME
-                            CinemaScreen(d, onOpen, onPlay, focusPlay)
+                            CinemaScreen(d, onOpen, onPlay, focusPlay, rollUp)
                             LaunchedEffect(Unit) { grabFocus = false }
                         }
                     }
@@ -203,6 +231,7 @@ enum class CinemaTab(
     HOME("Home"),
     SHOWS("Shows"),
     MOVIES("Movies"),
+    NEW_POPULAR("New & Popular"),
     MY_LIST("My List"),
 }
 
@@ -217,9 +246,16 @@ private class HomeFocus {
     var billboard by mutableStateOf(true)
     var focused by mutableStateOf<CinemaItem?>(null)
 
-    fun onCard(item: CinemaItem) {
+    /** The row the focused card is in; the first row keeps the billboard full size. */
+    var row by mutableIntStateOf(0)
+
+    fun onCard(
+        item: CinemaItem,
+        rowIndex: Int,
+    ) {
         billboard = false
         focused = item
+        row = rowIndex
     }
 }
 
@@ -230,8 +266,17 @@ private fun CinemaScreen(
     onOpen: (UUID, BaseItemKind) -> Unit,
     onPlay: (UUID, Long) -> Unit,
     grabFocus: Boolean,
+    rollUp: Boolean,
 ) {
     val focus = remember { HomeFocus() }
+    // 0 = full billboard, 1 = rolled up to a quarter while browsing rows (if the setting is on).
+    // Read only in layout/draw, so the animation never recomposes the screen.
+    // The first row (Continue Watching) still shows the full billboard for the focused card;
+    // it rolls up from the second row down
+    val roll = animateFloatAsState(if (rollUp && !focus.billboard && focus.row >= 1) 1f else 0f, tween(320, easing = CinemaEase), label = "roll")
+    // 1 while the buttons are hidden (browsing rows): the panel drops their space so the first
+    // row moves up instead of leaving a gap
+    val noButtons = animateFloatAsState(if (focus.billboard) 0f else 1f, tween(320, easing = CinemaEase), label = "noButtons")
     var featuredIndex by remember { mutableIntStateOf(0) }
     val featured = data.featured.getOrNull(featuredIndex % data.featured.size.coerceAtLeast(1))
     val playFocus = remember { FocusRequester() }
@@ -257,12 +302,32 @@ private fun CinemaScreen(
             featuredIndex = (featuredIndex + 1) % data.featured.size
         }
     }
-    BackHandler(enabled = !focus.billboard) {
-        scope.launch { columnState.animateScrollToItem(0) }
-        runCatching { playFocus.requestFocus() }
+    // Back, or Up from the first row: bring the buttons back first. They aren't on screen while
+    // browsing, so they can only take focus a frame after the billboard returns (otherwise Up
+    // skips past them to the top menu and the billboard stays rolled up)
+    val toBillboard = {
+        focus.billboard = true
+        scope.launch {
+            // Retry each frame until Play is attached and actually takes focus (up to ~0.5 s)
+            for (attempt in 0 until 30) {
+                withFrameNanos {}
+                if (runCatching { playFocus.requestFocus() }.getOrDefault(false)) break
+            }
+            columnState.animateScrollToItem(0)
+        }
+        Unit
     }
+    BackHandler(enabled = !focus.billboard) { toBillboard() }
+    val upToBillboard =
+        Modifier.onPreviewKeyEvent {
+            if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionUp && !focus.billboard) {
+                toBillboard()
+                true
+            } else {
+                false
+            }
+        }
 
-    val onCard = remember(focus) { { item: CinemaItem -> focus.onCard(item) } }
     val onCardClick =
         remember(onOpen) {
             { item: CinemaItem ->
@@ -273,14 +338,24 @@ private fun CinemaScreen(
     val density = LocalDensity.current
     val rowSpec = remember(density) { pivot(with(density) { 40.dp.toPx() }) }
     val cardSpec = remember(density) { pivot(with(density) { 48.dp.toPx() }) }
+    // Top 10 rows land the poster after its number, so the number stays on screen
+    val topSpec = remember(density) { pivot(with(density) { (48.dp + NumeralWidth).toPx() }) }
 
     Box(Modifier.fillMaxSize()) {
         StableBackdrop(shown?.backdropUrl, drift = focus.billboard)
+        // Rolled up, the rows sit higher over the picture: darken behind them so titles stay legible
+        Box(
+            Modifier.fillMaxSize().graphicsLayer { alpha = roll.value }.background(
+                Brush.verticalGradient(0.12f to Color.Transparent, 0.4f to Stage.copy(alpha = 0.78f), 1f to Stage),
+            ),
+        )
         Column(Modifier.fillMaxSize()) {
             Spacer(Modifier.height(TopNavHeight))
             InfoPanel(
                 item = shown,
                 billboard = focus.billboard,
+                roll = { roll.value },
+                noButtons = { noButtons.value },
                 playFocus = playFocus,
                 onPlay = { shown?.let { onPlay(it.id, it.resumeMs) } },
                 onMoreInfo = {
@@ -291,6 +366,8 @@ private fun CinemaScreen(
                 },
                 onButtonsFocused = { focus.billboard = true },
             )
+            // Breathing room between the buttons and the first row's title
+            Spacer(Modifier.rollHeight(18.dp, 8.dp) { roll.value })
             CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
                 LazyColumn(
                     state = columnState,
@@ -298,8 +375,9 @@ private fun CinemaScreen(
                     contentPadding = PaddingValues(bottom = 220.dp),
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 ) {
-                    items(data.rows, key = { it.title }, contentType = { "row" }) { row ->
-                        CinemaRowView(row, cardSpec, onCard, onCardClick)
+                    itemsIndexed(data.rows, key = { _, r -> r.title }, contentType = { _, _ -> "row" }) { i, row ->
+                        val onCard = remember(focus, i) { { item: CinemaItem -> focus.onCard(item, i) } }
+                        CinemaRowView(row, if (row.ranked) topSpec else cardSpec, onCard, onCardClick, if (i == 0) upToBillboard else Modifier)
                     }
                 }
             }
@@ -363,20 +441,39 @@ private fun NavIcon(
     }
 }
 
+/** Height eased between [full] and [rolled] by [roll] (0..1), in the layout pass only. */
+private fun Modifier.rollHeight(
+    full: Dp,
+    rolled: Dp,
+    roll: () -> Float,
+): Modifier = animatedHeight { lerp(full, rolled, roll()) }
+
+/** A height read in the layout pass only, so animating it never recomposes. Clips its content. */
+private fun Modifier.animatedHeight(height: () -> Dp): Modifier =
+    clipToBounds().layout { measurable, constraints ->
+        val h = height().roundToPx()
+        val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
+        layout(placeable.width, h) { placeable.place(0, 0) }
+    }
+
 /**
- * Fixed-height panel: nothing inside it can change its size, so the rows below never move when
- * the focused title changes or the buttons fade out.
+ * Fixed-height panel: the focused title changing or the buttons fading never change its size,
+ * so the rows below don't move. Only rolling up (the setting) shrinks it, to a quarter: a small
+ * logo and the episode or Top 10 line stay, the rest fades out.
  */
 @Composable
 private fun InfoPanel(
     item: CinemaItem?,
     billboard: Boolean,
+    roll: () -> Float,
+    noButtons: () -> Float,
     playFocus: FocusRequester,
     onPlay: () -> Unit,
     onMoreInfo: () -> Unit,
     onButtonsFocused: () -> Unit,
 ) {
-    Box(Modifier.padding(start = 48.dp, top = 16.dp).height(262.dp).widthIn(max = 480.dp)) {
+    // Full: details + buttons (262). Buttons hidden: details only (210). Rolled up: a quarter (72).
+    Box(Modifier.padding(start = 48.dp, top = 16.dp).animatedHeight { lerp(lerp(262.dp, 210.dp, noButtons()), 72.dp, roll()) }.widthIn(max = 480.dp)) {
         AnimatedContent(
             targetState = item,
             transitionSpec = { fadeIn(tween(380, delayMillis = 90, easing = CinemaEase)) togetherWith fadeOut(tween(160)) },
@@ -386,16 +483,28 @@ private fun InfoPanel(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (shownItem == null) return@Column
                 val logo = rememberArt(shownItem)?.logoUrl() ?: shownItem.logoUrl
-                Box(Modifier.height(88.dp).widthIn(max = 340.dp), contentAlignment = Alignment.BottomStart) {
+                // Kind tag above the logo; it folds away when the billboard rolls up
+                Box(Modifier.rollHeight(18.dp, 0.dp, roll), contentAlignment = Alignment.BottomStart) { KindTag(shownItem.kind) }
+                Box(Modifier.rollHeight(70.dp, 44.dp, roll).widthIn(max = 340.dp), contentAlignment = Alignment.BottomStart) {
                     if (logo != null) {
                         AsyncImage(model = logo, contentDescription = shownItem.title, contentScale = ContentScale.Fit, alignment = Alignment.BottomStart, modifier = Modifier.fillMaxSize())
                     } else {
                         Text(shownItem.title, color = Ink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 36.sp)
                     }
                 }
-                Text(shownItem.subtitle.orEmpty(), color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                MetaLine(Meta(shownItem.meta, shownItem.rating))
-                Text(shownItem.overview, color = Ink.copy(alpha = 0.86f), fontSize = 14.sp, lineHeight = 20.sp, minLines = 3, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                // One fixed line: the episode, else the title's Top 10 place, else blank
+                Box(Modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
+                    val rank = shownItem.rank
+                    when {
+                        shownItem.subtitle != null ->
+                            Text(shownItem.subtitle, color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        rank != null -> RankLine(rank, shownItem.rankLabel)
+                    }
+                }
+                Column(Modifier.graphicsLayer { alpha = (1f - roll() * 2f).coerceIn(0f, 1f) }, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MetaLine(Meta(shownItem.meta, shownItem.rating))
+                    Text(shownItem.overview, color = Ink.copy(alpha = 0.86f), fontSize = 14.sp, lineHeight = 20.sp, minLines = 3, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
         AnimatedVisibility(
@@ -419,17 +528,110 @@ private fun CinemaRowView(
     cardSpec: BringIntoViewSpec,
     onItemFocused: (CinemaItem) -> Unit,
     onItemClick: (CinemaItem) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(row.title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 48.dp))
         CompositionLocalProvider(LocalBringIntoViewSpec provides cardSpec) {
             LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (row.ranked) 4.dp else 10.dp),
                 contentPadding = PaddingValues(start = 48.dp, end = 400.dp, top = 8.dp, bottom = 8.dp),
             ) {
-                items(row.items, key = { it.key }, contentType = { "card" }) { item ->
-                    CinemaCard(item, onItemFocused, onItemClick)
+                if (row.ranked) {
+                    items(row.items, key = { it.key }, contentType = { "top10" }) { item ->
+                        Top10Card(item, item.rank ?: (row.items.indexOf(item) + 1), onItemFocused, onItemClick)
+                    }
+                } else {
+                    items(row.items, key = { it.key }, contentType = { "card" }) { item ->
+                        CinemaCard(item, onItemFocused, onItemClick)
+                    }
                 }
+            }
+        }
+    }
+}
+
+/** The billboard's chart line: a red TOP 10 badge and "#2 in Movies This Week". */
+@Composable
+private fun RankLine(
+    rank: Int,
+    label: String?,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(
+            Modifier.size(20.dp).background(Label, RoundedCornerShape(2.dp)),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text("TOP", color = Color.White, style = BadgeText.copy(fontSize = 5.5.sp, lineHeight = 6.sp))
+            Text("10", color = Color.White, style = BadgeText.copy(fontSize = 9.sp, lineHeight = 9.sp))
+        }
+        Text(listOfNotNull("#$rank", label?.let { "in $it" }).joinToString(" "), color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+}
+
+private val BadgeText =
+    TextStyle(
+        fontWeight = FontWeight.Black,
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+        lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.Both),
+    )
+
+private val NumeralWidth = 84.dp
+private val PosterWidth = 112.dp
+private val PosterHeight = 168.dp
+
+/**
+ * A Top 10 tile: a big outlined number with the poster tucked over its right edge, the way the
+ * streaming charts row looks.
+ */
+@Composable
+private fun Top10Card(
+    item: CinemaItem,
+    rank: Int,
+    onFocused: (CinemaItem) -> Unit,
+    onClick: (CinemaItem) -> Unit,
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val shape = RoundedCornerShape(4.dp)
+    val numeral =
+        remember(density) {
+            TextStyle(
+                fontSize = 136.sp,
+                lineHeight = 136.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = (-14).sp,
+                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Bottom, LineHeightStyle.Trim.Both),
+            )
+        }
+    val stroke = remember(density) { Stroke(width = with(density) { 2.5.dp.toPx() }) }
+    Row(verticalAlignment = Alignment.Bottom) {
+        Box(Modifier.width(if (rank >= 10) NumeralWidth + 56.dp else NumeralWidth).height(PosterHeight), contentAlignment = Alignment.BottomEnd) {
+            // Filled in stage black, outlined in grey, nudged under the poster
+            Text("$rank", color = Stage, style = numeral, maxLines = 1, softWrap = false, modifier = Modifier.offset(x = 16.dp, y = 6.dp))
+            Text("$rank", color = Color(0xFF8A8A8A), style = numeral.copy(drawStyle = stroke), maxLines = 1, softWrap = false, modifier = Modifier.offset(x = 16.dp, y = 6.dp))
+        }
+        Card(
+            onClick = { onClick(item) },
+            shape = CardDefaults.shape(shape),
+            border = CardDefaults.border(focusedBorder = Border(BorderStroke(3.dp, Ink), shape = shape)),
+            scale = CardDefaults.scale(focusedScale = 1.08f),
+            glow = CardDefaults.glow(),
+            colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
+            modifier = Modifier.width(PosterWidth).height(PosterHeight).onFocusChanged { if (it.isFocused) onFocused(item) },
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                val url = item.posterUrl ?: item.cardUrl
+                if (url != null) {
+                    AsyncImage(model = request(context, url, 224, 336), contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+                if (item.posterUrl == null) {
+                    Text(item.title, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
+                }
+                item.progress?.let { p -> ProgressBar(p, Modifier.align(Alignment.BottomStart)) }
+                PosterBadges(item, tall = true)
             }
         }
     }
@@ -485,7 +687,7 @@ internal fun CinemaCard(
                     )
                 }
             }
-            item.badge?.let {
+            item.badge?.takeIf { LocalOverlays.current.newLabels }?.let {
                 Text(
                     it,
                     color = Color.White,
@@ -495,6 +697,7 @@ internal fun CinemaCard(
                 )
             }
             item.progress?.let { p -> ProgressBar(p, Modifier.align(Alignment.BottomStart)) }
+            PosterBadges(item)
         }
     }
 }

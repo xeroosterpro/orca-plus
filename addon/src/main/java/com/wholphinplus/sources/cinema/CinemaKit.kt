@@ -262,3 +262,17 @@ internal fun ProgressBar(
         Box(Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).fillMaxHeight().background(Label))
     }
 }
+
+/** The streaming-app kind tag above a title's logo: a purple plus and "SERIES" or "FILM". */
+@Composable
+internal fun KindTag(
+    kind: org.jellyfin.sdk.model.api.BaseItemKind,
+    modifier: Modifier = Modifier,
+) {
+    val series = kind == org.jellyfin.sdk.model.api.BaseItemKind.SERIES || kind == org.jellyfin.sdk.model.api.BaseItemKind.EPISODE
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text("+", color = Plus, fontSize = 15.sp, fontWeight = FontWeight.Black)
+        Spacer(Modifier.width(5.dp))
+        Text(if (series) "SERIES" else "FILM", color = InkDim, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
+    }
+}

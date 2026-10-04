@@ -8,9 +8,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.itemsApi
 import org.jellyfin.sdk.api.client.extensions.libraryApi
 import org.jellyfin.sdk.api.client.extensions.tvShowsApi
+import org.jellyfin.sdk.api.client.extensions.userApi
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
 import org.jellyfin.sdk.api.client.extensions.userViewsApi
 import org.jellyfin.sdk.model.api.BaseItemDto
@@ -51,6 +53,16 @@ data class CinemaItem(
     /** TMDB id of the movie, or of the series for shows and episodes; used for title art. */
     val tmdbId: Int? = null,
     val tmdbTv: Boolean = false,
+    /** Portrait poster, for Top 10 rows. */
+    val posterUrl: String? = null,
+    /** Place in a Top 10 list, and how the billboard names it ("#2 in Movies This Week"). */
+    val rank: Int? = null,
+    val rankLabel: String? = null,
+    /** Poster overlay facts: "4K"/"HD", "DV"/"HDR", "ATMOS"/"5.1", and watched. */
+    val resolution: String? = null,
+    val hdr: String? = null,
+    val audio: String? = null,
+    val played: Boolean = false,
 ) {
     val key: String get() = "$kind:$id"
 }
@@ -59,6 +71,8 @@ data class CinemaItem(
 data class CinemaRow(
     val title: String,
     val items: List<CinemaItem>,
+    /** A Top 10 row: big numbers beside portrait posters. */
+    val ranked: Boolean = false,
 )
 
 data class CinemaLibrary(
@@ -150,8 +164,8 @@ internal class CinemaRepository(
                     }
                 val rows =
                     buildList {
-                        add(CinemaRow("Continue Watching", continueWatching))
-                        lists.awaitAll().forEach { (name, items) -> add(CinemaRow(name, items.map(::toItem))) }
+                        add(CinemaRow(continueTitle(userId), continueWatching))
+                        lists.awaitAll().forEach { (name, items) -> add(listRow(name, items)) }
                         addAll(latestRows)
                         addAll(genreRows(pool.await(), GENRE_ROWS, 5))
                     }.filter { it.items.isNotEmpty() }
@@ -166,7 +180,7 @@ internal class CinemaRepository(
                         .take(6)
                         .ifEmpty { rows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
 
-                CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull())
+                ranked(CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull()))
             }
         }
 
@@ -222,7 +236,7 @@ internal class CinemaRepository(
                 val fresh = CinemaRow("New Releases", newReleases.await().map(::toItem))
                 val rows =
                     buildList {
-                        add(CinemaRow("Continue Watching", cw.map(::toItem)))
+                        add(CinemaRow(continueTitle(userId), cw.map(::toItem)))
                         add(fresh)
                         addAll(latestRows)
                         addAll(genreRows(pool.await(), if (series) SHOW_GENRES else MOVIE_GENRES, 8))
@@ -235,9 +249,117 @@ internal class CinemaRepository(
                         .shuffled()
                         .take(6)
                         .ifEmpty { rows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
-                CinemaHomeData(featured, rows, libs.firstOrNull { it.collectionType == CollectionType.TVSHOWS }, libs.firstOrNull { it.collectionType == CollectionType.MOVIES })
+                ranked(CinemaHomeData(featured, rows, libs.firstOrNull { it.collectionType == CollectionType.TVSHOWS }, libs.firstOrNull { it.collectionType == CollectionType.MOVIES }))
             }
         }
+
+    /**
+     * New & Popular: Top 10 lists first, then what just arrived and what just premiered, movies
+     * and shows together.
+     */
+    suspend fun loadNewPopular(): CinemaHomeData =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+
+            fun query(
+                sort: ItemSortBy,
+                kinds: List<BaseItemKind>,
+            ) = GetItemsRequest(
+                userId = userId,
+                includeItemTypes = kinds,
+                recursive = true,
+                sortBy = listOf(sort),
+                sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING),
+                limit = 24,
+                fields = fields,
+                enableImageTypes = images,
+                imageTypeLimit = 1,
+            )
+            val both = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES)
+            coroutineScope {
+                val lists =
+                    collections.lists.value.filter { it.itemIds.isNotEmpty() && isTopList(it.name) }.map { c ->
+                        async { c.name to safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 10, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
+                    }
+                val arrived = async { safe { api.itemsApi.getItems(query(ItemSortBy.DATE_CREATED, both)).content.items } }
+                val movies = async { safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE, listOf(BaseItemKind.MOVIE))).content.items } }
+                val shows = async { safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE, listOf(BaseItemKind.SERIES))).content.items } }
+                val episodes =
+                    async {
+                        safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE, listOf(BaseItemKind.EPISODE)).copy(limit = 60)).content.items }
+                            .distinctBy { it.seriesId ?: it.id }
+                            .take(24)
+                    }
+                val eps = episodes.await()
+                fillSeriesTmdb(eps, userId)
+                val rows =
+                    buildList {
+                        lists.awaitAll().forEach { (name, items) -> add(listRow(name, items)) }
+                        add(CinemaRow("New on Orca+", arrived.await().map(::toItem)))
+                        add(CinemaRow("New Episodes", eps.map(::toItem)))
+                        add(CinemaRow("New Release Movies", movies.await().map(::toItem)))
+                        add(CinemaRow("New Release Shows", shows.await().map(::toItem)))
+                    }.filter { it.items.isNotEmpty() }
+                val featured =
+                    (rows.filter { it.ranked }.flatMap { it.items.take(3) } + rows.flatMap { it.items }.take(12))
+                        .filter { it.backdropUrl != null && it.overview.isNotBlank() && it.kind != BaseItemKind.EPISODE }
+                        .distinctBy { it.detailsId }
+                        .take(6)
+                ranked(CinemaHomeData(featured, rows, null, null))
+            }
+        }
+
+    /** A Trakt/MDBList row; lists named like a chart ("Top …") become Top 10 rows. */
+    private fun listRow(
+        name: String,
+        items: List<BaseItemDto>,
+    ): CinemaRow =
+        if (isTopList(name) && items.size >= 3) {
+            CinemaRow(name, items.take(10).map(::toItem), ranked = true)
+        } else {
+            CinemaRow(name, items.map(::toItem))
+        }
+
+    /**
+     * Gives every card of a Top 10 title its place, wherever it shows up on the page, so the
+     * billboard can say "#2 in Movies This Week" for it.
+     */
+    private fun ranked(data: CinemaHomeData): CinemaHomeData {
+        val ranks = HashMap<UUID, Pair<Int, String>>()
+        data.rows.filter { it.ranked }.forEach { row ->
+            row.items.forEachIndexed { i, item -> ranks.putIfAbsent(item.detailsId, (i + 1) to rankLabel(row)) }
+        }
+        if (ranks.isEmpty()) return data
+
+        fun mark(item: CinemaItem) = ranks[item.detailsId]?.let { (n, label) -> item.copy(rank = n, rankLabel = label) } ?: item
+        return data.copy(featured = data.featured.map(::mark), rows = data.rows.map { r -> r.copy(items = r.items.map(::mark)) })
+    }
+
+    private fun rankLabel(row: CinemaRow): String {
+        val shows = row.items.count { it.kind == BaseItemKind.SERIES }
+        val what = if (shows * 2 > row.items.size) "Shows" else "Movies"
+        val n = row.title.lowercase()
+        val `when` =
+            when {
+                "week" in n -> "This Week"
+                "today" in n || "day" in n -> "Today"
+                "month" in n -> "This Month"
+                "year" in n -> "This Year"
+                else -> null
+            }
+        return listOfNotNull(what, `when`).joinToString(" ")
+    }
+
+    /** "Continue Watching for <name>", as a streaming app greets its profile. */
+    private suspend fun continueTitle(userId: UUID): String {
+        val name =
+            userName ?: runCatching { api.userApi.getCurrentUser().content.name }.getOrNull()?.also { userName = it }
+        // Account names like "abc123#Name": greet the part people read as the name
+        val shown = name?.substringAfterLast('#')?.trim()
+        return if (shown.isNullOrBlank()) "Continue Watching" else "Continue Watching for $shown"
+    }
+
+    private var userName: String? = null
 
     /** Everything marked My List (Jellyfin favourites), newest first. */
     suspend fun myList(): List<CinemaItem> =
@@ -410,6 +532,43 @@ internal class CinemaRepository(
             }
         }
 
+    /**
+     * One title's quality facts for its poster badges, from its full record. Asked per card on
+     * screen: adding streams to row requests made the 500-title genre pool time out.
+     */
+    suspend fun streamTagsOf(id: UUID): StreamTags? =
+        withContext(Dispatchers.IO) {
+            runCatching { streamTags(api.userLibraryApi.getItem(id, userId()).content.mediaStreams) }.getOrNull()
+        }
+
+    /**
+     * Badge facts for many titles in one request. Asking the item list for these exact ids with
+     * streams makes Silo's compat layer upgrade the page to full records in one batch on its side
+     * (it does that whenever detail fields are asked for), so a whole row costs one call.
+     * Kept to a row's worth: the same on a 500-title page timed out.
+     */
+    suspend fun streamTagsBatch(ids: List<UUID>): Map<UUID, StreamTags> =
+        withContext(Dispatchers.IO) {
+            if (ids.isEmpty()) return@withContext emptyMap()
+            val started = System.currentTimeMillis()
+            // One comma-joined ids value: the SDK repeats the parameter per id, and the server
+            // reads only the first copy (that's the "only honours the first id" quirk)
+            val items =
+                api.get<org.jellyfin.sdk.model.api.BaseItemDtoQueryResult>(
+                    "/Items",
+                    queryParameters =
+                        mapOf(
+                            "userId" to userId(),
+                            "ids" to ids.joinToString(","),
+                            "fields" to "MediaStreams",
+                            "enableImages" to false,
+                            "limit" to ids.size,
+                        ),
+                ).content.items
+            Timber.i("Cinema badges: %d of %d titles in one request, %d ms", items.size, ids.size, System.currentTimeMillis() - started)
+            items.associate { it.id to streamTags(it.mediaStreams) }
+        }
+
     suspend fun setFavorite(
         id: UUID,
         favorite: Boolean,
@@ -468,6 +627,13 @@ internal class CinemaRepository(
                 episode && d.parentThumbItemId != null && d.parentThumbImageTag != null -> image(d.parentThumbItemId!!, "Thumb", d.parentThumbImageTag!!, 480)
                 else -> null
             }
+        val poster =
+            when {
+                tags[ImageType.PRIMARY] != null && !episode -> image(d.id, "Primary", tags[ImageType.PRIMARY]!!, 360)
+                episode && seriesId != null && d.seriesPrimaryImageTag != null -> image(seriesId, "Primary", d.seriesPrimaryImageTag!!, 360)
+                else -> null
+            }
+        val tags2 = streamTags(d.mediaStreams)
         val now = LocalDateTime.now()
         val recent = d.dateCreated?.isAfter(now.minusDays(14)) == true
         val badge =
@@ -506,6 +672,11 @@ internal class CinemaRepository(
             progress = progress,
             tmdbId = if (episode) d.seriesId?.let { seriesTmdb[it] } else tmdbOf(d),
             tmdbTv = episode || d.type == BaseItemKind.SERIES,
+            posterUrl = poster,
+            resolution = tags2.resolution,
+            hdr = tags2.hdr,
+            audio = tags2.audio,
+            played = d.userData?.played == true,
         )
     }
 
@@ -523,7 +694,9 @@ internal class CinemaRepository(
     private fun dash(id: String): String = com.wholphinplus.sources.ProgressOverlay.dashed(id)
 
     companion object {
-        /** Genre rows, shown when the library has enough titles for them. */
+        /** Lists named like a chart: "Top 10 …", "Top Watched Movies Of The Week". */
+        fun isTopList(name: String): Boolean = Regex("""\btop\b""", RegexOption.IGNORE_CASE).containsMatchIn(name)
+
         /** How many random titles a page sorts into genre rows. */
         const val POOL = 500
 

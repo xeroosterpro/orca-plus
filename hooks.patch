@@ -83,7 +83,7 @@ index 43d2d53a..3fd4cf6b 100644
                  setter = { prefs, value ->
                      prefs.update { updateUrl = value }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
-index e7b5db00..445c0ea1 100644
+index e7b5db00..8277a788 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
 @@ -97,7 +97,29 @@ class HomeSettingsService
@@ -104,7 +104,7 @@ index e7b5db00..445c0ea1 100644
 +                addonRows.mapIndexed { i, r ->
 +                    HomeRowConfigDisplay(100_000 + i, StringStringProvider(r.name), HomeRowConfig.GetItems(r.name, r.request))
 +                }
-+            return HomePageResolvedSettings(base.take(1) + extra + base.drop(1))
++            return settings.copy(rows = base.take(1) + extra + base.drop(1))
 +        }
 +
 +        init {
@@ -116,21 +116,19 @@ index e7b5db00..445c0ea1 100644
          @OptIn(ExperimentalSerializationApi::class)
          val jsonParser =
              Json {
-@@ -250,7 +272,7 @@ class HomeSettingsService
-                     createDefault(userId)
+@@ -251,6 +273,7 @@ class HomeSettingsService
                  }
  
--            currentSettings.update { resolvedSettings }
-+            currentSettings.update { withAddonRows(resolvedSettings) } // Orca+: merge in the collection rows
+             currentSettings.update { resolvedSettings }
++            currentSettings.update { withAddonRows(it) } // Orca+: merge in the collection rows (own line, so upgrades merge)
          }
  
          /**
-@@ -262,7 +284,7 @@ class HomeSettingsService
-                     resolve(index, config)
+@@ -263,6 +286,7 @@ class HomeSettingsService
                  }
              val resolvedSettings = HomePageResolvedSettings(resolvedRows)
--            currentSettings.update { resolvedSettings }
-+            currentSettings.update { withAddonRows(resolvedSettings) } // Orca+: merge in the collection rows
+             currentSettings.update { resolvedSettings }
++            currentSettings.update { withAddonRows(it) } // Orca+: merge in the collection rows (own line, so upgrades merge)
          }
  
          /**

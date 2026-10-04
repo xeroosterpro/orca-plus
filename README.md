@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="#-install"><b>Install</b></a> &nbsp;·&nbsp;
+  <a href="#-install"><b>Install</b> (Downloader code 3075012)</a> &nbsp;·&nbsp;
   <a href="#-features"><b>Features</b></a> &nbsp;·&nbsp;
   <a href="#-setup"><b>Setup</b></a> &nbsp;·&nbsp;
   <a href="#-faq"><b>FAQ</b></a> &nbsp;·&nbsp;
@@ -47,14 +47,22 @@
 
 Works on Android TV, Google TV, NVIDIA Shield and Fire TV.
 
-1. Install **Downloader** (by AFTVnews) from your TV's app store.
-2. Open it and enter:
+<table>
+  <tr>
+    <td align="center" width="260">
+      <sub>DOWNLOADER CODE</sub><br>
+      <b><code>3075012</code></b>
+    </td>
+    <td>
+      1. Install <b>Downloader</b> (by AFTVnews) from your TV's app store.<br>
+      2. Open it and enter <b><code>3075012</code></b>.<br>
+      3. Install, open <b>Wholphin+</b>, and sign in to your Jellyfin server.
+    </td>
+  </tr>
+</table>
 
-   ```
-   https://github.com/xeroosterpro/wholphin-plus/releases/latest/download/Wholphin-release.apk
-   ```
-
-3. Install, open **Wholphin+**, and sign in to your Jellyfin server.
+<sub>No code? Enter this link in Downloader instead:
+<code>https://github.com/xeroosterpro/wholphin-plus/releases/latest/download/Wholphin-release.apk</code></sub>
 
 The link always delivers the newest version. Wholphin+ runs **next to** Wholphin rather than
 replacing it, and offers its own updates from then on.

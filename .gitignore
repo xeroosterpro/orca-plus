@@ -1,0 +1,6 @@
+upstream/
+dist/
+addon/build/
+keystore.jks
+.keystore-pass
+.shield

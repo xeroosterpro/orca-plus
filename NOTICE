@@ -1,0 +1,16 @@
+Wholphin+ (add-ons for Wholphin)
+
+Wholphin+ as a whole is distributed under the GNU General Public License version 3 (LICENSE).
+
+It is built from:
+
+* Wholphin, https://github.com/damontecres/Wholphin, Copyright damontecres and contributors,
+  under the GNU General Public License (LICENSES/GPL-2.0-Wholphin.txt). The Wholphin licence names
+  no version number, so (GPL section 9) any published version may be used; Wholphin+ uses
+  version 3. hooks.patch modifies Wholphin source files; changes are marked "Wholphin+".
+
+* Third-party code under the Apache License 2.0 (LICENSES/Apache-2.0.txt, which carries its
+  copyright notice). Files containing adapted code say so in their header; all of them were
+  modified for Wholphin+.
+
+Not affiliated with or endorsed by the Wholphin project.

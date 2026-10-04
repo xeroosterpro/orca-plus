@@ -1,0 +1,82 @@
+# Builds Wholphin+ for the newest Wholphin release and publishes it, so installed copies get an
+# in-app update prompt. Runs every 6 hours (to catch new Wholphin releases), on every push, and
+# by hand. If hooks.patch stops applying to a new Wholphin release, this run fails and GitHub
+# emails the repo owner.
+name: Release
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # History was squashed after r8; keep release numbers increasing (see build.sh)
+  REV_OFFSET: 10
+
+concurrency:
+  group: release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build.sh numbers versions by commit count
+
+      # Cheap check first: skip the ~15 min build unless Wholphin released or this repo changed.
+      - name: Anything new?
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          WHOLPHIN=$(git ls-remote --tags --refs https://github.com/damontecres/Wholphin 'v*' \
+            | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          TAG="${WHOLPHIN}-r$(( $(git rev-list --count HEAD) + REV_OFFSET ))"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG is already released"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v5
+        if: steps.check.outputs.build == 'true'
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Build
+        if: steps.check.outputs.build == 'true'
+        env:
+          PUBLIC: "1"
+          REPO: ${{ github.repository }}
+          SHIELD: ""
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+        run: ./build.sh latest
+
+      - name: Publish
+        if: steps.check.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          # The title is what Wholphin's updater compares (vX.Y.Z-<revision>-g<hash>)
+          V=$(cat dist/release/VERSION)
+          WHOLPHIN=${V%%-*}
+          {
+            echo "Wholphin+ built on Wholphin $WHOLPHIN."
+            echo
+            echo "**New install:** download Wholphin-release.apk on the TV (e.g. with the Downloader app) and install it."
+            echo "**Already installed:** Wholphin+ offers this update itself (Install update, at the top of Settings)."
+            echo
+            echo "Source: this repository at ${GITHUB_SHA::7}. Wholphin: https://github.com/damontecres/Wholphin/releases/tag/$WHOLPHIN"
+          } > notes.md
+          gh release create "$TAG" dist/release/*.apk --title "$V" --notes-file notes.md

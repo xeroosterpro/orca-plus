@@ -1,0 +1,352 @@
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
+index 62f0e39b..8303ad11 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
+@@ -429,6 +429,7 @@ class MainActivityViewModel
+         private val backdropService: BackdropService,
+         private val appUpgradeHandler: AppUpgradeHandler,
+         private val intentService: IntentService,
++        private val sourceHook: com.wholphinplus.sources.SourceHook,
+     ) : ViewModel() {
+         private val mutex = Mutex()
+ 
+@@ -499,6 +500,26 @@ class MainActivityViewModel
+                             appUpgradeHandler.run()
+                         }
+                         appUpgradeHandler.copySubfont(false)
++                        sourceHook.takeImportedLogin()?.let { login ->
++                            val serverId = login.serverId.toUUIDOrNull()
++                            val userId = login.userId.toUUIDOrNull()
++                            if (serverId != null && userId != null) {
++                                try {
++                                    serverRepository.changeUser(
++                                        com.github.damontecres.wholphin.data.model.JellyfinServer(serverId, null, login.url, null),
++                                        com.github.damontecres.wholphin.data.model.JellyfinUser(
++                                            id = userId,
++                                            name = login.userName,
++                                            serverId = serverId,
++                                            accessToken = login.token,
++                                        ),
++                                    )
++                                } catch (ex: Exception) {
++                                    Timber.e(ex, "Imported Jellyfin login failed")
++                                    showToast(context, "Imported login failed: ${ex.message}")
++                                }
++                            }
++                        }
+                         val prefs =
+                             preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()
+                         val profileProtected =
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
+index 43d2d53a..9e760799 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
+@@ -563,7 +563,7 @@ sealed interface AppPreference<Pref, T> {
+         val UpdateUrl =
+             AppStringPreference<AppPreferences>(
+                 title = R.string.update_url,
+-                defaultValue = "https://api.github.com/repos/damontecres/Wholphin/releases/latest",
++                defaultValue = com.wholphinplus.sources.BuildConfig.UPDATE_URL,
+                 getter = { it.updateUrl },
+                 setter = { prefs, value ->
+                     prefs.update { updateUrl = value }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
+index e7b5db00..f01b9475 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
+@@ -97,7 +97,29 @@ class HomeSettingsService
+         private val imageUrlService: ImageUrlService,
+         private val suggestionService: SuggestionService,
+         private val displayPreferencesService: DisplayPreferencesService,
++        private val sourceHook: com.wholphinplus.sources.SourceHook,
+     ) {
++        // Wholphin+: Trakt/MDBList collection rows, placed right after the first row
++        private var addonRows: List<com.wholphinplus.sources.HomeRow> = emptyList()
++
++        private fun withAddonRows(settings: HomePageResolvedSettings): HomePageResolvedSettings {
++            val base =
++                settings.rows.filterNot { row ->
++                    (row.config as? HomeRowConfig.GetItems)?.let { sourceHook.isAddonRow(it.getItems) } == true
++                }
++            val extra =
++                addonRows.mapIndexed { i, r ->
++                    HomeRowConfigDisplay(100_000 + i, StringStringProvider(r.name), HomeRowConfig.GetItems(r.name, r.request))
++                }
++            return HomePageResolvedSettings(base.take(1) + extra + base.drop(1))
++        }
++
++        init {
++            sourceHook.watchHomeRows { rows ->
++                addonRows = rows
++                currentSettings.update { withAddonRows(it) }
++            }
++        }
+         @OptIn(ExperimentalSerializationApi::class)
+         val jsonParser =
+             Json {
+@@ -250,7 +272,7 @@ class HomeSettingsService
+                     createDefault(userId)
+                 }
+ 
+-            currentSettings.update { resolvedSettings }
++            currentSettings.update { withAddonRows(resolvedSettings) }
+         }
+ 
+         /**
+@@ -262,7 +284,7 @@ class HomeSettingsService
+                     resolve(index, config)
+                 }
+             val resolvedSettings = HomePageResolvedSettings(resolvedRows)
+-            currentSettings.update { resolvedSettings }
++            currentSettings.update { withAddonRows(resolvedSettings) }
+         }
+ 
+         /**
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
+index 4ce6583f..0c0d9c2a 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
+@@ -45,6 +45,7 @@ class LatestNextUpService
+         private val datePlayedService: DatePlayedService,
+         private val displayPreferencesService: DisplayPreferencesService,
+         private val favoriteWatchManager: FavoriteWatchManager,
++        private val sourceHook: com.wholphinplus.sources.SourceHook,
+     ) {
+         /**
+          * Get resume (continue watching) items for a user
+@@ -55,6 +56,8 @@ class LatestNextUpService
+             includeEpisodes: Boolean,
+             useSeriesForPrimary: Boolean = true,
+         ): List<BaseItem> {
++            // Wholphin+: pull progress from the extra servers first, so this row includes it
++            sourceHook.syncWatchState()
+             val request =
+                 GetResumeItemsRequest(
+                     userId = userId,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
+index 8c2d84cb..f8dc1392 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
+@@ -64,7 +64,7 @@ class UpdateChecker
+ 
+             private val NOTE_REGEX = Regex("<!-- app-note:(.+) -->")
+ 
+-            val ACTIVE = BuildConfig.UPDATING_ENABLED
++            val ACTIVE = com.wholphinplus.sources.BuildConfig.UPDATES_ENABLED
+         }
+ 
+         /**
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
+index 06607cf9..80c8ce28 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
+@@ -130,7 +130,11 @@ object AppModule {
+     @Singleton
+     fun okHttpFactory(
+         @StandardOkHttpClient okHttpClient: OkHttpClient,
+-    ) = CoroutineContextApiClientFactory(OkHttpFactory(okHttpClient))
++        progressOverlay: com.wholphinplus.sources.ProgressOverlay,
++    ) = CoroutineContextApiClientFactory(
++        // Wholphin+: merge progress from the extra servers into the main server's answers
++        OkHttpFactory(okHttpClient.newBuilder().addInterceptor(progressOverlay).build()),
++    )
+ 
+     @Provides
+     @Singleton
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
+index 63789d6c..f5621b87 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
+@@ -364,11 +364,23 @@ fun DestinationContent(
+ 
+         is Destination.Search -> {
+             LaunchedEffect(Unit) { onClearBackdrop.invoke() }
+-            SearchPage(
++            // Wholphin+: smart search when a TMDB key is set, else Wholphin's own page
++            val searchViewModel: com.github.damontecres.wholphin.ui.search.SearchViewModel =
++                androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++            com.wholphinplus.sources.ui.SmartSearchPage(
+                 initialQuery = destination.query,
+-                userPreferences = preferences,
++                onOpenLibraryItem = { id, series ->
++                    searchViewModel.navigateTo(Destination.MediaItem(id, if (series) BaseItemKind.SERIES else BaseItemKind.MOVIE))
++                },
+                 modifier = modifier,
+-            )
++            ) {
++                SearchPage(
++                    initialQuery = destination.query,
++                    userPreferences = preferences,
++                    modifier = modifier,
++                    viewModel = searchViewModel,
++                )
++            }
+         }
+ 
+         Destination.Debug -> {
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
+index 6ed210a2..d226700f 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
+@@ -125,6 +125,7 @@ fun PlaybackPage(
+         }
+     }
+     val state by viewModel.state.collectAsState()
++    com.wholphinplus.sources.ui.SourcePickerOverlay(viewModel.sourcePicker)
+     when (val st = state.loading) {
+         is LoadingState.Error -> {
+             ErrorMessage(st, modifier)
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
+index 79d2ae57..2b8251d0 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
+@@ -152,6 +152,7 @@ class PlaybackViewModel
+         private val imageUrlService: ImageUrlService,
+         private val screensaverService: ScreensaverService,
+         private val musicService: MusicService,
++        sourceHook: com.wholphinplus.sources.SourceHook,
+         @Assisted private val destination: Destination,
+     ) : ViewModel(),
+         Player.Listener,
+@@ -163,6 +164,8 @@ class PlaybackViewModel
+ 
+         val currentPlayer = MutableStateFlow<PlayerInstance?>(null)
+ 
++        val sourcePicker = sourceHook.newSession().also { addCloseable(it) }
++
+         internal lateinit var player: Player
+ 
+         private var mediaSession: MediaSession? = null
+@@ -465,6 +468,15 @@ class PlaybackViewModel
+ 
+                 val isLiveTv = item.type == BaseItemKind.TV_CHANNEL
+                 val base = item.data
++                val external =
++                    when (sourcePicker.pick(base, eligible = playlistItem is PlaylistItem.Media && !isLiveTv)) {
++                        com.wholphinplus.sources.Pick.Cancelled -> {
++                            withContext(WholphinDispatchers.Main) { navigationManager.goBack() }
++                            return@withContext false
++                        }
++                        is com.wholphinplus.sources.Pick.External -> true
++                        com.wholphinplus.sources.Pick.Jellyfin -> false
++                    }
+ 
+                 // Use the provided playback parameters or else check if the database has some
+                 val itemPlayback =
+@@ -586,8 +598,8 @@ class PlaybackViewModel
+                 withContext(WholphinDispatchers.Main) {
+                     changeStreams(
+                         item = item,
+-                        audioIndex = audioIndex,
+-                        subtitleIndex = subtitleIndex,
++                        audioIndex = audioIndex.takeUnless { external },
++                        subtitleIndex = subtitleIndex.takeUnless { external },
+                         positionMs = if (positionMs > 0) positionMs else C.TIME_UNSET,
+                         sourceId = mediaSource?.id,
+                         enableDirectPlay = !forceTranscoding,
+@@ -684,7 +696,7 @@ class PlaybackViewModel
+                 val source = response.mediaSources.firstOrNull()
+                 source?.let { source ->
+                     val mediaUrl =
+-                        if (source.supportsDirectPlay) {
++                        sourcePicker.urlFor(itemId) ?: if (source.supportsDirectPlay) {
+                             if (source.isRemote && source.path.isNotNullOrBlank()) {
+                                 Timber.i("Playback is remote for source: %s", source.id)
+                                 source.path
+@@ -715,6 +727,8 @@ class PlaybackViewModel
+                     }
+                     val transcodeType =
+                         when {
++                            sourcePicker.isExternal(itemId) -> PlayMethod.DIRECT_PLAY
++
+ //                        playerBackend == PlayerBackend.MPV -> PlayMethod.DIRECT_PLAY
+                             source.supportsDirectPlay -> PlayMethod.DIRECT_PLAY
+ 
+@@ -812,6 +826,7 @@ class PlaybackViewModel
+                             )
+                         player.addListener(activityListener)
+                         this@PlaybackViewModel.activityListener = activityListener
++                        sourcePicker.track(player, itemId)
+ 
+                         _state.update {
+                             it.copy(
+@@ -1388,6 +1403,8 @@ class PlaybackViewModel
+ 
+                         PlayMethod.DIRECT_STREAM, PlayMethod.DIRECT_PLAY -> {
+                             Timber.w("Playback error during ${it.playMethod}, falling back to transcoding")
++                            // An external source failed: retry from Jellyfin, starting with direct play
++                            val wasExternal = sourcePicker.dropExternal(currentItem.item.id)
+                             val currentPlayback = state.value.currentPlayback
+                             if (currentPlayback == null) {
+                                 Timber.w("Playback error, currentPlayback is null")
+@@ -1398,8 +1415,8 @@ class PlaybackViewModel
+                                 audioIndex = currentPlayback?.audioIndex,
+                                 subtitleIndex = currentPlayback?.subtitleIndex,
+                                 positionMs = player.currentPosition,
+-                                enableDirectPlay = false,
+-                                enableDirectStream = false,
++                                enableDirectPlay = wasExternal,
++                                enableDirectStream = wasExternal,
+                             )
+                             withContext(WholphinDispatchers.Main) {
+                                 player.prepare()
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
+index c97117b7..233ef432 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
+@@ -248,6 +248,10 @@ fun PreferencesContent(
+                         )
+                     }
+                 }
++                if (preferenceScreenOption == PreferenceScreenOption.BASIC) {
++                    // Top of the list: wrap-around focus from the last setting lands here
++                    item { com.wholphinplus.sources.ui.ExtraSourcesEntry(Modifier.focusRequester(firstFocusRequester)) }
++                }
+                 prefList.forEachIndexed { groupIndex, group ->
+                     item {
+                         Text(
+@@ -269,7 +273,9 @@ fun PreferencesContent(
+                                 .flatten()
+                     groupPreferences.forEachIndexed { prefIndex, pref ->
+                         pref as AppPreference<AppPreferences, Any>
+-                        val isFirst = groupIndex == 0 && prefIndex == 0 && !showUpdate
++                        val isFirst =
++                            groupIndex == 0 && prefIndex == 0 && !showUpdate &&
++                                preferenceScreenOption != PreferenceScreenOption.BASIC
+                         val isLast =
+                             groupIndex == prefList.lastIndex && prefIndex == groupPreferences.lastIndex
+                         item {
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index cff98add..8e89210e 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1,5 +1,5 @@
+ <resources>
+-    <string name="app_name" translatable="false">Wholphin</string>
++    <string name="app_name" translatable="false">Wholphin+</string>
+     <string name="app_name_long" translatable="false">Wholphin</string>
+ 
+     <string name="about">About</string>
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 7fddcdcd..8ad11a1a 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -30,3 +30,18 @@ dependencyResolutionManagement {
+ rootProject.name = "Wholphin"
+ include(":app")
+ include(":wholphin-mpv-stub")
++
++// ---- Wholphin+ addon (see ~/wholphin-addon). Kept out of app/build.gradle.kts, which changes every release.
++include(":wholphin-plus-sources")
++project(":wholphin-plus-sources").projectDir = file("../addon")
++gradle.beforeProject {
++    if (path == ":app") {
++        pluginManager.withPlugin("com.android.application") {
++            // Installs next to official Wholphin instead of replacing it
++            extensions.getByName("android").withGroovyBuilder {
++                ("getDefaultConfig"() as Any).withGroovyBuilder { "setApplicationIdSuffix"(".plus") }
++            }
++            dependencies.add("implementation", project(":wholphin-plus-sources"))
++        }
++    }
++}

@@ -1,4 +1,4 @@
-# Builds Wholphin+ for the newest Wholphin release and publishes it, so installed copies get an
+# Builds Orca+ for the newest Wholphin release and publishes it, so installed copies get an
 # in-app update prompt. Runs every 6 hours (to catch new Wholphin releases), on every push, and
 # by hand. If hooks.patch stops applying to a new Wholphin release, this run fails and GitHub
 # emails the repo owner.
@@ -72,11 +72,16 @@ jobs:
           V=$(cat dist/release/VERSION)
           WHOLPHIN=${V%%-*}
           {
-            echo "Wholphin+ built on Wholphin $WHOLPHIN."
+            echo "Orca+ built on Wholphin $WHOLPHIN."
             echo
             echo "**New install:** download Wholphin-release.apk on the TV (e.g. with the Downloader app) and install it."
-            echo "**Already installed:** Wholphin+ offers this update itself (Install update, at the top of Settings)."
+            echo "**Already installed:** Orca+ offers this update itself (Install update, at the top of Settings)."
             echo
             echo "Source: this repository at ${GITHUB_SHA::7}. Wholphin: https://github.com/damontecres/Wholphin/releases/tag/$WHOLPHIN"
+            echo
+            echo "**Source code:** the complete source for this build (Wholphin $WHOLPHIN with the Orca+ changes applied) is attached as Orca-plus-source-$V.zip."
           } > notes.md
-          gh release create "$TAG" dist/release/*.apk --title "$V" --notes-file notes.md
+          # Complete corresponding source for this exact build (GPL): patched Wholphin + the addon
+          zip -qr "dist/release/Orca-plus-source-$V.zip" upstream addon hooks.patch build.sh NOTICE LICENSE LICENSES README.md \
+            -x 'upstream/.git/*' '*/build/*' '*/.gradle/*' 'upstream/local.properties' 'addon/build/*'
+          gh release create "$TAG" dist/release/*.apk "dist/release/Orca-plus-source-$V.zip" --title "$V" --notes-file notes.md

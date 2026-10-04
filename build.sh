@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Wholphin+ = upstream Wholphin + the extra-sources addon, for any Wholphin release.
+# Build Orca+ = upstream Wholphin + the Orca+ addon, for any Wholphin release.
 #
 #   ./build.sh            latest Wholphin release, personal build, install on the Shield
 #   ./build.sh v1.0.8     a specific tag
@@ -20,7 +20,7 @@ TAG=${1:-latest}
 SHIELD=${SHIELD-$(cat .shield 2>/dev/null || true)}
 PUBLIC=${PUBLIC:-0}
 REPO=${REPO:-}
-PKG=com.github.damontecres.wholphin.plus
+PKG=io.github.xeroosterpro.orcaplus
 
 # AGP needs JDK 17-21. Prefer the portable JDK 21 (this laptop's system JRE 25 has no javac).
 JDK=${WHOLPHIN_JDK:-$HOME/.local/lib/jdk-21.0.12.1+1}
@@ -114,7 +114,7 @@ fi
 APK=$(ls "$OUT"/Wholphin-default-release-*"${ABI:+-$ABI}".apk 2>/dev/null | head -1)
 [ -n "$APK" ] || APK=$(ls "$OUT"/Wholphin-default-release-*.apk | grep -vE -- '-(arm64-v8a|armeabi-v7a|x86_64)\.apk$' | head -1)
 mkdir -p dist
-SIGNED=dist/Wholphin+-${TAG#v}${ABI:+-$ABI}.apk
+SIGNED=dist/Orca+-${TAG#v}${ABI:+-$ABI}.apk
 sign "$APK" "$SIGNED"
 HASH=$(sha256sum "$SIGNED" | cut -d' ' -f1)
 echo "==> Built $SIGNED (v$VERSION, $HASH)"

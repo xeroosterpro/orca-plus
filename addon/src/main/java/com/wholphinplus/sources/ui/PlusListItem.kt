@@ -11,7 +11,7 @@ import androidx.tv.material3.ListItem
 import androidx.tv.material3.ListItemDefaults
 import androidx.tv.material3.MaterialTheme
 
-/** The Wholphin+ list row: dark focus with an accent outline (no white fill), used everywhere. */
+/** The Orca+ list row: dark focus with an accent outline (no white fill), used everywhere. */
 @Composable
 internal fun PlusListItem(
     onClick: () -> Unit,

@@ -164,6 +164,12 @@ fun SmartSearchPage(
                     }
                 }.filter { it.second.isNotEmpty() }
             if (rows.isEmpty()) Text("No results", modifier = Modifier.padding(top = 16.dp))
+            Text(
+                TMDB_NOTICE,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, start = 10.dp),
+            )
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(top = 16.dp, bottom = 48.dp),

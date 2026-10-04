@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Orca+ app icon: background and foreground layers so launchers can mask it (circle, squircle...) -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@mipmap/orca_launcher_background" />
+    <foreground android:drawable="@mipmap/orca_launcher_foreground" />
+</adaptive-icon>

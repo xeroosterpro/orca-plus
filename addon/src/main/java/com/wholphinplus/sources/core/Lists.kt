@@ -107,7 +107,7 @@ class ListClient(
     }
 
     private fun trakt(s: ListSource.Trakt): FetchedList {
-        val key = traktClientId().ifBlank { error("Trakt links need a Trakt client ID (Settings → Wholphin+ → Home collections)") }
+        val key = traktClientId().ifBlank { error("Trakt links need a Trakt client ID (Settings → Orca+ → Home collections)") }
         val headers = mapOf("trakt-api-version" to "2", "trakt-api-key" to key, "Content-Type" to "application/json")
         val name =
             if (s.apiPath.endsWith("watchlist") || s.apiPath.endsWith("favorites")) {
@@ -150,7 +150,7 @@ class ListClient(
                 .Builder()
                 .url(url)
                 .header("Accept", "application/json")
-                .header("User-Agent", "Wholphin+")
+                .header("User-Agent", "Orca+")
                 .apply { headers.forEach { (k, v) -> header(k, v) } }
                 .build()
         http.newCall(req).execute().use { r ->

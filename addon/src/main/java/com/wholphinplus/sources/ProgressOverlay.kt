@@ -25,7 +25,7 @@ import javax.inject.Singleton
 
 /**
  * Watch progress the main server doesn't know about: things watched on the extra servers, or
- * streamed from them in Wholphin+. Some main servers (Silo) ignore every client progress write,
+ * streamed from them in Orca+. Some main servers (Silo) ignore every client progress write,
  * so instead of writing it there, this interceptor sits on Wholphin's connection to the main
  * server and merges it into the answers. Continue Watching, Next Up, details pages and Resume all
  * see it. Nothing is ever sent to the main server.

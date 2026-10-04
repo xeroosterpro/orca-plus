@@ -38,6 +38,7 @@ internal object Importer {
     fun run(
         context: Context,
         store: ConnectionStore,
+        collections: HomeCollections? = null,
     ): ImportedLogin? {
         val file = context.getExternalFilesDir(null)?.let { File(it, FILE_NAME) } ?: return null
         if (!file.exists()) return null
@@ -46,6 +47,12 @@ internal object Importer {
             root.array("sources").filterIsInstance<JsonObject>().mapNotNull(::toConnection).forEach {
                 store.save(it)
                 Timber.i("Imported source server %s", it.label)
+            }
+            // "collections": ["https://mdblist.com/lists/…", …] → home rows (refreshed on next home load)
+            if (collections != null) {
+                root.array("collections").mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                    .filter { url -> collections.lists.value.none { it.url.equals(url, true) } }
+                    .forEach { collections.add(collections.newCollection(it)) }
             }
             root.string("tmdbApiKey").takeIf { it.isNotBlank() }?.let {
                 store.setTmdbKey(it)

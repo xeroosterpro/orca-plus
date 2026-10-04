@@ -1,3 +1,31 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index e005cb6f..eb906ae1 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -72,7 +72,7 @@ configure<ApplicationExtension> {
+     compileSdk = libs.versions.compileSdk.getInt()
+ 
+     defaultConfig {
+-        applicationId = "com.github.damontecres.wholphin"
++        applicationId = "io.github.xeroosterpro.orcaplus" // Orca+: its own app, installed next to Wholphin
+         minSdk = libs.versions.minSdk.getInt()
+         targetSdk = libs.versions.targetSdk.getInt()
+         versionCode = gitTags.trim().lines().size
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 582e000a..380c7e8b 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -39,8 +39,8 @@
+ 
+     <application
+         android:allowBackup="true"
+-        android:banner="@mipmap/ic_banner"
+-        android:icon="@mipmap/ic_launcher"
++        android:banner="@mipmap/orca_banner"
++        android:icon="@mipmap/orca_launcher"
+         android:label="@string/app_name"
+         android:supportsRtl="true"
+         android:theme="@style/Theme.Wholphin"
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 index 62f0e39b..8303ad11 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
@@ -51,7 +79,7 @@ index 43d2d53a..9e760799 100644
                  setter = { prefs, value ->
                      prefs.update { updateUrl = value }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
-index e7b5db00..f01b9475 100644
+index e7b5db00..c29b59fa 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
 @@ -97,7 +97,29 @@ class HomeSettingsService
@@ -60,7 +88,7 @@ index e7b5db00..f01b9475 100644
          private val displayPreferencesService: DisplayPreferencesService,
 +        private val sourceHook: com.wholphinplus.sources.SourceHook,
      ) {
-+        // Wholphin+: Trakt/MDBList collection rows, placed right after the first row
++        // Orca+: Trakt/MDBList collection rows, placed right after the first row
 +        private var addonRows: List<com.wholphinplus.sources.HomeRow> = emptyList()
 +
 +        private fun withAddonRows(settings: HomePageResolvedSettings): HomePageResolvedSettings {
@@ -103,7 +131,7 @@ index e7b5db00..f01b9475 100644
  
          /**
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
-index 4ce6583f..0c0d9c2a 100644
+index 4ce6583f..7ccb72bc 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
 @@ -45,6 +45,7 @@ class LatestNextUpService
@@ -118,7 +146,7 @@ index 4ce6583f..0c0d9c2a 100644
              includeEpisodes: Boolean,
              useSeriesForPrimary: Boolean = true,
          ): List<BaseItem> {
-+            // Wholphin+: pull progress from the extra servers first, so this row includes it
++            // Orca+: pull progress from the extra servers first, so this row includes it
 +            sourceHook.syncWatchState()
              val request =
                  GetResumeItemsRequest(
@@ -137,7 +165,7 @@ index 8c2d84cb..f8dc1392 100644
  
          /**
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
-index 06607cf9..80c8ce28 100644
+index 06607cf9..3afb4d7f 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
 @@ -130,7 +130,11 @@ object AppModule {
@@ -147,14 +175,14 @@ index 06607cf9..80c8ce28 100644
 -    ) = CoroutineContextApiClientFactory(OkHttpFactory(okHttpClient))
 +        progressOverlay: com.wholphinplus.sources.ProgressOverlay,
 +    ) = CoroutineContextApiClientFactory(
-+        // Wholphin+: merge progress from the extra servers into the main server's answers
++        // Orca+: merge progress from the extra servers into the main server's answers
 +        OkHttpFactory(okHttpClient.newBuilder().addInterceptor(progressOverlay).build()),
 +    )
  
      @Provides
      @Singleton
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
-index 63789d6c..f5621b87 100644
+index 63789d6c..32097013 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
 @@ -364,11 +364,23 @@ fun DestinationContent(
@@ -162,7 +190,7 @@ index 63789d6c..f5621b87 100644
          is Destination.Search -> {
              LaunchedEffect(Unit) { onClearBackdrop.invoke() }
 -            SearchPage(
-+            // Wholphin+: smart search when a TMDB key is set, else Wholphin's own page
++            // Orca+: smart search when a TMDB key is set, else Wholphin's own page
 +            val searchViewModel: com.github.damontecres.wholphin.ui.search.SearchViewModel =
 +                androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
 +            com.wholphinplus.sources.ui.SmartSearchPage(
@@ -317,35 +345,31 @@ index c97117b7..233ef432 100644
                              groupIndex == prefList.lastIndex && prefIndex == groupPreferences.lastIndex
                          item {
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index cff98add..8e89210e 100644
+index cff98add..8e600c48 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1,5 +1,5 @@
  <resources>
 -    <string name="app_name" translatable="false">Wholphin</string>
-+    <string name="app_name" translatable="false">Wholphin+</string>
++    <string name="app_name" translatable="false">Orca+</string>
      <string name="app_name_long" translatable="false">Wholphin</string>
  
      <string name="about">About</string>
 diff --git a/settings.gradle.kts b/settings.gradle.kts
-index 7fddcdcd..8ad11a1a 100644
+index 7fddcdcd..91bf7d84 100644
 --- a/settings.gradle.kts
 +++ b/settings.gradle.kts
-@@ -30,3 +30,18 @@ dependencyResolutionManagement {
+@@ -30,3 +30,14 @@ dependencyResolutionManagement {
  rootProject.name = "Wholphin"
  include(":app")
  include(":wholphin-mpv-stub")
 +
-+// ---- Wholphin+ addon (see ~/wholphin-addon). Kept out of app/build.gradle.kts, which changes every release.
++// ---- Orca+ addon module. Kept out of app/build.gradle.kts, which changes every release.
 +include(":wholphin-plus-sources")
 +project(":wholphin-plus-sources").projectDir = file("../addon")
 +gradle.beforeProject {
 +    if (path == ":app") {
 +        pluginManager.withPlugin("com.android.application") {
-+            // Installs next to official Wholphin instead of replacing it
-+            extensions.getByName("android").withGroovyBuilder {
-+                ("getDefaultConfig"() as Any).withGroovyBuilder { "setApplicationIdSuffix"(".plus") }
-+            }
 +            dependencies.add("implementation", project(":wholphin-plus-sources"))
 +        }
 +    }

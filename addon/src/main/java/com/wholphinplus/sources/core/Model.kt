@@ -1,5 +1,5 @@
 // Contains code adapted from a third-party project under the Apache License 2.0 and modified
-// for Wholphin+. See NOTICE and LICENSES/Apache-2.0.txt.
+// for Orca+. See NOTICE and LICENSES/Apache-2.0.txt.
 package com.wholphinplus.sources.core
 
 import kotlinx.serialization.Serializable

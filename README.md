@@ -1,16 +1,16 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="Wholphin+ — every server, one remote" width="100%">
+  <img src="docs/banner.svg" alt="Orca+ — every server, one remote" width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/xeroosterpro/wholphin-plus/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/xeroosterpro/wholphin-plus?style=flat-square&label=release&color=8b5cf6"></a>
-  <a href="https://github.com/xeroosterpro/wholphin-plus/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/xeroosterpro/wholphin-plus/total?style=flat-square&color=6d28d9"></a>
+  <a href="https://github.com/xeroosterpro/orca-plus/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/xeroosterpro/orca-plus?style=flat-square&label=release&color=8b5cf6"></a>
+  <a href="https://github.com/xeroosterpro/orca-plus/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/xeroosterpro/orca-plus/total?style=flat-square&color=6d28d9"></a>
   <img alt="Android TV" src="https://img.shields.io/badge/Android%20TV%20·%20Google%20TV%20·%20Fire%20TV-111?style=flat-square&logo=android&logoColor=3ddc84">
   <a href="LICENSE"><img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-2563eb?style=flat-square"></a>
 </p>
 
 <p align="center">
-  <b>Wholphin+</b> is <a href="https://github.com/damontecres/Wholphin">Wholphin</a>, the Android TV client for Jellyfin, extended to work with<br>
+  <b>Orca+</b> is an Android TV app for Jellyfin, built on <a href="https://github.com/damontecres/Wholphin">Wholphin</a> and extended to work with<br>
   all of your media servers: stream from whichever has the best copy, search intelligently,<br>
   and build your home screen from the lists you follow.
 </p>
@@ -25,14 +25,14 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/home-collection.jpg" alt="Wholphin+ home screen" width="92%">
+  <img src="docs/screenshots/home-collection.jpg" alt="Orca+ home screen" width="92%">
 </p>
 
 <br>
 
 ## ◆ At a glance
 
-|  | Wholphin | **Wholphin+** |
+|  | Wholphin | **Orca+** |
 |---|:---:|:---:|
 | Jellyfin library, playback and home screen | ✓ | ✓ |
 | Choose between copies on **Plex, Emby and other Jellyfin servers** | | ✓ |
@@ -57,26 +57,26 @@ Works on Android TV, Google TV, NVIDIA Shield and Fire TV.
     <td>
       1. Install <b>Downloader</b> (by AFTVnews) from your TV's app store.<br>
       2. Open it and enter <b><code>3075012</code></b>.<br>
-      3. Install, open <b>Wholphin+</b>, and sign in to your Jellyfin server.
+      3. Install, open <b>Orca+</b>, and sign in to your Jellyfin server.
     </td>
   </tr>
 </table>
 
 <sub>No code? Enter this link in Downloader instead:
-<code>https://github.com/xeroosterpro/wholphin-plus/releases/latest/download/Wholphin-release.apk</code></sub>
+<code>https://github.com/xeroosterpro/orca-plus/releases/latest/download/Wholphin-release.apk</code></sub>
 
-The link always delivers the newest version. Wholphin+ runs **next to** Wholphin rather than
+The link always delivers the newest version. Orca+ runs **next to** Wholphin rather than
 replacing it, and offers its own updates from then on.
 
 <br>
 
 ## ◆ Updates
 
-Wholphin+ stays in step with Wholphin automatically. When Wholphin releases a new version, a new
-Wholphin+ is built from it and published within a few hours: Wholphin's latest improvements, plus
-everything Wholphin+ adds.
+Orca+ stays in step with Wholphin automatically. When Wholphin releases a new version, a new
+Orca+ is built from it and published within a few hours: Wholphin's latest improvements, plus
+everything Orca+ adds.
 
-- **Already installed?** Wholphin+ tells you when an update is ready (*Install update* at the top of
+- **Already installed?** Orca+ tells you when an update is ready (*Install update* at the top of
   Settings). One click and you're current.
 - **New install?** Downloader code `3075012` always gets the newest version.
 
@@ -86,7 +86,7 @@ everything Wholphin+ adds.
 
 ### Every copy, one choice
 
-Press Play and Wholphin+ looks for the same movie or episode on every server you've connected. It
+Press Play and Orca+ looks for the same movie or episode on every server you've connected. It
 ranks the copies by resolution, then Dolby Vision/HDR, then bitrate. The best one is already
 selected, so **OK simply plays it**.
 
@@ -118,7 +118,7 @@ alternate titles, gives actors their own rows, and takes plain requests:
 ### Beyond your main server
 
 A title that only exists on your other servers is still one click away. Open it from search and
-Wholphin+ finds every copy (choose the season and episode for shows) and plays it in place.
+Orca+ finds every copy (choose the season and episode for shows) and plays it in place.
 
 <p align="center"><img src="docs/screenshots/other-servers.jpg" alt="A film available only on other servers, with three copies to choose from" width="88%"></p>
 
@@ -142,11 +142,11 @@ Lists are re-checked every few hours, so **when the list changes, the row follow
 <table>
   <tr>
     <td width="50%"><img src="docs/screenshots/collections-settings.jpg" alt="Home collections settings"></td>
-    <td width="50%"><img src="docs/screenshots/settings.jpg" alt="Wholphin+ settings menu"></td>
+    <td width="50%"><img src="docs/screenshots/settings.jpg" alt="Orca+ settings menu"></td>
   </tr>
   <tr>
     <td align="center"><sub>Add, hide, reorder, rename or refresh lists</sub></td>
-    <td align="center"><sub>Everything lives under <b>Settings → Wholphin+</b></sub></td>
+    <td align="center"><sub>Everything lives under <b>Settings → Orca+</b></sub></td>
   </tr>
 </table>
 
@@ -154,7 +154,7 @@ Lists are re-checked every few hours, so **when the list changes, the row follow
 
 ## ◆ Setup
 
-Everything is under **Settings → Wholphin+**, the first row of Settings (press Up).
+Everything is under **Settings → Orca+**, the first row of Settings (press Up).
 
 | | Where | You'll need |
 |---|---|---|
@@ -169,7 +169,7 @@ Everything is under **Settings → Wholphin+**, the first row of Settings (press
 <details>
 <summary><b>Does it replace Wholphin?</b></summary>
 <br>
-No. Wholphin+ is a separate app that installs next to Wholphin, so you can keep both.
+No. Orca+ is a separate app with its own name and icon. It installs next to Wholphin, so you can keep both.
 </details>
 
 <details>
@@ -183,7 +183,7 @@ Jellyfin server is never modified; progress from other servers is merged inside 
 <summary><b>How are my logins stored?</b></summary>
 <br>
 Passwords are used once to sign in and are never stored. The resulting access tokens are encrypted
-with the TV's Android Keystore. Wholphin+ talks only to your own servers, TMDB, and the list sites
+with the TV's Android Keystore. Orca+ talks only to your own servers, TMDB, and the list sites
 you add.
 </details>
 
@@ -198,7 +198,7 @@ normal libraries.
 <details>
 <summary><b>Where do I report a problem?</b></summary>
 <br>
-Here, in <a href="https://github.com/xeroosterpro/wholphin-plus/issues">Issues</a>. Wholphin+ is unofficial,
+Here, in <a href="https://github.com/xeroosterpro/orca-plus/issues">Issues</a>. Orca+ is unofficial,
 so please don't report its problems to the Wholphin project.
 </details>
 
@@ -206,9 +206,9 @@ so please don't report its problems to the Wholphin project.
 
 ## ◆ Under the hood
 
-Wholphin+ is designed to keep pace with Wholphin rather than fork away from it.
+Orca+ is designed to keep pace with Wholphin rather than fork away from it.
 
-- **`addon/`** holds every Wholphin+ feature as a separate module.
+- **`addon/`** holds every Orca+ feature as a separate module.
 - **`hooks.patch`** is the only change to Wholphin itself: about 120 lines across a dozen files.
 - **`build.sh`** checks out a Wholphin release, applies the patch and builds.
 - **GitHub Actions** runs it automatically whenever Wholphin publishes a new version. If a Wholphin
@@ -222,7 +222,7 @@ Wholphin+ is designed to keep pace with Wholphin rather than fork away from it.
 Requires JDK 17–21 and the Android SDK.
 
 ```sh
-./build.sh                                   # latest Wholphin release + Wholphin+
+./build.sh                                   # latest Wholphin release + Orca+
 PUBLIC=1 REPO=you/wholphin-plus ./build.sh   # the shared build, as CI produces it
 ```
 </details>
@@ -231,8 +231,12 @@ PUBLIC=1 REPO=you/wholphin-plus ./build.sh   # the shared build, as CI produces 
 
 ## ◆ License
 
-Wholphin+ is released under the **GPL-3.0** ([LICENSE](LICENSE)). It is built on
+Orca+ is released under the **GPL-3.0** ([LICENSE](LICENSE)). It is built on
 [Wholphin](https://github.com/damontecres/Wholphin) by damontecres (GPL) and includes third-party
 code under the Apache License 2.0. See [NOTICE](NOTICE) and [LICENSES/](LICENSES).
 
-<p align="center"><sub>Unofficial · not affiliated with or endorsed by the Wholphin project</sub></p>
+Every release includes its complete source code (`Orca-plus-source-….zip`): the exact Wholphin
+version with the Orca+ changes applied, ready to build.
+
+<p align="center"><sub>Unofficial · not affiliated with or endorsed by the Wholphin project<br>
+Search data and images from <a href="https://www.themoviedb.org/">TMDB</a>. This product uses the TMDB API but is not endorsed or certified by TMDB.</sub></p>

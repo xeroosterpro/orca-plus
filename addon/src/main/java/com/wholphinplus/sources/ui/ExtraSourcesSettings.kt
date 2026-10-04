@@ -80,7 +80,7 @@ fun ExtraSourcesEntry(modifier: Modifier = Modifier) {
     ListItem(
         selected = false,
         onClick = { open = true },
-        headlineContent = { Text("Wholphin+") },
+        headlineContent = { Text("Orca+") },
         supportingContent = {
             Text(
                 listOf(
@@ -110,7 +110,7 @@ fun ExtraSourcesEntry(modifier: Modifier = Modifier) {
 }
 
 private sealed interface Screen {
-    /** Wholphin+ start page: Extra sources, Search, Home collections. */
+    /** Orca+ start page: Extra sources, Search, Home collections. */
     data object Menu : Screen
 
     /** Extra sources: the server list. */
@@ -200,7 +200,7 @@ private fun ExtraSourcesScreen(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val (title, about) =
             when (screen) {
-                Screen.Menu -> "Wholphin+" to "Add-ons for Wholphin. Press Back to leave."
+                Screen.Menu -> "Orca+" to "Everything Orca+ adds to Wholphin. Press Back to leave."
                 Screen.TmdbKey -> "Search" to "Smart search."
                 Screen.Collections, Screen.AddCollection, is Screen.Collection, Screen.TraktKey ->
                     "Home collections" to "Trakt and MDBList lists as rows on your home screen. They follow the list as it changes " +
@@ -389,6 +389,7 @@ private fun ExtraSourcesScreen(
                         "Settings → API. Leave empty to use Wholphin's normal search.",
                 )
                 Field("TMDB API key (v3)", key, Modifier.focusRequester(focus))
+                Text(TMDB_NOTICE, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 ActionRow {
                     Button(onClick = {
                         hook.store.setTmdbKey(key.text.toString())
@@ -482,7 +483,7 @@ private fun Field(
     }
 }
 
-// ---------------------------------------------------------------- Wholphin+ menu
+// ---------------------------------------------------------------- Orca+ menu
 
 @Composable
 private fun MenuScreen(
@@ -519,7 +520,7 @@ private fun MenuScreen(
         }
         item {
             Text(
-                "Wholphin+ is built on Wholphin by damontecres (GPL). Not affiliated with Wholphin.",
+                "Orca+ is built on Wholphin by damontecres (GPL). Not affiliated with Wholphin.\n" + TMDB_NOTICE,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 16.dp),
@@ -687,3 +688,6 @@ private fun TraktKeyScreen(
         Button(onClick = onDone) { Text("Cancel") }
     }
 }
+
+/** Required by TMDB's API terms wherever TMDB data is used. */
+internal const val TMDB_NOTICE = "Search data and images from TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB."

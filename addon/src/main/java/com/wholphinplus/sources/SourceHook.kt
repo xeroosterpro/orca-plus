@@ -67,7 +67,7 @@ class SourceHook
                         .readTimeout(20, TimeUnit.SECONDS)
                         .build(),
                 deviceId = deviceId(),
-                clientName = "Wholphin+",
+                clientName = "Orca+",
                 clientVersion = "1.0",
             )
         }
@@ -131,7 +131,7 @@ class SourceHook
         internal fun connectionFor(id: String): ServerConnection? = store.connections.value.firstOrNull { it.connectionId == id }
 
         /** Apply a pushed import file, if any. Returns the Jellyfin login Wholphin should switch to. */
-        fun takeImportedLogin(): ImportedLogin? = Importer.run(context, store).also { clearCache() }
+        fun takeImportedLogin(): ImportedLogin? = Importer.run(context, store, collections).also { clearCache() }
 
         /** Saved servers that can be searched, minus the Jellyfin server Wholphin is already using. */
         internal fun searchableConnections(): List<ServerConnection> {
@@ -423,7 +423,7 @@ internal data class MainItem(
     val title: String,
 )
 
-/** A home row added by Wholphin+ (a Trakt/MDBList collection). */
+/** A home row added by Orca+ (a Trakt/MDBList collection). */
 data class HomeRow(
     val name: String,
     val request: org.jellyfin.sdk.model.api.request.GetItemsRequest,

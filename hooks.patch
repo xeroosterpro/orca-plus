@@ -196,7 +196,11 @@ index 0cf42622..4cfebe26 100644
 -                    if (key.fullScreen) {
 +                    // Orca+: Cinema mode draws its own full-screen home (top menu instead of the side drawer)
 +                    if (key.fullScreen || ((key is Destination.Home ||
-+                            (key is Destination.MediaItem && (key.type == org.jellyfin.sdk.model.api.BaseItemKind.MOVIE || key.type == org.jellyfin.sdk.model.api.BaseItemKind.SERIES))) &&
++                            (key is Destination.MediaItem && (
++                                key.type == org.jellyfin.sdk.model.api.BaseItemKind.MOVIE ||
++                                    key.type == org.jellyfin.sdk.model.api.BaseItemKind.SERIES ||
++                                    com.wholphinplus.sources.cinema.isCinemaLibraryRoute(key.type, key.collectionType)
++                                ))) &&
 +                            com.wholphinplus.sources.cinema.cinemaModeOn())) {
                          DestinationContent(
                              destination = key,
@@ -223,6 +227,7 @@ index 63789d6c..fe5c29de 100644
 +                    onNavigate = { target ->
 +                        nav.navigateTo(
 +                            when (target) {
++                                com.wholphinplus.sources.cinema.CinemaNav.Home -> Destination.Home()
 +                                is com.wholphinplus.sources.cinema.CinemaNav.Library ->
 +                                    Destination.MediaItem(target.id, target.kind, target.collectionType)
 +                                com.wholphinplus.sources.cinema.CinemaNav.MyList -> Destination.Favorites
@@ -247,6 +252,34 @@ index 63789d6c..fe5c29de 100644
          }
  
          is Destination.MediaItem -> {
++            // Orca+: Cinema mode Movies / Shows libraries (not Wholphin's poster grid)
++            if (com.wholphinplus.sources.cinema.cinemaModeOn() &&
++                com.wholphinplus.sources.cinema.isCinemaLibraryRoute(destination.type, destination.collectionType)
++            ) {
++                val nav: com.github.damontecres.wholphin.ui.search.SearchViewModel =
++                    androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++                com.wholphinplus.sources.cinema.CinemaLibrary(
++                    libraryId = destination.itemId,
++                    collectionType = destination.collectionType!!,
++                    onOpen = { id, kind -> nav.navigateTo(Destination.MediaItem(id, kind)) },
++                    onPlay = { id, positionMs -> nav.navigateTo(Destination.Playback(id, positionMs)) },
++                    onNavigate = { target ->
++                        nav.navigateTo(
++                            when (target) {
++                                com.wholphinplus.sources.cinema.CinemaNav.Home -> Destination.Home()
++                                is com.wholphinplus.sources.cinema.CinemaNav.Library ->
++                                    Destination.MediaItem(target.id, target.kind, target.collectionType)
++                                com.wholphinplus.sources.cinema.CinemaNav.MyList -> Destination.Favorites
++                                com.wholphinplus.sources.cinema.CinemaNav.Search -> Destination.Search()
++                                com.wholphinplus.sources.cinema.CinemaNav.Settings ->
++                                    Destination.Settings(com.github.damontecres.wholphin.ui.preferences.PreferenceScreenOption.BASIC)
++                            },
++                        )
++                    },
++                    modifier = modifier,
++                )
++                return
++            }
 +            // Orca+: Cinema mode title page for movies and shows
 +            if (com.wholphinplus.sources.cinema.cinemaModeOn() &&
 +                (destination.type == BaseItemKind.MOVIE || destination.type == BaseItemKind.SERIES)

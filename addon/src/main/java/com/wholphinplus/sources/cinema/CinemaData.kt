@@ -181,6 +181,82 @@ internal class CinemaRepository(
             }
         }
 
+    /** Movies or Shows tab: genre rows and a billboard, scoped to that library. */
+    suspend fun loadLibrary(
+        libraryId: UUID,
+        collectionType: CollectionType,
+    ): CinemaHomeData =
+        withContext(Dispatchers.IO) {
+            val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() }
+                ?: error("Not signed in")
+            val views =
+                runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList())
+            val libs = views.map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
+            val movieLibs = libs.filter { it.collectionType == CollectionType.MOVIES }
+            val showLibs = libs.filter { it.collectionType == CollectionType.TVSHOWS }
+            val itemKind =
+                when (collectionType) {
+                    CollectionType.MOVIES -> BaseItemKind.MOVIE
+                    CollectionType.TVSHOWS -> BaseItemKind.SERIES
+                    else -> error("Unsupported library")
+                }
+            coroutineScope {
+                val latest =
+                    async {
+                        safe {
+                            api.userLibraryApi.getLatestMedia(
+                                GetLatestMediaRequest(
+                                    userId = userId,
+                                    parentId = libraryId,
+                                    limit = 24,
+                                    fields = fields,
+                                    enableImageTypes = images,
+                                    imageTypeLimit = 1,
+                                    groupItems = collectionType == CollectionType.TVSHOWS,
+                                ),
+                            ).content
+                        }
+                    }
+                val genres =
+                    GENRE_ROWS.map { (genre, title) ->
+                        async {
+                            title to
+                                safe {
+                                    api.itemsApi.getItems(
+                                        GetItemsRequest(
+                                            userId = userId,
+                                            parentId = libraryId,
+                                            genres = listOf(genre),
+                                            includeItemTypes = listOf(itemKind),
+                                            recursive = true,
+                                            sortBy = listOf(ItemSortBy.RANDOM),
+                                            limit = 24,
+                                            fields = fields,
+                                            enableImageTypes = images,
+                                            imageTypeLimit = 1,
+                                        ),
+                                    ).content.items
+                                }
+                        }
+                    }
+                val latestItems = latest.await().map(::toItem)
+                val rows =
+                    buildList {
+                        if (latestItems.isNotEmpty()) add(CinemaRow("Recently Added", latestItems))
+                        genres.awaitAll().filter { it.second.size >= 6 }.take(6).forEach { (title, items) ->
+                            add(CinemaRow(title, items.map(::toItem)))
+                        }
+                    }
+                val featured =
+                    latestItems
+                        .filter { it.backdropUrl != null && it.overview.isNotBlank() }
+                        .shuffled()
+                        .take(6)
+                        .ifEmpty { rows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
+                CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull())
+            }
+        }
+
     // ------------------------------------------------------------ details page
 
     suspend fun details(

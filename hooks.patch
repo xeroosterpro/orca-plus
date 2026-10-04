@@ -12,11 +12,14 @@ index e005cb6f..eb906ae1 100644
          targetSdk = libs.versions.targetSdk.getInt()
          versionCode = gitTags.trim().lines().size
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index 582e000a..380c7e8b 100644
+index 582e000a..4b93d14e 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -39,8 +39,8 @@
+@@ -37,10 +37,11 @@
+         </intent>
+     </queries>
  
++    <!-- Orca+: own icon and TV banner -->
      <application
          android:allowBackup="true"
 -        android:banner="@mipmap/ic_banner"
@@ -27,21 +30,22 @@ index 582e000a..380c7e8b 100644
          android:supportsRtl="true"
          android:theme="@style/Theme.Wholphin"
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
-index 62f0e39b..8303ad11 100644
+index 62f0e39b..c320a949 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 @@ -429,6 +429,7 @@ class MainActivityViewModel
          private val backdropService: BackdropService,
          private val appUpgradeHandler: AppUpgradeHandler,
          private val intentService: IntentService,
-+        private val sourceHook: com.wholphinplus.sources.SourceHook,
++        private val sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
      ) : ViewModel() {
          private val mutex = Mutex()
  
-@@ -499,6 +500,26 @@ class MainActivityViewModel
+@@ -499,6 +500,27 @@ class MainActivityViewModel
                              appUpgradeHandler.run()
                          }
                          appUpgradeHandler.copySubfont(false)
++                        // Orca+: apply a one-time imported login, if one is waiting
 +                        sourceHook.takeImportedLogin()?.let { login ->
 +                            val serverId = login.serverId.toUUIDOrNull()
 +                            val userId = login.userId.toUUIDOrNull()
@@ -66,7 +70,7 @@ index 62f0e39b..8303ad11 100644
                              preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()
                          val profileProtected =
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
-index 43d2d53a..9e760799 100644
+index 43d2d53a..3fd4cf6b 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
 @@ -563,7 +563,7 @@ sealed interface AppPreference<Pref, T> {
@@ -74,19 +78,19 @@ index 43d2d53a..9e760799 100644
              AppStringPreference<AppPreferences>(
                  title = R.string.update_url,
 -                defaultValue = "https://api.github.com/repos/damontecres/Wholphin/releases/latest",
-+                defaultValue = com.wholphinplus.sources.BuildConfig.UPDATE_URL,
++                defaultValue = com.wholphinplus.sources.BuildConfig.UPDATE_URL, // Orca+: update URL for Orca+ releases
                  getter = { it.updateUrl },
                  setter = { prefs, value ->
                      prefs.update { updateUrl = value }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
-index e7b5db00..c29b59fa 100644
+index e7b5db00..445c0ea1 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
 @@ -97,7 +97,29 @@ class HomeSettingsService
          private val imageUrlService: ImageUrlService,
          private val suggestionService: SuggestionService,
          private val displayPreferencesService: DisplayPreferencesService,
-+        private val sourceHook: com.wholphinplus.sources.SourceHook,
++        private val sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
      ) {
 +        // Orca+: Trakt/MDBList collection rows, placed right after the first row
 +        private var addonRows: List<com.wholphinplus.sources.HomeRow> = emptyList()
@@ -117,7 +121,7 @@ index e7b5db00..c29b59fa 100644
                  }
  
 -            currentSettings.update { resolvedSettings }
-+            currentSettings.update { withAddonRows(resolvedSettings) }
++            currentSettings.update { withAddonRows(resolvedSettings) } // Orca+: merge in the collection rows
          }
  
          /**
@@ -126,19 +130,19 @@ index e7b5db00..c29b59fa 100644
                  }
              val resolvedSettings = HomePageResolvedSettings(resolvedRows)
 -            currentSettings.update { resolvedSettings }
-+            currentSettings.update { withAddonRows(resolvedSettings) }
++            currentSettings.update { withAddonRows(resolvedSettings) } // Orca+: merge in the collection rows
          }
  
          /**
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
-index 4ce6583f..7ccb72bc 100644
+index 4ce6583f..8a52a494 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
 @@ -45,6 +45,7 @@ class LatestNextUpService
          private val datePlayedService: DatePlayedService,
          private val displayPreferencesService: DisplayPreferencesService,
          private val favoriteWatchManager: FavoriteWatchManager,
-+        private val sourceHook: com.wholphinplus.sources.SourceHook,
++        private val sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
      ) {
          /**
           * Get resume (continue watching) items for a user
@@ -152,7 +156,7 @@ index 4ce6583f..7ccb72bc 100644
                  GetResumeItemsRequest(
                      userId = userId,
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
-index 8c2d84cb..f8dc1392 100644
+index 8c2d84cb..f611df4d 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
 @@ -64,7 +64,7 @@ class UpdateChecker
@@ -160,7 +164,7 @@ index 8c2d84cb..f8dc1392 100644
              private val NOTE_REGEX = Regex("<!-- app-note:(.+) -->")
  
 -            val ACTIVE = BuildConfig.UPDATING_ENABLED
-+            val ACTIVE = com.wholphinplus.sources.BuildConfig.UPDATES_ENABLED
++            val ACTIVE = com.wholphinplus.sources.BuildConfig.UPDATES_ENABLED // Orca+: updater is active in public builds only
          }
  
          /**
@@ -289,42 +293,45 @@ index 63789d6c..fe5c29de 100644
  
          Destination.Debug -> {
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
-index 6ed210a2..d226700f 100644
+index 6ed210a2..cc2280be 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
-@@ -125,6 +125,7 @@ fun PlaybackPage(
+@@ -125,6 +125,8 @@ fun PlaybackPage(
          }
      }
      val state by viewModel.state.collectAsState()
++    // Orca+: the source picker dialog
 +    com.wholphinplus.sources.ui.SourcePickerOverlay(viewModel.sourcePicker)
      when (val st = state.loading) {
          is LoadingState.Error -> {
              ErrorMessage(st, modifier)
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
-index 79d2ae57..2b8251d0 100644
+index 79d2ae57..196f34b1 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
 @@ -152,6 +152,7 @@ class PlaybackViewModel
          private val imageUrlService: ImageUrlService,
          private val screensaverService: ScreensaverService,
          private val musicService: MusicService,
-+        sourceHook: com.wholphinplus.sources.SourceHook,
++        sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
          @Assisted private val destination: Destination,
      ) : ViewModel(),
          Player.Listener,
-@@ -163,6 +164,8 @@ class PlaybackViewModel
+@@ -163,6 +164,9 @@ class PlaybackViewModel
  
          val currentPlayer = MutableStateFlow<PlayerInstance?>(null)
  
++        // Orca+: one picker session per playback screen
 +        val sourcePicker = sourceHook.newSession().also { addCloseable(it) }
 +
          internal lateinit var player: Player
  
          private var mediaSession: MediaSession? = null
-@@ -465,6 +468,15 @@ class PlaybackViewModel
+@@ -465,6 +469,16 @@ class PlaybackViewModel
  
                  val isLiveTv = item.type == BaseItemKind.TV_CHANNEL
                  val base = item.data
++                // Orca+: ask the picker where to play this item from
 +                val external =
 +                    when (sourcePicker.pick(base, eligible = playlistItem is PlaylistItem.Media && !isLiveTv)) {
 +                        com.wholphinplus.sources.Pick.Cancelled -> {
@@ -337,65 +344,69 @@ index 79d2ae57..2b8251d0 100644
  
                  // Use the provided playback parameters or else check if the database has some
                  val itemPlayback =
-@@ -586,8 +598,8 @@ class PlaybackViewModel
+@@ -586,8 +600,9 @@ class PlaybackViewModel
                  withContext(WholphinDispatchers.Main) {
                      changeStreams(
                          item = item,
 -                        audioIndex = audioIndex,
 -                        subtitleIndex = subtitleIndex,
++                        // Orca+: external files start at the player's default tracks
 +                        audioIndex = audioIndex.takeUnless { external },
 +                        subtitleIndex = subtitleIndex.takeUnless { external },
                          positionMs = if (positionMs > 0) positionMs else C.TIME_UNSET,
                          sourceId = mediaSource?.id,
                          enableDirectPlay = !forceTranscoding,
-@@ -684,7 +696,7 @@ class PlaybackViewModel
+@@ -684,7 +699,8 @@ class PlaybackViewModel
                  val source = response.mediaSources.firstOrNull()
                  source?.let { source ->
                      val mediaUrl =
 -                        if (source.supportsDirectPlay) {
++                        // Orca+: play the picked source's own URL
 +                        sourcePicker.urlFor(itemId) ?: if (source.supportsDirectPlay) {
                              if (source.isRemote && source.path.isNotNullOrBlank()) {
                                  Timber.i("Playback is remote for source: %s", source.id)
                                  source.path
-@@ -715,6 +727,8 @@ class PlaybackViewModel
+@@ -715,6 +731,9 @@ class PlaybackViewModel
                      }
                      val transcodeType =
                          when {
++                            // Orca+: external sources always direct-play
 +                            sourcePicker.isExternal(itemId) -> PlayMethod.DIRECT_PLAY
 +
  //                        playerBackend == PlayerBackend.MPV -> PlayMethod.DIRECT_PLAY
                              source.supportsDirectPlay -> PlayMethod.DIRECT_PLAY
  
-@@ -812,6 +826,7 @@ class PlaybackViewModel
+@@ -812,6 +831,8 @@ class PlaybackViewModel
                              )
                          player.addListener(activityListener)
                          this@PlaybackViewModel.activityListener = activityListener
++                        // Orca+: report progress to the picked server
 +                        sourcePicker.track(player, itemId)
  
                          _state.update {
                              it.copy(
-@@ -1388,6 +1403,8 @@ class PlaybackViewModel
+@@ -1388,6 +1409,8 @@ class PlaybackViewModel
  
                          PlayMethod.DIRECT_STREAM, PlayMethod.DIRECT_PLAY -> {
                              Timber.w("Playback error during ${it.playMethod}, falling back to transcoding")
-+                            // An external source failed: retry from Jellyfin, starting with direct play
++                            // Orca+: an external source failed, retry from Jellyfin starting with direct play
 +                            val wasExternal = sourcePicker.dropExternal(currentItem.item.id)
                              val currentPlayback = state.value.currentPlayback
                              if (currentPlayback == null) {
                                  Timber.w("Playback error, currentPlayback is null")
-@@ -1398,8 +1415,8 @@ class PlaybackViewModel
+@@ -1398,8 +1421,8 @@ class PlaybackViewModel
                                  audioIndex = currentPlayback?.audioIndex,
                                  subtitleIndex = currentPlayback?.subtitleIndex,
                                  positionMs = player.currentPosition,
 -                                enableDirectPlay = false,
 -                                enableDirectStream = false,
-+                                enableDirectPlay = wasExternal,
-+                                enableDirectStream = wasExternal,
++                                enableDirectPlay = wasExternal, // Orca+
++                                enableDirectStream = wasExternal, // Orca+
                              )
                              withContext(WholphinDispatchers.Main) {
                                  player.prepare()
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
-index c97117b7..233ef432 100644
+index c97117b7..4436a39e 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 @@ -248,6 +248,10 @@ fun PreferencesContent(
@@ -403,7 +414,7 @@ index c97117b7..233ef432 100644
                      }
                  }
 +                if (preferenceScreenOption == PreferenceScreenOption.BASIC) {
-+                    // Top of the list: wrap-around focus from the last setting lands here
++                    // Orca+: entry at the top of Settings; wrap-around focus from the last setting lands here
 +                    item { com.wholphinplus.sources.ui.ExtraSourcesEntry(Modifier.focusRequester(firstFocusRequester)) }
 +                }
                  prefList.forEachIndexed { groupIndex, group ->
@@ -416,17 +427,18 @@ index c97117b7..233ef432 100644
 -                        val isFirst = groupIndex == 0 && prefIndex == 0 && !showUpdate
 +                        val isFirst =
 +                            groupIndex == 0 && prefIndex == 0 && !showUpdate &&
-+                                preferenceScreenOption != PreferenceScreenOption.BASIC
++                                preferenceScreenOption != PreferenceScreenOption.BASIC // Orca+: the entry above is first
                          val isLast =
                              groupIndex == prefList.lastIndex && prefIndex == groupPreferences.lastIndex
                          item {
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index cff98add..8e600c48 100644
+index cff98add..38579bb2 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
-@@ -1,5 +1,5 @@
+@@ -1,5 +1,6 @@
  <resources>
 -    <string name="app_name" translatable="false">Wholphin</string>
++    <!-- Orca+: app name -->
 +    <string name="app_name" translatable="false">Orca+</string>
      <string name="app_name_long" translatable="false">Wholphin</string>
  

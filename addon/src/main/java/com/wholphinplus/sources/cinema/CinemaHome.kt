@@ -50,6 +50,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -101,6 +102,7 @@ import com.wholphinplus.sources.ui.SourcesEntryPoint
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.CollectionType
@@ -207,7 +209,14 @@ fun CinemaHome(
     }
     BackHandler(enabled = tab != CinemaTab.HOME) { tab = CinemaTab.HOME }
 
-    Box(modifier.fillMaxSize().background(Stage)) {
+    // When the remote was last used; read only by the billboard's rotation (no recomposition)
+    val lastInput = remember { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
+    Box(
+        modifier.fillMaxSize().background(Stage).onPreviewKeyEvent {
+            lastInput.longValue = android.os.SystemClock.uptimeMillis()
+            false
+        },
+    ) {
         CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf)) {
             AnimatedContent(
                 targetState = tab,
@@ -228,7 +237,7 @@ fun CinemaHome(
                         t == CinemaTab.MY_LIST -> MyListScreen(d.rows.firstOrNull()?.items.orEmpty(), onOpen)
                         else -> {
                             val focusPlay = grabFocus && t == CinemaTab.HOME
-                            CinemaScreen(d, onOpen, onPlay, focusPlay, rollUp)
+                            CinemaScreen(d, onOpen, onPlay, focusPlay, rollUp, lastInput)
                             LaunchedEffect(Unit) { grabFocus = false }
                         }
                     }
@@ -251,6 +260,9 @@ enum class CinemaTab(
 }
 
 private val TopNavHeight = 54.dp
+
+/** After this long without a key press the billboard stops rotating. */
+private const val IDLE_MS = 120_000L
 
 /**
  * Focus state, kept out of the rows: cards only write it, so moving the remote recomposes the
@@ -282,6 +294,7 @@ private fun CinemaScreen(
     onPlay: (UUID, Long) -> Unit,
     grabFocus: Boolean,
     rollUp: Boolean,
+    lastInput: androidx.compose.runtime.MutableLongState,
 ) {
     val focus = remember { HomeFocus() }
     // 0 = full billboard, 1 = rolled up to a quarter while browsing rows (if the setting is on).
@@ -316,6 +329,12 @@ private fun CinemaScreen(
     LaunchedEffect(focus.billboard, featuredIndex, data.featured.size) {
         if (focus.billboard && data.featured.size > 1) {
             delay(10_000)
+            // Nobody has touched the remote for 2 minutes: hold this title, so the screen comes
+            // to rest (nothing redrawn), until the next key press
+            if (android.os.SystemClock.uptimeMillis() - lastInput.longValue > IDLE_MS) {
+                val since = lastInput.longValue
+                snapshotFlow { lastInput.longValue }.first { it != since }
+            }
             featuredIndex = (featuredIndex + 1) % data.featured.size
         }
     }

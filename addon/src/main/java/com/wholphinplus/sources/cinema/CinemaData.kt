@@ -118,22 +118,14 @@ internal class CinemaRepository(
         withContext(Dispatchers.IO) {
             val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() }
                 ?: error("Not signed in")
-            val views =
-                runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList())
-            val libs =
-                views.map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
-            val movieLibs = libs.filter { it.collectionType == CollectionType.MOVIES }
-            val showLibs = libs.filter { it.collectionType == CollectionType.TVSHOWS }
-
+            // Everything that doesn't need the library list starts at once; only "latest" waits
+            // for it. The slow genre pool is sent last so the quick rows aren't queued behind it
+            // (the app's HTTP client runs a few requests per server at a time).
             coroutineScope {
+                val views = async { runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList()) }
                 val resume = async { safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items } }
                 val nextUp = async { safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
-                val latest =
-                    (movieLibs + showLibs).map { lib ->
-                        async {
-                            lib to safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, parentId = lib.id, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
-                        }
-                    }
+                val greeting = async { continueTitle(userId) }
                 val lists =
                     collections.lists.value.filter { it.showOnHome && it.itemIds.isNotEmpty() }.map { c ->
                         async {
@@ -142,6 +134,15 @@ internal class CinemaRepository(
                             c.name to safe {
                                 api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items
                             }
+                        }
+                    }
+                val libs = views.await().map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
+                val movieLibs = libs.filter { it.collectionType == CollectionType.MOVIES }
+                val showLibs = libs.filter { it.collectionType == CollectionType.TVSHOWS }
+                val latest =
+                    (movieLibs + showLibs).map { lib ->
+                        async {
+                            lib to safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, parentId = lib.id, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
                         }
                     }
                 // Some servers ignore the genre filter, so rows are sorted out of one random pool
@@ -155,10 +156,9 @@ internal class CinemaRepository(
                     }
 
                 val cw = (resume.await() + nextUp.await()).distinctBy { it.seriesId ?: it.id }
-                // Episodes borrow their series' TMDB id for title art
-                val seriesIds = cw.mapNotNull { it.seriesId }.distinct()
-                fillSeriesTmdb(cw, userId)
-                val continueWatching = cw.map(::toItem)
+                // Episodes borrow their series' TMDB id for title art. Only art, so the page
+                // doesn't wait for it: the first rows use what's known, the full page has it all
+                val seriesArt = async { fillSeriesTmdb(cw, userId) }
                 val latestRows =
                     latest.awaitAll().map { (lib, items) ->
                         CinemaRow(
@@ -166,12 +166,16 @@ internal class CinemaRepository(
                             items.map(::toItem),
                         )
                     }
-                val quickRows =
+                val listRows = lists.awaitAll().map { (name, items) -> listRow(name, items) }
+                val title = greeting.await()
+
+                fun rowsWith(continueWatching: List<CinemaItem>) =
                     buildList {
-                        add(CinemaRow(continueTitle(userId), continueWatching))
-                        lists.awaitAll().forEach { (name, items) -> add(listRow(name, items)) }
+                        add(CinemaRow(title, continueWatching))
+                        addAll(listRows)
                         addAll(latestRows)
                     }.filter { it.items.isNotEmpty() }
+                val quickRows = rowsWith(cw.map(::toItem))
 
                 // The billboard: recent titles that have both a backdrop and title art
                 val featured =
@@ -185,7 +189,8 @@ internal class CinemaRepository(
 
                 // Show the page now; the genre rows join at the bottom (same billboard, no jump)
                 onFirst(ranked(CinemaHomeData(featured, quickRows, showLibs.firstOrNull(), movieLibs.firstOrNull())))
-                val rows = quickRows + genreRows(pool.await(), GENRE_ROWS, 5)
+                seriesArt.await()
+                val rows = rowsWith(cw.map(::toItem)) + genreRows(pool.await(), GENRE_ROWS, 5)
                 ranked(CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull()))
             }
         }

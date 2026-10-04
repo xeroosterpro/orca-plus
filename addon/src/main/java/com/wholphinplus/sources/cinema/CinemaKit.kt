@@ -4,6 +4,8 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -121,8 +123,6 @@ internal fun StableBackdrop(
         val ok = SingletonImageLoader.get(context).execute(request(context, url)) is SuccessResult
         if (ok) shown = url
     }
-    val t = rememberInfiniteTransition(label = "drift")
-    val scale by t.animateFloat(1f, 1.06f, infiniteRepeatable(tween(26_000, easing = LinearEasing), RepeatMode.Reverse), label = "scale")
     // Where the old inset bitmap began. Solid black covers that line, then the picture eases in.
     val seam = (1f - widthFraction).coerceIn(0f, 0.5f)
     val solid = (seam + 0.16f).coerceAtMost(0.46f)
@@ -135,6 +135,10 @@ internal fun StableBackdrop(
             modifier = Modifier.fillMaxSize(),
         ) { u ->
             if (u != null) {
+                // One slow zoom per picture, then it holds. (It used to drift back and forth for
+                // ever, redrawing the whole screen 60 times a second even with nobody watching.)
+                val zoom = remember(u) { Animatable(1f) }
+                LaunchedEffect(u, drift) { if (drift) zoom.animateTo(1.06f, tween(12_000, easing = LinearOutSlowInEasing)) }
                 AsyncImage(
                     model = request(context, u),
                     contentDescription = null,
@@ -142,9 +146,8 @@ internal fun StableBackdrop(
                     alignment = Alignment.TopCenter,
                     modifier =
                         Modifier.fillMaxSize().graphicsLayer {
-                            val s = if (drift) scale else 1f
-                            scaleX = s
-                            scaleY = s
+                            scaleX = zoom.value
+                            scaleY = zoom.value
                         },
                 )
             }

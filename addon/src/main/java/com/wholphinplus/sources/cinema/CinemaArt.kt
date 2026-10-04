@@ -4,7 +4,12 @@ import android.content.Context
 import com.wholphinplus.sources.SearchService
 import com.wholphinplus.sources.core.TitleArt
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -28,7 +33,8 @@ class CinemaArt
         private val json = Json { ignoreUnknownKeys = true }
         private val cache = ConcurrentHashMap<String, TitleArt>(load())
         private val gate = Semaphore(4)
-        private var unsaved = 0
+        private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private var pending: Job? = null
 
         val enabled: Boolean get() = search.tmdb.hasKey
 
@@ -50,13 +56,18 @@ class CinemaArt
                     withContext(Dispatchers.IO) { runCatching { search.tmdb.titleArt(tv, tmdbId) }.getOrNull() }
                 } ?: return null
             cache[key] = fetched
-            if (++unsaved >= 10) save()
+            save()
             return fetched
         }
 
+        /** Writes the cache a few seconds after the last new title, off the UI thread (it's big). */
         fun save() {
-            unsaved = 0
-            prefs.edit().putString(KEY, json.encodeToString(HashMap(cache))).apply()
+            pending?.cancel()
+            pending =
+                io.launch {
+                    delay(4_000)
+                    prefs.edit().putString(KEY, json.encodeToString(HashMap(cache))).apply()
+                }
         }
 
         private fun load(): Map<String, TitleArt> =

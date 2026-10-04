@@ -123,24 +123,13 @@ internal class CinemaRepository(
                             }
                         }
                     }
-                val genres =
-                    GENRE_ROWS.map { (genre, title) ->
-                        async {
-                            title to safe {
-                                api.itemsApi.getItems(
-                                    GetItemsRequest(
-                                        userId = userId,
-                                        genres = listOf(genre),
-                                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
-                                        recursive = true,
-                                        sortBy = listOf(ItemSortBy.RANDOM),
-                                        limit = 24,
-                                        fields = fields,
-                                        enableImageTypes = images,
-                                        imageTypeLimit = 1,
-                                    ),
-                                ).content.items
-                            }
+                // Some servers ignore the genre filter, so rows are sorted out of one random pool
+                val pool =
+                    async {
+                        safe {
+                            api.itemsApi.getItems(
+                                GetItemsRequest(userId = userId, includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES), recursive = true, sortBy = listOf(ItemSortBy.RANDOM), limit = POOL, fields = fields, enableImageTypes = images, imageTypeLimit = 1),
+                            ).content.items
                         }
                     }
 
@@ -164,7 +153,7 @@ internal class CinemaRepository(
                         add(CinemaRow("Continue Watching", continueWatching))
                         lists.awaitAll().forEach { (name, items) -> add(CinemaRow(name, items.map(::toItem))) }
                         addAll(latestRows)
-                        genres.awaitAll().filter { it.second.size >= 6 }.take(5).forEach { (title, items) -> add(CinemaRow(title, items.map(::toItem))) }
+                        addAll(genreRows(pool.await(), GENRE_ROWS, 5))
                     }.filter { it.items.isNotEmpty() }
 
                 // The billboard: recent titles that have both a backdrop and title art
@@ -180,6 +169,125 @@ internal class CinemaRepository(
                 CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull())
             }
         }
+
+    // ------------------------------------------------------------ Shows / Movies / My List tabs
+
+    /** A Shows or Movies page: the home's layout, every row narrowed to one kind of title. */
+    suspend fun loadKind(series: Boolean): CinemaHomeData =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+            val kind = if (series) BaseItemKind.SERIES else BaseItemKind.MOVIE
+            val views = runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList())
+            val libs = views.map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
+            val mine = libs.filter { it.collectionType == if (series) CollectionType.TVSHOWS else CollectionType.MOVIES }
+
+            fun query(sort: ItemSortBy) =
+                GetItemsRequest(
+                userId = userId,
+                includeItemTypes = listOf(kind),
+                recursive = true,
+                sortBy = listOf(sort),
+                sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING),
+                limit = 24,
+                fields = fields,
+                enableImageTypes = images,
+                imageTypeLimit = 1,
+            )
+
+            coroutineScope {
+                val resume =
+                    async {
+                        safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items }
+                            .filter { if (series) it.type == BaseItemKind.EPISODE else it.type == BaseItemKind.MOVIE }
+                    }
+                val nextUp =
+                    async {
+                        if (series) safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } else emptyList()
+                    }
+                val latest =
+                    mine.map { lib ->
+                        async {
+                            lib to safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, parentId = lib.id, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
+                        }
+                    }
+                val newReleases = async { safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE)).content.items } }
+                val pool = async { safe { api.itemsApi.getItems(query(ItemSortBy.RANDOM).copy(limit = POOL)).content.items } }
+
+                val cw = (resume.await() + nextUp.await()).distinctBy { it.seriesId ?: it.id }
+                fillSeriesTmdb(cw, userId)
+                val latestRows =
+                    latest.awaitAll().map { (lib, items) ->
+                        CinemaRow(if (series) "New Episodes in ${lib.name}" else "Recently Added in ${lib.name}", items.map(::toItem))
+                    }
+                val fresh = CinemaRow("New Releases", newReleases.await().map(::toItem))
+                val rows =
+                    buildList {
+                        add(CinemaRow("Continue Watching", cw.map(::toItem)))
+                        add(fresh)
+                        addAll(latestRows)
+                        addAll(genreRows(pool.await(), if (series) SHOW_GENRES else MOVIE_GENRES, 8))
+                    }.filter { it.items.isNotEmpty() }.distinctBy { it.title }
+
+                val featured =
+                    (fresh.items + latestRows.flatMap { it.items })
+                        .filter { it.backdropUrl != null && it.overview.isNotBlank() && it.kind == kind }
+                        .distinctBy { it.detailsId }
+                        .shuffled()
+                        .take(6)
+                        .ifEmpty { rows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
+                CinemaHomeData(featured, rows, libs.firstOrNull { it.collectionType == CollectionType.TVSHOWS }, libs.firstOrNull { it.collectionType == CollectionType.MOVIES })
+            }
+        }
+
+    /** Everything marked My List (Jellyfin favourites), newest first. */
+    suspend fun myList(): List<CinemaItem> =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+            safe {
+                api.itemsApi.getItems(
+                    GetItemsRequest(
+                        userId = userId,
+                        isFavorite = true,
+                        includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+                        recursive = true,
+                        sortBy = listOf(ItemSortBy.DATE_CREATED),
+                        sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING),
+                        limit = 300,
+                        fields = fields,
+                        enableImageTypes = images,
+                        imageTypeLimit = 1,
+                    ),
+                ).content.items
+            }.filter { it.userData?.isFavorite != false }.map(::toItem)
+        }
+
+    /** Genre rows picked out of a random pool by each title's own genres (any alias matches). */
+    private fun genreRows(
+        pool: List<BaseItemDto>,
+        rows: List<Pair<Set<String>, String>>,
+        max: Int,
+    ): List<CinemaRow> {
+        val used = HashSet<UUID>()
+        return rows
+            .map { (names, title) ->
+                val wanted = names.map { it.lowercase() }.toSet()
+                // A title appears in one genre row only, so neighbouring rows don't repeat
+                val items = pool.filter { d -> d.id !in used && d.genres.orEmpty().any { it.lowercase() in wanted } }.take(24)
+                items.forEach { used += it.id }
+                CinemaRow(title, items.map(::toItem))
+            }.filter { it.items.size >= 6 }
+            .take(max)
+    }
+
+    /** Episodes borrow their series' TMDB id for title art; fetched one by one (see load). */
+    private suspend fun fillSeriesTmdb(
+        items: List<BaseItemDto>,
+        userId: UUID,
+    ) = coroutineScope {
+        items.mapNotNull { it.seriesId }.distinct().filter { !seriesTmdb.containsKey(it) }.take(30).map { id ->
+            async { runCatching { api.userLibraryApi.getItem(id, userId).content }.getOrNull() }
+        }.awaitAll().filterNotNull().forEach { s -> tmdbOf(s)?.let { seriesTmdb[s.id] = it } }
+    }
 
     // ------------------------------------------------------------ details page
 
@@ -416,16 +524,50 @@ internal class CinemaRepository(
 
     companion object {
         /** Genre rows, shown when the library has enough titles for them. */
+        /** How many random titles a page sorts into genre rows. */
+        const val POOL = 500
+
+        val MOVIE_GENRES =
+            listOf(
+                setOf("Action") to "Action Movies",
+                setOf("Comedy") to "Comedy Movies",
+                setOf("Thriller") to "Thrillers",
+                setOf("Science Fiction", "Sci-Fi") to "Sci-Fi Movies",
+                setOf("Horror") to "Horror Movies",
+                setOf("Drama") to "Dramas",
+                setOf("Animation") to "Animated Movies",
+                setOf("Crime") to "Crime Movies",
+                setOf("Romance") to "Romantic Movies",
+                setOf("Documentary") to "Documentaries",
+                setOf("Family") to "Family Movies",
+                setOf("Adventure") to "Adventures",
+            )
+
+        val SHOW_GENRES =
+            listOf(
+                setOf("Drama") to "TV Dramas",
+                setOf("Comedy", "Sitcom") to "TV Comedies",
+                setOf("Crime") to "Crime TV",
+                setOf("Sci-Fi & Fantasy", "Science Fiction", "Fantasy") to "Sci-Fi & Fantasy TV",
+                setOf("Action & Adventure", "Action", "Adventure") to "Action & Adventure TV",
+                setOf("Documentary") to "Docuseries",
+                setOf("Reality", "Reality-TV") to "Reality TV",
+                setOf("Animation") to "Animated Series",
+                setOf("Mystery") to "Mysteries",
+                setOf("Kids", "Children") to "Kids' TV",
+                setOf("Family") to "Family TV",
+            )
+
         val GENRE_ROWS =
             listOf(
-                "Action" to "Action-Packed",
-                "Comedy" to "Comedies",
-                "Science Fiction" to "Sci-Fi",
-                "Thriller" to "Thrillers",
-                "Animation" to "Animation",
-                "Drama" to "Dramas",
-                "Crime" to "Crime",
-                "Family" to "Family Night",
+                setOf("Action") to "Action-Packed",
+                setOf("Comedy") to "Comedies",
+                setOf("Science Fiction", "Sci-Fi & Fantasy") to "Sci-Fi",
+                setOf("Thriller") to "Thrillers",
+                setOf("Animation") to "Animation",
+                setOf("Drama") to "Dramas",
+                setOf("Crime") to "Crime",
+                setOf("Family") to "Family Night",
             )
     }
 }

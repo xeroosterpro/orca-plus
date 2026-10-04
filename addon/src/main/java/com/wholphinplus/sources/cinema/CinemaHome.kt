@@ -30,6 +30,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
@@ -120,35 +125,87 @@ fun CinemaHome(
     val repo = remember { CinemaRepository(hook, hook.collections) }
     DisposableEffect(Unit) { onDispose { art.save() } }
 
-    // Coming back from a details page shows the last home instantly; it refreshes quietly
-    var data by remember { mutableStateOf(HomeCache.data) }
+    // The tab you were on survives a trip to a details page and back
+    var tab by rememberSaveable { mutableStateOf(CinemaTab.HOME) }
+    // Each tab shows its last load instantly and refreshes quietly when stale
+    val pages = remember { mutableStateMapOf<CinemaTab, CinemaHomeData>().apply { putAll(TabCache.data) } }
     var error by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) {
-        if (data != null && System.currentTimeMillis() - HomeCache.at < 2 * 60_000) return@LaunchedEffect
-        runCatching { repo.load() }
-            .onSuccess {
-                HomeCache.data = it
-                HomeCache.at = System.currentTimeMillis()
-                if (data == null) data = it
-                // Warm the title-art cache for what's on screen first
-                it.rows.forEach { row -> row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } } }
-            }.onFailure { if (data == null) error = it.message ?: "Couldn't load your library" }
+    var grabFocus by remember { mutableStateOf(true) }
+    LaunchedEffect(tab) {
+        if (tab != CinemaTab.MY_LIST && pages[tab] != null && System.currentTimeMillis() - (TabCache.at[tab] ?: 0L) < 2 * 60_000) return@LaunchedEffect
+        runCatching {
+            when (tab) {
+                CinemaTab.HOME -> repo.load()
+                CinemaTab.SHOWS -> repo.loadKind(series = true)
+                CinemaTab.MOVIES -> repo.loadKind(series = false)
+                CinemaTab.MY_LIST -> CinemaHomeData(emptyList(), listOf(CinemaRow("My List", repo.myList())), null, null)
+            }
+        }.onSuccess {
+            TabCache.data[tab] = it
+            TabCache.at[tab] = System.currentTimeMillis()
+            if (pages[tab] == null || tab == CinemaTab.MY_LIST) pages[tab] = it
+            // Warm the title-art cache for what's on screen first
+            it.rows.forEach { row -> row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } } }
+        }.onFailure { if (pages[tab] == null) error = it.message ?: "Couldn't load your library" }
     }
-
-    Box(modifier.fillMaxSize().background(Stage)) {
-        val d = data
-        when {
-            d != null -> CompositionLocalProvider(LocalArt provides art) { CinemaScreen(d, onOpen, onPlay, onNavigate) }
-            error != null ->
-                Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(error!!, color = Ink)
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = { hook.store.setCinemaMode(false) }) { Text("Use the classic home") }
+    // Once Home is up, quietly load Shows and Movies so switching tabs is instant
+    LaunchedEffect(pages[CinemaTab.HOME] != null) {
+        if (pages[CinemaTab.HOME] == null) return@LaunchedEffect
+        delay(1_500)
+        listOf(CinemaTab.SHOWS to true, CinemaTab.MOVIES to false).forEach { (t, series) ->
+            if (pages[t] == null) {
+                runCatching { repo.loadKind(series) }.onSuccess {
+                    TabCache.data[t] = it
+                    TabCache.at[t] = System.currentTimeMillis()
+                    if (pages[t] == null) pages[t] = it
                 }
-            else -> Wordmark(Modifier.align(Alignment.Center), size = 34)
+            }
         }
     }
+    BackHandler(enabled = tab != CinemaTab.HOME) { tab = CinemaTab.HOME }
+
+    Box(modifier.fillMaxSize().background(Stage)) {
+        CompositionLocalProvider(LocalArt provides art) {
+            AnimatedContent(
+                targetState = tab,
+                transitionSpec = { fadeIn(tween(360, delayMillis = 80, easing = CinemaEase)) togetherWith fadeOut(tween(180)) },
+                label = "tab",
+            ) { t ->
+                val d = pages[t]
+                Box(Modifier.fillMaxSize()) {
+                    when {
+                        d == null && error != null ->
+                            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(error!!, color = Ink)
+                                Spacer(Modifier.height(12.dp))
+                                Button(onClick = { hook.store.setCinemaMode(false) }) { Text("Use the classic home") }
+                            }
+                        d == null -> Wordmark(Modifier.align(Alignment.Center), size = 34)
+                        t == CinemaTab.MY_LIST -> MyListScreen(d.rows.firstOrNull()?.items.orEmpty(), onOpen)
+                        else -> {
+                            val focusPlay = grabFocus && t == CinemaTab.HOME
+                            CinemaScreen(d, onOpen, onPlay, focusPlay)
+                            LaunchedEffect(Unit) { grabFocus = false }
+                        }
+                    }
+                }
+            }
+        }
+        TopNav(tab, onTab = { tab = it }, onNavigate)
+    }
 }
+
+/** Cinema mode's top-menu pages. They switch in place, like a streaming app's tabs. */
+enum class CinemaTab(
+    val label: String,
+) {
+    HOME("Home"),
+    SHOWS("Shows"),
+    MOVIES("Movies"),
+    MY_LIST("My List"),
+}
+
+private val TopNavHeight = 54.dp
 
 /**
  * Focus state, kept out of the rows: cards only write it, so moving the remote recomposes the
@@ -171,7 +228,7 @@ private fun CinemaScreen(
     data: CinemaHomeData,
     onOpen: (UUID, BaseItemKind) -> Unit,
     onPlay: (UUID, Long) -> Unit,
-    onNavigate: (CinemaNav) -> Unit,
+    grabFocus: Boolean,
 ) {
     val focus = remember { HomeFocus() }
     var featuredIndex by remember { mutableIntStateOf(0) }
@@ -192,7 +249,7 @@ private fun CinemaScreen(
         }
     }
 
-    LaunchedEffect(Unit) { runCatching { playFocus.requestFocus() } }
+    LaunchedEffect(Unit) { if (grabFocus) runCatching { playFocus.requestFocus() } }
     LaunchedEffect(focus.billboard, featuredIndex, data.featured.size) {
         if (focus.billboard && data.featured.size > 1) {
             delay(10_000)
@@ -213,7 +270,7 @@ private fun CinemaScreen(
     Box(Modifier.fillMaxSize()) {
         StableBackdrop(shown?.backdropUrl, drift = focus.billboard)
         Column(Modifier.fillMaxSize()) {
-            TopNav(data, onNavigate)
+            Spacer(Modifier.height(TopNavHeight))
             InfoPanel(
                 item = shown,
                 billboard = focus.billboard,
@@ -240,19 +297,17 @@ private fun CinemaScreen(
 
 @Composable
 private fun TopNav(
-    data: CinemaHomeData,
+    tab: CinemaTab,
+    onTab: (CinemaTab) -> Unit,
     onNavigate: (CinemaNav) -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(start = 48.dp, end = 40.dp, top = 18.dp),
+        Modifier.fillMaxWidth().padding(start = 48.dp, end = 40.dp, top = 18.dp).height(TopNavHeight - 18.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Wordmark(Modifier.padding(end = 18.dp))
-        NavPill("Home", selected = true) {}
-        data.shows?.let { lib -> NavPill("Shows") { onNavigate(CinemaNav.Library(lib.id, lib.kind, lib.collectionType)) } }
-        data.movies?.let { lib -> NavPill("Movies") { onNavigate(CinemaNav.Library(lib.id, lib.kind, lib.collectionType)) } }
-        NavPill("My List") { onNavigate(CinemaNav.MyList) }
+        CinemaTab.entries.forEach { t -> NavPill(t.label, selected = t == tab) { onTab(t) } }
         Spacer(Modifier.weight(1f))
         NavIcon(Icons.Filled.Search, "Search") { onNavigate(CinemaNav.Search) }
         NavIcon(Icons.Filled.Settings, "Settings") { onNavigate(CinemaNav.Settings) }
@@ -432,9 +487,57 @@ internal fun CinemaCard(
     }
 }
 
-/** The last Cinema home, kept for the life of the app so returning to it is instant. */
-private object HomeCache {
-    @Volatile var data: CinemaHomeData? = null
+/** Each tab's last page, kept for the life of the app so returning to it is instant. */
+private object TabCache {
+    val data = java.util.concurrent.ConcurrentHashMap<CinemaTab, CinemaHomeData>()
+    val at = java.util.concurrent.ConcurrentHashMap<CinemaTab, Long>()
+}
 
-    @Volatile var at: Long = 0L
+/** My List: every saved title in a calm grid, the focused one's art behind it. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MyListScreen(
+    items: List<CinemaItem>,
+    onOpen: (UUID, BaseItemKind) -> Unit,
+) {
+    var focused by remember { mutableStateOf<CinemaItem?>(null) }
+    var shown by remember { mutableStateOf<CinemaItem?>(null) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { focused }.collectLatest {
+            delay(220)
+            shown = it
+        }
+    }
+    val density = LocalDensity.current
+    val spec = remember(density) { pivot(with(density) { 24.dp.toPx() }) }
+    Box(Modifier.fillMaxSize()) {
+        StableBackdrop(shown?.backdropUrl, drift = false)
+        Box(Modifier.fillMaxSize().background(Stage.copy(alpha = 0.55f)))
+        Column(Modifier.fillMaxSize()) {
+            Spacer(Modifier.height(TopNavHeight))
+            Text("My List", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(start = 48.dp, top = 22.dp, bottom = 6.dp))
+            if (items.isEmpty()) {
+                Text(
+                    "Titles you add with My List on a title's page show up here.",
+                    color = InkDim,
+                    fontSize = 15.sp,
+                    modifier = Modifier.padding(start = 48.dp, top = 8.dp),
+                )
+            } else {
+                CompositionLocalProvider(LocalBringIntoViewSpec provides spec) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 14.dp, bottom = 120.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(22.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        gridItems(items, key = { it.key }, contentType = { "card" }) { item ->
+                            CinemaCard(item, onFocused = { focused = it }, onClick = { onOpen(it.detailsId, it.detailsKind) }, width = 204.dp)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

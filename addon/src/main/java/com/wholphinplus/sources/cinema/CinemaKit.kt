@@ -100,7 +100,11 @@ internal fun pivot(offsetPx: Float): BringIntoViewSpec =
 
 /**
  * Full-screen backdrop that only crossfades once the next image is decoded, so it never fades
- * through black, with an optional slow drift. Faded into the stage from the left and bottom.
+ * through black, with an optional slow drift.
+ *
+ * The bitmap is full-bleed. A narrower frame left a hard vertical edge behind the title: the
+ * scrim's first stop sat on that edge and was not solid, so the cut showed through on every
+ * banner. The scrim stays solid black past where that edge used to be, then eases out.
  */
 @Composable
 internal fun StableBackdrop(
@@ -119,12 +123,16 @@ internal fun StableBackdrop(
     }
     val t = rememberInfiniteTransition(label = "drift")
     val scale by t.animateFloat(1f, 1.06f, infiniteRepeatable(tween(26_000, easing = LinearEasing), RepeatMode.Reverse), label = "scale")
+    // Where the old inset bitmap began. Solid black covers that line, then the picture eases in.
+    val seam = (1f - widthFraction).coerceIn(0f, 0.5f)
+    val solid = (seam + 0.16f).coerceAtMost(0.46f)
+    val fadeMid = (solid + 0.26f).coerceAtMost(0.76f)
     Box(modifier.fillMaxSize()) {
         Crossfade(
             targetState = shown,
             animationSpec = tween(650, easing = LinearEasing),
             label = "backdrop",
-            modifier = Modifier.align(Alignment.TopEnd).fillMaxWidth(widthFraction).fillMaxHeight(heightFraction),
+            modifier = Modifier.fillMaxSize(),
         ) { u ->
             if (u != null) {
                 AsyncImage(
@@ -141,8 +149,27 @@ internal fun StableBackdrop(
                 )
             }
         }
-        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Stage, 0.22f to Stage.copy(alpha = 0.92f), 0.5f to Stage.copy(alpha = 0.35f), 0.75f to Color.Transparent)))
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Stage.copy(alpha = 0.55f), 0.12f to Color.Transparent, 0.5f to Color.Transparent, 0.8f to Stage)))
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.horizontalGradient(
+                    0f to Stage,
+                    solid to Stage,
+                    fadeMid to Stage.copy(alpha = 0.35f),
+                    0.88f to Color.Transparent,
+                ),
+            ),
+        )
+        val bottomSolid = (heightFraction - 0.02f).coerceIn(0.72f, 0.92f)
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    0f to Stage.copy(alpha = 0.55f),
+                    0.12f to Color.Transparent,
+                    0.5f to Color.Transparent,
+                    bottomSolid to Stage,
+                ),
+            ),
+        )
     }
 }
 

@@ -307,3 +307,8 @@ internal fun KindTag(
  */
 internal fun Modifier.tapToClick(onClick: () -> Unit): Modifier =
     this.pointerInput(onClick) { detectTapGestures(onTap = { onClick() }) }
+
+/** Lets other packages reach [tapToClick]. */
+internal object TapHelper {
+    fun Modifier.tap(onClick: () -> Unit): Modifier = tapToClick(onClick)
+}

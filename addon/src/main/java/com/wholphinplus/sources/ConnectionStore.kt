@@ -27,6 +27,11 @@ class ConnectionStore
         @param:ApplicationContext context: Context,
     ) {
         private val prefs = context.getSharedPreferences("wholphinplus_sources", Context.MODE_PRIVATE)
+
+        // Opening the Keystore is slow on a TV box, and the store decrypts every saved token
+        // while the app starts: open it once. (Declared before load() runs below.)
+        @Volatile private var secretKey: SecretKey? = null
+
         private val json = Json { ignoreUnknownKeys = true }
         private val _connections = MutableStateFlow(load())
         val connections: StateFlow<List<ServerConnection>> = _connections.asStateFlow()
@@ -41,6 +46,20 @@ class ConnectionStore
         fun setCinemaMode(on: Boolean) {
             prefs.edit().putBoolean(CINEMA_KEY, on).apply()
             _cinemaMode.value = on
+        }
+
+        private val _onboarding = MutableStateFlow(prefs.getString(ONBOARDING_KEY, com.wholphinplus.sources.welcome.Onboarding.NEW) ?: com.wholphinplus.sources.welcome.Onboarding.NEW)
+
+        /**
+         * First-run welcome: "new" (never shown), "started" (welcome on screen, before sign-in),
+         * "finishing" (signed in, choosing extra libraries and the look), "done". Existing
+         * installs stay "new" and never see it, because it only starts with no server saved.
+         */
+        val onboarding: StateFlow<String> = _onboarding.asStateFlow()
+
+        fun setOnboarding(stage: String) {
+            prefs.edit().putString(ONBOARDING_KEY, stage).apply()
+            _onboarding.value = stage
         }
 
         private val _cinemaRollUp = MutableStateFlow(prefs.getBoolean(ROLL_UP_KEY, true))
@@ -113,7 +132,9 @@ class ConnectionStore
                 emptyList()
             }
 
-        private fun key(): SecretKey {
+        private fun key(): SecretKey = secretKey ?: synchronized(this) { secretKey ?: openKey().also { secretKey = it } }
+
+        private fun openKey(): SecretKey {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             (ks.getKey(ALIAS, null) as? SecretKey)?.let { return it }
             return KeyGenerator
@@ -154,6 +175,8 @@ class ConnectionStore
             const val TMDB_KEY = "tmdb_key_v1"
             const val CINEMA_KEY = "cinema_mode"
             const val ROLL_UP_KEY = "cinema_roll_up"
+            const val ONBOARDING_KEY = "onboarding_stage"
+
             const val OVERLAYS_KEY = "poster_overlays"
             const val ALIAS = "wholphinplus_sources_v1"
             const val PREFIX = "enc1:"

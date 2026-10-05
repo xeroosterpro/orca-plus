@@ -70,6 +70,9 @@ class SourceHook
                         .Builder()
                         .connectTimeout(8, TimeUnit.SECONDS)
                         .readTimeout(20, TimeUnit.SECONDS)
+                        // A blocking call ignores coroutine timeouts: cap the whole call too, so
+                        // one hung server can't hold the picker or watch sync past its budget
+                        .callTimeout(25, TimeUnit.SECONDS)
                         .build(),
                 deviceId = deviceId(),
                 clientName = "Orca+",
@@ -95,6 +98,16 @@ class SourceHook
             if (store.connections.value.any { it.isUsable }) watchSync.syncIfStale()
         }
 
+        private val background = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+
+        /**
+         * [syncWatchState] without waiting for it, for Cinema mode's home (which doesn't go
+         * through Wholphin's Continue Watching). What it finds shows on the next refresh.
+         */
+        fun syncWatchStateLater() {
+            background.launch { runCatching { syncWatchState() }.onFailure { Timber.w(it, "Background watch sync failed") } }
+        }
+
         /**
          * Collection rows for Wholphin's home page, in order. Wholphin turns each into a
          * "GetItems" row whose request carries [HomeCollection.tag]; [ProgressOverlay] fills it.
@@ -115,7 +128,7 @@ class SourceHook
         fun isAddonRow(request: org.jellyfin.sdk.model.api.request.GetItemsRequest): Boolean =
             request.tags.orEmpty().any { it.startsWith(HomeCollection.TAG_PREFIX) }
 
-        private var mainUserId: Pair<String, String>? = null
+        @Volatile private var mainUserId: Pair<String, String>? = null
 
         /** Wholphin's current Jellyfin server as a [ServerConnection], for our own lookups. */
         internal fun mainConnection(): ServerConnection? {
@@ -349,24 +362,28 @@ class PickSession internal constructor(
                 },
                 onCancel = { decision.complete(Pick.Cancelled) },
             )
+        // finally: a playback screen closed mid-search must not leave the picker on screen
         val result =
-            coroutineScope {
-                val search =
-                    launch {
-                        connections
-                            .map { connection ->
-                                async {
-                                    val sources = hook.findOn(connection, request)
-                                    found.update { it + sources }
-                                    _ui.update { ui -> ui?.copy(serversDone = ui.serversDone + 1) }
-                                }
-                            }.awaitAll()
-                        // Rank only once everything is in, so rows never jump under the cursor.
-                        _ui.update { ui -> ui?.copy(rows = found.value.sortedWith(sourceRanking), searching = false) }
-                    }
-                decision.await().also { search.cancel() }
+            try {
+                coroutineScope {
+                    val search =
+                        launch {
+                            connections
+                                .map { connection ->
+                                    async {
+                                        val sources = hook.findOn(connection, request)
+                                        found.update { it + sources }
+                                        _ui.update { ui -> ui?.copy(serversDone = ui.serversDone + 1) }
+                                    }
+                                }.awaitAll()
+                            // Rank only once everything is in, so rows never jump under the cursor.
+                            _ui.update { ui -> ui?.copy(rows = found.value.sortedWith(sourceRanking), searching = false) }
+                        }
+                    decision.await().also { search.cancel() }
+                }
+            } finally {
+                _ui.value = null
             }
-        _ui.value = null
         asked = true
         stickyConnectionId = (result as? Pick.External)?.source?.connectionId
         Timber.i("Source picked for %s: %s", item.id, (result as? Pick.External)?.source?.serverLabel ?: result.toString())

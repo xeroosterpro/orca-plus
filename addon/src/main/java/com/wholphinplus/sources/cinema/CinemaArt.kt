@@ -67,6 +67,8 @@ class CinemaArt
                 io.launch {
                     delay(4_000)
                     Conductor.whenQuiet()
+                    // It's read on the main thread when Cinema mode opens: don't let it grow forever
+                    if (cache.size > MAX) cache.keys.take(cache.size - MAX * 3 / 4).forEach(cache::remove)
                     prefs.edit().putString(KEY, json.encodeToString(HashMap(cache))).apply()
                 }
         }
@@ -76,5 +78,6 @@ class CinemaArt
 
         private companion object {
             const val KEY = "art_v1"
+            const val MAX = 3_000
         }
     }

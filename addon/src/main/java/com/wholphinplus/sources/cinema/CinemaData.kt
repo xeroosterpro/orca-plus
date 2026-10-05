@@ -189,6 +189,9 @@ internal class CinemaRepository(
 
                 // Show the page now; the genre rows join at the bottom (same billboard, no jump)
                 onFirst(ranked(CinemaHomeData(featured, quickRows, showLibs.firstOrNull(), movieLibs.firstOrNull())))
+                // What Wholphin's own home does on load: refresh stale Trakt/MDBList rows and pull
+                // progress from the extra servers. In the background; it shows on the next refresh
+                hook.syncWatchStateLater()
                 seriesArt.await()
                 val rows = rowsWith(cw.map(::toItem)) + genreRows(pool.await(), GENRE_ROWS, 5)
                 ranked(CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull()))
@@ -347,7 +350,8 @@ internal class CinemaRepository(
      * Gives every card of a Top 10 title its place, wherever it shows up on the page, so the
      * billboard can say "#2 in Movies This Week" for it.
      */
-    private fun ranked(data: CinemaHomeData): CinemaHomeData {
+    private fun ranked(raw: CinemaHomeData): CinemaHomeData {
+        val data = unique(raw)
         val ranks = HashMap<UUID, Pair<Int, String>>()
         data.rows.filter { it.ranked }.forEach { row ->
             row.items.forEachIndexed { i, item -> ranks.putIfAbsent(item.detailsId, (i + 1) to rankLabel(row)) }
@@ -357,6 +361,19 @@ internal class CinemaRepository(
         fun mark(item: CinemaItem) = ranks[item.detailsId]?.let { (n, label) -> item.copy(rank = n, rankLabel = label) } ?: item
         return data.copy(featured = data.featured.map(::mark), rows = data.rows.map { r -> r.copy(items = r.items.map(::mark)) })
     }
+
+    /**
+     * Rows and cards are list keys on screen, and a repeated key crashes the page. Two lists can
+     * share a name (or match a genre row's), and a list can name a title twice: keep the first.
+     */
+    private fun unique(data: CinemaHomeData): CinemaHomeData =
+        data.copy(
+            rows =
+                data.rows
+                    .distinctBy { it.title }
+                    .map { r -> if (r.items.distinctBy { it.key }.size == r.items.size) r else r.copy(items = r.items.distinctBy { it.key }) }
+                    .filter { it.items.isNotEmpty() },
+        )
 
     private fun rankLabel(row: CinemaRow): String {
         val shows = row.items.count { it.kind == BaseItemKind.SERIES }
@@ -384,6 +401,17 @@ internal class CinemaRepository(
 
     private var userName: String? = null
 
+    /** A mix of the library's posters, for the welcome's backdrop once signed in. */
+    suspend fun posterWall(): List<String> =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+            safe {
+                api.itemsApi.getItems(
+                    GetItemsRequest(userId = userId, includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES), recursive = true, sortBy = listOf(ItemSortBy.RANDOM), limit = 36, enableImageTypes = listOf(ImageType.PRIMARY), imageTypeLimit = 1),
+                ).content.items
+            }.mapNotNull { d -> d.imageTags?.get(ImageType.PRIMARY)?.let { image(d.id, "Primary", it, 360) } }
+        }
+
     /** Everything marked My List (Jellyfin favourites), newest first. */
     suspend fun myList(): List<CinemaItem> =
         withContext(Dispatchers.IO) {
@@ -403,7 +431,7 @@ internal class CinemaRepository(
                         imageTypeLimit = 1,
                     ),
                 ).content.items
-            }.filter { it.userData?.isFavorite != false }.map(::toItem)
+            }.filter { it.userData?.isFavorite != false }.map(::toItem).distinctBy { it.key }
         }
 
     /** Genre rows picked out of a random pool by each title's own genres (any alias matches). */
@@ -543,7 +571,7 @@ internal class CinemaRepository(
                     series = series,
                     seasons = seasons.await(),
                     play = play,
-                    similar = similar.await().filter { it.backdropUrl != null || it.cardUrl != null },
+                    similar = similar.await().filter { it.backdropUrl != null || it.cardUrl != null }.distinctBy { it.key },
                     startSeason = nextEp?.parentIndexNumber,
                 )
             }
@@ -747,7 +775,9 @@ internal class CinemaRepository(
 
     companion object {
         /** Lists named like a chart: "Top 10 …", "Top Watched Movies Of The Week". */
-        fun isTopList(name: String): Boolean = Regex("""\btop\b""", RegexOption.IGNORE_CASE).containsMatchIn(name)
+        fun isTopList(name: String): Boolean = TOP_LIST.containsMatchIn(name)
+
+        private val TOP_LIST = Regex("""\btop\b""", RegexOption.IGNORE_CASE)
 
         /** How many random titles a page sorts into genre rows. */
         const val POOL = 500

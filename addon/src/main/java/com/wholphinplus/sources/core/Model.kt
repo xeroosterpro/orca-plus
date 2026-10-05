@@ -92,6 +92,21 @@ data class ExternalSource(
 }
 
 /** Login in progress via a code (Plex PIN or Jellyfin Quick Connect). */
+/** An Emby Connect account signed in by PIN. */
+data class EmbyConnectAccount(
+    val userId: String,
+    val token: String,
+)
+
+/** A server linked to an Emby Connect account. */
+data class EmbyConnectServer(
+    val name: String,
+    val remoteUrl: String,
+    val localUrl: String,
+    val systemId: String,
+    val accessKey: String,
+)
+
 data class CodeLogin(
     val id: String,
     val secret: String,

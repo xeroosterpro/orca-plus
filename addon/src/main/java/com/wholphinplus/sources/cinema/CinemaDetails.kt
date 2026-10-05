@@ -45,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -111,14 +112,30 @@ fun CinemaDetails(
     // ...or, opened from a card, draws from what the card knew while the rest loads
     var data by remember(itemId) { mutableStateOf(DetailsCache[itemId] ?: DetailsPreview[itemId]?.let { preview(it) }) }
     var error by remember(itemId) { mutableStateOf<String?>(null) }
-    LaunchedEffect(itemId) {
-        runCatching { repo.details(itemId, kind) }
-            .onSuccess {
+    var attempt by remember(itemId) { mutableIntStateOf(0) }
+    LaunchedEffect(itemId, attempt) {
+        error = null
+        // A failed load retries quietly before giving up; leaving the page isn't a failure
+        var tries = 0
+        while (true) {
+            try {
+                val it = repo.details(itemId, kind)
                 DetailsCache[itemId] = it
                 data = it
                 // More Like This badges in one request
                 if (overlays.needsStreams) launch { StreamCache.prefetch(it.similar.filter { s -> s.kind != BaseItemKind.SERIES }.map { s -> s.id }, repo::streamTagsBatch) }
-            }.onFailure { if (data == null) error = it.message ?: "Couldn't load this title" }
+                break
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                timber.log.Timber.w(e, "Cinema title page %s failed to load", itemId)
+                if (++tries >= LOAD_TRIES) {
+                    error = e.message?.takeIf { m -> m.isNotBlank() } ?: "Couldn't load this title"
+                    break
+                }
+                delay(1_500L * tries)
+            }
+        }
     }
 
     Box(
@@ -128,9 +145,12 @@ fun CinemaDetails(
         },
     ) {
         val d = data
+        val failed = error
         when {
+            // A card's preview of a show can't play (its episode never came): show the error
+            failed != null && (d == null || d.play?.pending == true) ->
+                LoadError(failed, onRetry = { attempt++ }, onClassic = null, modifier = Modifier.align(Alignment.Center))
             d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf)) { DetailsScreen(d, repo, onPlay, onOpen) }
-            error != null -> Text(error!!, color = Ink, modifier = Modifier.align(Alignment.Center))
         }
     }
 }
@@ -223,8 +243,15 @@ private fun DetailsScreen(
                             onFavorite = {
                                 favorite = !favorite
                                 val now = favorite
-                                scope.launch { runCatching { repo.setFavorite(item.id, now) } }
                                 DetailsCache.remove(item.id)
+                                scope.launch {
+                                    // Didn't save: put the tick back the way the server has it
+                                    runCatching { repo.setFavorite(item.id, now) }.onFailure {
+                                        if (it is kotlinx.coroutines.CancellationException) throw it
+                                        timber.log.Timber.w(it, "My List change failed for %s", item.id)
+                                        if (favorite == now) favorite = !now
+                                    }
+                                }
                             },
                             onEpisodes = { runCatching { episodesFocus.requestFocus() } },
                         )
@@ -378,10 +405,13 @@ private fun Episodes(
         }
     }
     LaunchedEffect(selected) {
-        val s = d.seasons[selected]
-        if (s.id !in loaded) runCatching { repo.episodes(seriesId, s.id) }.onSuccess { loaded[s.id] = it }
+        // An empty answer is usually a failed request: not kept, so the season asks again next time
+        suspend fun load(id: UUID) {
+            if (id !in loaded) repo.episodes(seriesId, id).takeIf { it.isNotEmpty() }?.let { loaded[id] = it }
+        }
+        load(d.seasons[selected].id)
         // Warm the neighbour so the next tab is instant
-        d.seasons.getOrNull(selected + 1)?.let { n -> if (n.id !in loaded) runCatching { repo.episodes(seriesId, n.id) }.onSuccess { loaded[n.id] = it } }
+        d.seasons.getOrNull(selected + 1)?.let { load(it.id) }
     }
 
     Column(Modifier.padding(top = 8.dp)) {

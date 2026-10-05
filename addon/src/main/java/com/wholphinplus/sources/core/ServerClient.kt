@@ -120,6 +120,111 @@ class ServerClient(
         return connectionFromAuth(login.serverUrl, info, ServerKind.JELLYFIN, response, displayName, "")
     }
 
+    // ------------------------------------------------------------------ Emby Connect
+    // Sign in once with an Emby account (a PIN typed on emby.media/pin, nothing typed on the
+    // TV), then add any of the account's servers. Each server swaps the account for a local
+    // user and token through its Connect exchange.
+
+    fun startEmbyConnectPin(): CodeLogin {
+        val request =
+            Request.Builder()
+                .url(EMBY_CONNECT + "/pin")
+                .post(okhttp3.FormBody.Builder().add("deviceId", deviceId).build())
+                .header("X-Application", "$clientName/$clientVersion")
+                .build()
+        val obj = json.parseToJsonElement(execute(request)) as? JsonObject ?: JsonObject(emptyMap())
+        val pin = obj.string("Pin")
+        require(pin.isNotBlank()) { "Emby Connect did not return a PIN" }
+        return CodeLogin(id = pin, secret = "", code = pin, verificationUrl = "emby.media/pin", kind = ServerKind.EMBY, serverUrl = "", intervalSeconds = 4)
+    }
+
+    /** Null until the PIN has been confirmed at emby.media/pin. */
+    fun pollEmbyConnectPin(login: CodeLogin): EmbyConnectAccount? {
+        val state =
+            Request.Builder()
+                .url(EMBY_CONNECT.toHttpUrlOrNull()!!.newBuilder().addPathSegment("pin").addQueryParameter("deviceId", deviceId).addQueryParameter("pin", login.code).build())
+                .header("X-Application", "$clientName/$clientVersion")
+                .get()
+                .build()
+        val status = json.parseToJsonElement(execute(state)) as? JsonObject ?: return null
+        require(status.boolean("IsExpired") != true) { "The PIN expired. Start again for a new one." }
+        if (status.boolean("IsConfirmed") != true) return null
+        val auth =
+            Request.Builder()
+                .url(EMBY_CONNECT + "/pin/authenticate")
+                .post(okhttp3.FormBody.Builder().add("deviceId", deviceId).add("pin", login.code).build())
+                .header("X-Application", "$clientName/$clientVersion")
+                .build()
+        val obj = json.parseToJsonElement(execute(auth)) as? JsonObject ?: return null
+        val token = obj.string("AccessToken")
+        val userId = obj.string("UserId")
+        require(token.isNotBlank() && userId.isNotBlank()) { "Emby Connect did not return an account" }
+        return EmbyConnectAccount(userId, token)
+    }
+
+    /** The servers linked to an Emby Connect account. */
+    fun embyConnectServers(account: EmbyConnectAccount): List<EmbyConnectServer> {
+        val request =
+            Request.Builder()
+                .url(EMBY_CONNECT.toHttpUrlOrNull()!!.newBuilder().addPathSegment("servers").addQueryParameter("userId", account.userId).build())
+                .header("X-Application", "$clientName/$clientVersion")
+                .header("X-Connect-UserToken", account.token)
+                .get()
+                .build()
+        val list = json.parseToJsonElement(execute(request)) as? kotlinx.serialization.json.JsonArray ?: return emptyList()
+        return list.mapNotNull { it as? JsonObject }.map {
+            EmbyConnectServer(
+                name = it.string("Name"),
+                remoteUrl = it.string("Url"),
+                localUrl = it.string("LocalAddress"),
+                systemId = it.string("SystemId"),
+                accessKey = it.string("AccessKey"),
+            )
+        }.filter { it.accessKey.isNotBlank() && (it.remoteUrl.isNotBlank() || it.localUrl.isNotBlank()) }
+    }
+
+    /** Signs in to one of the account's servers, trying its home address first. */
+    fun connectEmbyServer(
+        account: EmbyConnectAccount,
+        server: EmbyConnectServer,
+        displayName: String,
+    ): ServerConnection {
+        var lastError: Throwable? = null
+        for (url in listOf(server.localUrl, server.remoteUrl).map(::normalizeServerUrl).filter { it.isNotBlank() }.distinct()) {
+            try {
+                val exchange =
+                    Request.Builder()
+                        .url(buildUrl(url, "/Connect/Exchange", mapOf("format" to "json", "ConnectUserId" to account.userId)))
+                        .header("X-Emby-Token", server.accessKey)
+                        .header("X-Emby-Authorization", authHeader(null))
+                        .get()
+                        .build()
+                val obj = json.parseToJsonElement(execute(exchange)) as? JsonObject ?: continue
+                val token = obj.string("AccessToken")
+                val userId = obj.string("LocalUserId")
+                if (token.isBlank() || userId.isBlank()) continue
+                val info = runCatching { fetchPublicInfo(url) }.getOrNull()
+                val shell =
+                    ServerConnection(
+                        connectionId = connectionId(url, ServerKind.EMBY, userId),
+                        serverUrl = url,
+                        displayName = displayName.trim(),
+                        serverName = info?.serverName?.ifBlank { null } ?: server.name.ifBlank { "Emby" },
+                        serverKind = ServerKind.EMBY,
+                        serverId = info?.serverId?.ifBlank { null } ?: server.systemId,
+                        userId = userId,
+                        accessToken = token,
+                        lastConnectedAt = System.currentTimeMillis(),
+                    )
+                return shell.copy(collections = runCatching { fetchCollections(shell) }.getOrDefault(emptyList()))
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                lastError = e
+            }
+        }
+        throw IllegalStateException("Couldn't reach ${server.name.ifBlank { "this server" }}" + (lastError?.message?.let { ": $it" } ?: ""))
+    }
+
     private fun connectionFromAuth(
         serverUrl: String,
         info: ServerInfo,
@@ -1378,6 +1483,7 @@ class ServerClient(
         }
 
     companion object {
+        private const val EMBY_CONNECT = "https://connect.emby.media/service"
         private const val ITEM_FIELDS = "ProviderIds,MediaSources,MediaStreams,Path,PremiereDate,ProductionYear"
 
         fun connectionId(

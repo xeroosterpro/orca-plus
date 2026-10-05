@@ -136,9 +136,12 @@ class HomeCollections
             onlyId: String? = null,
         ) {
             synchronized(this) {
-                if (job?.isActive == true) return
+                val running = job?.takeIf { it.isActive }
+                // A background refresh is running: skip; "Refresh now" (one list) runs after it
+                if (running != null && onlyId == null) return
                 job =
                     scope.launch {
+                        running?.join()
                         val now = System.currentTimeMillis()
                         // Titles not found are retried daily, so new library additions appear
                         if (now - prefs.getLong(MISS_RESET_KEY, 0L) > 24 * 60 * 60 * 1000L) {

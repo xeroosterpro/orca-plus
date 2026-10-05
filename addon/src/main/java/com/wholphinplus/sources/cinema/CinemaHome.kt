@@ -40,6 +40,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
@@ -92,7 +93,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Border
-import androidx.tv.material3.Button
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ClickableSurfaceDefaults
@@ -154,11 +154,13 @@ fun CinemaHome(
     var tab by rememberSaveable { mutableStateOf(CinemaTab.HOME) }
     // Each tab shows its last load instantly and refreshes quietly when stale
     val pages = remember { mutableStateMapOf<CinemaTab, CinemaHomeData>().apply { putAll(TabCache.data) } }
-    var error by remember { mutableStateOf<String?>(null) }
+    // Per tab: a failed Shows load must not put its error on Home. [attempt] reloads on Try again.
+    val errors = remember { mutableStateMapOf<CinemaTab, String>() }
+    var attempt by remember { mutableIntStateOf(0) }
     var grabFocus by remember { mutableStateOf(true) }
     val rollUp by hook.store.cinemaRollUp.collectAsState()
     val overlays by hook.store.overlays.collectAsState()
-    LaunchedEffect(tab) {
+    LaunchedEffect(tab, attempt) {
         if (tab != CinemaTab.MY_LIST && pages[tab] != null && System.currentTimeMillis() - (TabCache.at[tab] ?: 0L) < 2 * 60_000) return@LaunchedEffect
         // Warm the title art and badge facts for what's on screen first (badges: a few requests
         // per row, batched by the server, not one per card)
@@ -187,7 +189,7 @@ fun CinemaHome(
             }
             Unit
         }
-        runCatching {
+        suspend fun loadTab(): CinemaHomeData =
             when (tab) {
                 CinemaTab.HOME -> repo.load(onFirst)
                 CinemaTab.SHOWS -> repo.loadKind(series = true, onFirst = onFirst)
@@ -195,12 +197,32 @@ fun CinemaHome(
                 CinemaTab.NEW_POPULAR -> repo.loadNewPopular()
                 CinemaTab.MY_LIST -> CinemaHomeData(emptyList(), listOf(CinemaRow("My List", repo.myList())), null, null)
             }
-        }.onSuccess {
-            TabCache.data[tab] = it
-            TabCache.at[tab] = System.currentTimeMillis()
-            if (pages[tab] == null || partial || tab == CinemaTab.MY_LIST) pages[tab] = it
-            warm(it)
-        }.onFailure { if (pages[tab] == null) error = it.message ?: "Couldn't load your library" }
+        errors.remove(tab)
+        // Nothing to show yet (the TV woke before its network): try again quietly a few times
+        // before showing an error. Leaving the tab cancels the load; that's not a failure.
+        var tries = 0
+        while (true) {
+            val failure =
+                try {
+                    val page = loadTab()
+                    TabCache.data[tab] = page
+                    TabCache.at[tab] = System.currentTimeMillis()
+                    if (pages[tab] == null || partial || tab == CinemaTab.MY_LIST) pages[tab] = page
+                    warm(page)
+                    null
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    timber.log.Timber.w(e, "Cinema %s load failed", tab.name)
+                    e
+                }
+            if (failure == null || pages[tab] != null) break
+            if (++tries >= LOAD_TRIES) {
+                errors[tab] = failure.message?.takeIf { it.isNotBlank() } ?: "Couldn't load your library"
+                break
+            }
+            delay(1_500L * tries)
+        }
     }
     // Once Home is up, quietly load Shows and Movies so switching tabs is instant
     LaunchedEffect(pages[CinemaTab.HOME] != null) {
@@ -209,10 +231,15 @@ fun CinemaHome(
         listOf(CinemaTab.SHOWS to true, CinemaTab.MOVIES to false).forEach { (t, series) ->
             if (pages[t] == null) {
                 // Off the critical path: only while the remote is still, so browsing stays smooth
-                runCatching { Conductor.later { repo.loadKind(series) } }.onSuccess {
-                    TabCache.data[t] = it
+                try {
+                    val page = Conductor.later { repo.loadKind(series) }
+                    TabCache.data[t] = page
                     TabCache.at[t] = System.currentTimeMillis()
-                    if (pages[t] == null) pages[t] = it
+                    if (pages[t] == null) pages[t] = page
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Loads normally when the tab is opened
                 }
             }
         }
@@ -235,14 +262,11 @@ fun CinemaHome(
                 label = "tab",
             ) { t ->
                 val d = pages[t]
+                val error = errors[t]
                 Box(Modifier.fillMaxSize()) {
                     when {
                         d == null && error != null ->
-                            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(error!!, color = Ink)
-                                Spacer(Modifier.height(12.dp))
-                                Button(onClick = { hook.store.setCinemaMode(false) }) { Text("Use the classic home") }
-                            }
+                            LoadError(error, onRetry = { attempt++ }, onClassic = { hook.store.setCinemaMode(false) }, Modifier.align(Alignment.Center))
                         // The logo only shows while the app starts; other tabs just fade in
                         d == null -> if (t == CinemaTab.HOME) Wordmark(Modifier.align(Alignment.Center), size = 34)
                         t == CinemaTab.MY_LIST -> MyListScreen(d.rows.firstOrNull()?.items.orEmpty(), onOpen)
@@ -258,6 +282,31 @@ fun CinemaHome(
         TopNav(tab, onTab = { tab = it }, onNavigate)
     }
 }
+
+/** A page that couldn't load: why, Try again (focused), and a way back to Wholphin's home. */
+@Composable
+internal fun LoadError(
+    message: String,
+    onRetry: () -> Unit,
+    onClassic: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    val retry = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { retry.requestFocus() } }
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("Couldn't load this page", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text(message, color = InkDim, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 560.dp))
+        Spacer(Modifier.height(18.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            HeroButton("Try again", Icons.Filled.Refresh, primary = true, modifier = Modifier.focusRequester(retry), onClick = onRetry)
+            onClassic?.let { HeroButton("Use the classic home", Icons.Filled.Settings, primary = false, onClick = it) }
+        }
+    }
+}
+
+/** Quiet attempts before a page with nothing to show reports an error. */
+internal const val LOAD_TRIES = 3
 
 /** Cinema mode's top-menu pages. They switch in place, like a streaming app's tabs. */
 enum class CinemaTab(

@@ -30,7 +30,7 @@ index 582e000a..4b93d14e 100644
          android:supportsRtl="true"
          android:theme="@style/Theme.Wholphin"
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
-index 62f0e39b..c320a949 100644
+index 62f0e39b..6129a22a 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 @@ -429,6 +429,7 @@ class MainActivityViewModel
@@ -41,7 +41,15 @@ index 62f0e39b..c320a949 100644
      ) : ViewModel() {
          private val mutex = Mutex()
  
-@@ -499,6 +500,27 @@ class MainActivityViewModel
+@@ -489,6 +490,7 @@ class MainActivityViewModel
+                     try {
+                         val needUpgrade = appUpgradeHandler.needUpgrade()
+                         if (needUpgrade) {
++                            if (com.wholphinplus.sources.welcome.Onboarding.announceUpdate(context)) // Orca+: not on a first install
+                             showToast(
+                                 context,
+                                 context.getString(
+@@ -499,6 +501,27 @@ class MainActivityViewModel
                              appUpgradeHandler.run()
                          }
                          appUpgradeHandler.copySubfont(false)
@@ -69,6 +77,33 @@ index 62f0e39b..c320a949 100644
                          val prefs =
                              preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()
                          val profileProtected =
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt b/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt
+index 26dda908..cf299957 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt
+@@ -86,17 +86,19 @@ fun MainContent(
+                             }
+ 
+                             SetupDestination.ServerList -> {
+-                                SwitchServerContent(Modifier.fillMaxSize())
++                                com.github.damontecres.wholphin.ui.setup.OrcaServerList(Modifier.fillMaxSize()) // Orca+: first-run welcome
+                             }
+ 
+                             is SetupDestination.UserList -> {
+-                                SwitchUserContent(
++                                com.github.damontecres.wholphin.ui.setup.OrcaUserList( // Orca+: first-run sign-in
+                                     server = key.server,
+                                     Modifier.fillMaxSize(),
+                                 )
+                             }
+ 
+-                            is SetupDestination.AppContent -> {
++                            is SetupDestination.AppContent -> if (com.github.damontecres.wholphin.ui.setup.orcaWelcomeOwnsScreen()) {
++                                com.github.damontecres.wholphin.ui.setup.OrcaWelcomeFinish() // Orca+: finish the welcome first
++                            } else {
+                                 LaunchedEffect(Unit) {
+                                     backdropService.clearBackdrop()
+                                 }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
 index 43d2d53a..3fd4cf6b 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
@@ -899,6 +934,155 @@ index daf6fa07..0de10d2a 100644
      return when (theme) {
          AppThemeColors.UNRECOGNIZED,
          AppThemeColors.PURPLE,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
+new file mode 100644
+index 00000000..76b327fe
+--- /dev/null
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
+@@ -0,0 +1,143 @@
++package com.github.damontecres.wholphin.ui.setup
++
++import android.Manifest
++import android.os.Build
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalContext
++import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
++import com.github.damontecres.wholphin.data.model.JellyfinServer
++import com.github.damontecres.wholphin.services.SetupDestination
++import com.github.damontecres.wholphin.util.LoadingState
++import com.wholphinplus.sources.SourceHook
++import com.wholphinplus.sources.ui.SourcesEntryPoint
++import com.wholphinplus.sources.welcome.FoundServer
++import com.wholphinplus.sources.welcome.Onboarding
++import com.wholphinplus.sources.welcome.WelcomeFinish
++import com.wholphinplus.sources.welcome.WelcomeServerFlow
++import com.wholphinplus.sources.welcome.WelcomeSignIn
++import com.wholphinplus.sources.welcome.WelcomeUser
++import dagger.hilt.android.EntryPointAccessors
++
++/*
++ * Orca+: the first-run welcome. The screens live in the addon (welcome/); this file connects them
++ * to Wholphin's own server and sign-in logic, so adding a server and signing in work exactly as
++ * in Wholphin. Shown only when no server is saved yet; everyone else gets Wholphin's screens.
++ */
++
++@Composable
++private fun orcaHook(): SourceHook {
++    val context = LocalContext.current
++    return remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java).sourceHook() }
++}
++
++/** In place of Wholphin's server list: the welcome on a true first run, else Wholphin's list. */
++@Composable
++fun OrcaServerList(modifier: Modifier = Modifier) {
++    val hook = orcaHook()
++    val stage by hook.store.onboarding.collectAsState()
++    val viewModel: SwitchServerViewModel = hiltViewModel()
++    val state by viewModel.state.collectAsState()
++    LaunchedEffect(Unit) { viewModel.init() }
++
++    val firstRun = stage == Onboarding.STARTED || (stage == Onboarding.NEW && state.loading is LoadingState.Success && state.servers.isEmpty())
++    when {
++        firstRun -> {
++            LaunchedEffect(Unit) { if (hook.store.onboarding.value == Onboarding.NEW) hook.store.setOnboarding(Onboarding.STARTED) }
++            val permission =
++                rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
++                    if (granted) viewModel.discoverServers()
++                }
++            LaunchedEffect(Unit) {
++                viewModel.clearAddServerState()
++                if (viewModel.hasPermission) {
++                    viewModel.discoverServers()
++                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
++                    permission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
++                }
++            }
++            val found = state.discoveredServers.map { FoundServer(it.id.toString(), it.name.orEmpty(), it.url) }
++            WelcomeServerFlow(
++                found = found,
++                connecting = state.addServerState is LoadingState.Loading,
++                error = (state.addServerState as? LoadingState.Error)?.localizedMessage,
++                onPick = { picked -> state.discoveredServers.firstOrNull { it.id.toString() == picked.key }?.let(viewModel::switchServer) },
++                onAddress = { viewModel.addServer(it, false) },
++                onSearchAgain = { viewModel.discoverServers() },
++                modifier = modifier,
++            )
++        }
++        // Still finding out whether servers are saved: a dark stage, not a flash of the old list
++        stage == Onboarding.NEW && state.loading !is LoadingState.Success && state.loading !is LoadingState.Error ->
++            Box(modifier.fillMaxSize().background(Color(0xFF0B0B0B)))
++        else -> SwitchServerContent(modifier)
++    }
++}
++
++/** In place of Wholphin's user list: the welcome's sign-in during the first run. */
++@Composable
++fun OrcaUserList(
++    server: JellyfinServer,
++    modifier: Modifier = Modifier,
++) {
++    val hook = orcaHook()
++    val stage by hook.store.onboarding.collectAsState()
++    if (stage != Onboarding.STARTED) {
++        SwitchUserContent(server = server, modifier)
++        return
++    }
++    val viewModel = hiltViewModel<SwitchUserViewModel, SwitchUserViewModel.Factory>(creationCallback = { it.create(server) })
++    val state by viewModel.state.collectAsState()
++    var submitted by remember { mutableStateOf(false) }
++    LaunchedEffect(Unit) { viewModel.init() }
++    val error = (state.switchUserState as? LoadingState.Error)?.localizedMessage
++    LaunchedEffect(error) { if (error != null) submitted = false }
++    WelcomeSignIn(
++        serverName = server.name.orEmpty(),
++        quickEnabled = state.quickConnectEnabled,
++        quickCode = state.quickConnectStatus?.code,
++        users = state.users.map { WelcomeUser(it.user.name.orEmpty(), it.imageUrl) }.filter { it.name.isNotBlank() },
++        busy = submitted,
++        error = error,
++        onQuickConnect = { viewModel.initiateQuickConnect(server, null) },
++        onPassword = { user, password ->
++            submitted = true
++            viewModel.clearSwitchUserState()
++            viewModel.login(server, null, user, password)
++        },
++        onBack = {
++            viewModel.cancelQuickConnect()
++            viewModel.setupNavigationManager.navigateTo(SetupDestination.ServerList)
++        },
++        modifier = modifier,
++    )
++}
++
++/**
++ * True while the welcome's last steps (other libraries, the look) own the screen after sign-in.
++ * MainContent shows [OrcaWelcomeFinish] instead of the app until then.
++ */
++@Composable
++fun orcaWelcomeOwnsScreen(): Boolean {
++    val hook = orcaHook()
++    val stage by hook.store.onboarding.collectAsState()
++    LaunchedEffect(stage) { if (stage == Onboarding.STARTED) hook.store.setOnboarding(Onboarding.FINISHING) }
++    return stage == Onboarding.STARTED || stage == Onboarding.FINISHING
++}
++
++@Composable
++fun OrcaWelcomeFinish(modifier: Modifier = Modifier) {
++    WelcomeFinish(onDone = {}, modifier = modifier.fillMaxSize())
++}
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
 index 8ae95b25..e24401d1 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
@@ -968,7 +1152,7 @@ index 00000000..1f9116de
 +    <string name="orca_settings_help">Help &amp; diagnostics</string>
 +</resources>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index cff98add..38579bb2 100644
+index cff98add..9e552fbd 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1,5 +1,6 @@
@@ -979,6 +1163,15 @@ index cff98add..38579bb2 100644
      <string name="app_name_long" translatable="false">Wholphin</string>
  
      <string name="about">About</string>
+@@ -806,7 +807,7 @@
+     <string name="select_all">Select all</string>
+     <string name="separate_types">Separate types</string>
+     <string name="prefer_logos">Prefer showing logos for titles</string>
+-    <string name="updated_toast">Wholphin updated to %s</string>
++    <string name="updated_toast">Orca+ updated to %s</string>
+     <string name="remove_continue_watching">Remove from continue watching</string>
+     <string name="remove_next_up">Remove series from next up</string>
+     <string name="view_removed_next_up">View series removed from next up</string>
 diff --git a/settings.gradle.kts b/settings.gradle.kts
 index 7fddcdcd..91bf7d84 100644
 --- a/settings.gradle.kts

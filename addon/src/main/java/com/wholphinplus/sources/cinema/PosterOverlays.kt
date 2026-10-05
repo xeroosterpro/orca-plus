@@ -163,12 +163,15 @@ internal object StreamCache {
             io.launch {
                 kotlinx.coroutines.delay(4_000)
                 Conductor.whenQuiet()
+                // Read on the main thread when Cinema mode opens: don't let it grow forever
+                if (map.size > MAX) map.keys.take(map.size - MAX * 3 / 4).forEach(map::remove)
                 p.edit().putString(KEY, json.encodeToString(HashMap(map))).apply()
             }
     }
 
     private const val KEY = "streams_v3"
     private const val BATCH = 6
+    private const val MAX = 6_000
 }
 
 /** A card's quality facts: known ones at once, else looked up once it's on screen (if wanted). */

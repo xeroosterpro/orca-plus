@@ -418,36 +418,461 @@ index 79d2ae57..196f34b1 100644
                              )
                              withContext(WholphinDispatchers.Main) {
                                  player.prepare()
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
+new file mode 100644
+index 00000000..a76c0433
+--- /dev/null
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
+@@ -0,0 +1,358 @@
++package com.github.damontecres.wholphin.ui.preferences
++
++import androidx.activity.compose.BackHandler
++import androidx.annotation.StringRes
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxHeight
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.itemsIndexed
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.key
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.focus.FocusRequester
++import androidx.compose.ui.focus.focusProperties
++import androidx.compose.ui.focus.focusRequester
++import androidx.compose.ui.focus.onFocusChanged
++import androidx.compose.ui.input.key.Key
++import androidx.compose.ui.input.key.KeyEventType
++import androidx.compose.ui.input.key.key
++import androidx.compose.ui.input.key.onPreviewKeyEvent
++import androidx.compose.ui.input.key.type
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.tv.material3.ClickableSurfaceDefaults
++import androidx.tv.material3.MaterialTheme
++import androidx.tv.material3.Surface
++import androidx.tv.material3.Text
++import com.github.damontecres.wholphin.BuildConfig
++import com.github.damontecres.wholphin.R
++import com.github.damontecres.wholphin.preferences.AppPreference
++import com.github.damontecres.wholphin.preferences.AppPreferences
++import com.github.damontecres.wholphin.preferences.ExperimentalPreference
++import com.github.damontecres.wholphin.preferences.PlayerBackend
++import com.github.damontecres.wholphin.preferences.ScreensaverPreference
++import com.github.damontecres.wholphin.services.UpdateChecker
++import kotlinx.coroutines.delay
++
++/**
++ * Orca+: Wholphin's settings, reorganised. Wholphin splits them over a "basic" list and an
++ * "advanced" screen with repeated headings (Interface and Playback appear in both) and hides
++ * some behind sub-screens. Here every setting sits in one topic, picked from a menu on the left
++ * like a TV's own settings. The settings themselves (dialogs, validation, player-specific
++ * options) are Wholphin's own, drawn by [PreferencesContent].
++ */
++enum class OrcaSection(
++    @param:StringRes val title: Int,
++    @param:StringRes val hint: Int,
++) {
++    PLAYBACK(R.string.orca_settings_playback, R.string.orca_settings_playback_hint),
++    NEXT_UP(R.string.orca_settings_next_up, R.string.orca_settings_next_up_hint),
++    QUALITY(R.string.orca_settings_quality, R.string.orca_settings_quality_hint),
++    PLAYER(R.string.orca_settings_player, R.string.orca_settings_player_hint),
++    APPEARANCE(R.string.orca_settings_appearance, R.string.orca_settings_appearance_hint),
++    PROFILE(R.string.orca_settings_profile, R.string.orca_settings_profile_hint),
++    SCREENSAVER(R.string.orca_settings_screensaver, R.string.orca_settings_screensaver_hint),
++    ORCA(R.string.orca_settings_orca, R.string.orca_settings_orca_hint),
++    ABOUT(R.string.orca_settings_about, R.string.orca_settings_about_hint),
++}
++
++private fun group(
++    @StringRes title: Int,
++    vararg prefs: AppPreference<AppPreferences, out Any?>,
++    conditional: List<ConditionalPreferences<AppPreferences>> = listOf(),
++) = PreferenceGroup(title, prefs.toList(), conditional)
++
++private val usesExoPlayer = { p: AppPreferences ->
++    p.playbackPreferences.playerBackend.let { it == PlayerBackend.EXO_PLAYER || it == PlayerBackend.PREFER_MPV }
++}
++
++/** Every setting, in the topic people would look for it under. */
++fun orcaGroups(section: OrcaSection): List<PreferenceGroup<AppPreferences>> =
++    when (section) {
++        OrcaSection.PLAYBACK ->
++            listOf(
++                group(
++                    R.string.orca_settings_controls,
++                    AppPreference.SkipForward,
++                    AppPreference.SkipBack,
++                    AppPreference.SkipBackOnResume,
++                    AppPreference.OneClickPause,
++                    AppPreference.DpadSeekModePref,
++                    AppPreference.ControllerTimeout,
++                ),
++                group(R.string.orca_settings_picture, AppPreference.GlobalContentScale, AppPreference.CinemaMode),
++            )
++
++        OrcaSection.NEXT_UP ->
++            listOf(
++                group(
++                    R.string.next_up,
++                    AppPreference.ShowNextUpTiming,
++                    AppPreference.AutoPlayNextUp,
++                    AppPreference.AutoPlayNextDelay,
++                    AppPreference.PassOutProtection,
++                ),
++                group(
++                    R.string.skip,
++                    AppPreference.SkipIntros,
++                    AppPreference.SkipOutros,
++                    AppPreference.SkipRecaps,
++                    AppPreference.SkipPreviews,
++                    AppPreference.SkipCommercials,
++                ),
++            )
++
++        OrcaSection.QUALITY ->
++            listOf(
++                group(
++                    R.string.orca_settings_streaming,
++                    AppPreference.MaxBitrate,
++                    AppPreference.ResolutionSwitching,
++                    AppPreference.RefreshRateSwitching,
++                ),
++                // These are the built-in player's; MPV and external players decide for themselves
++                group(
++                    R.string.orca_settings_audio_video,
++                    conditional = listOf(ConditionalPreferences(usesExoPlayer, listOf(AppPreference.Ac3Supported, AppPreference.DownMixStereo, AppPreference.DirectPlayDoviProfile7, AppPreference.DecodeAv1))),
++                ),
++                group(
++                    R.string.orca_settings_subtitles,
++                    AppPreference.SubtitleStyle,
++                    conditional = listOf(ConditionalPreferences(usesExoPlayer, listOf(AppPreference.AssSubtitleMode, AppPreference.DirectPlayPgs))),
++                ),
++            ).filter { it.preferences.isNotEmpty() || it.conditionalPreferences.isNotEmpty() }
++
++        OrcaSection.PLAYER ->
++            listOf(
++                group(
++                    R.string.player_backend,
++                    AppPreference.PlayerBackendPref,
++                    conditional =
++                        listOf(
++                            ConditionalPreferences(usesExoPlayer, listOf(AppPreference.FfmpegPreference)),
++                            ConditionalPreferences(
++                                { it.playbackPreferences.playerBackend.let { b -> b == PlayerBackend.MPV || b == PlayerBackend.PREFER_MPV } },
++                                listOf(AppPreference.MpvHardwareDecoding, AppPreference.MpvGpuNext, AppPreference.MpvConfFile),
++                            ),
++                            ConditionalPreferences(
++                                { it.playbackPreferences.playerBackend == PlayerBackend.EXTERNAL_PLAYER },
++                                listOf(AppPreference.ExternalPlayerApp),
++                            ),
++                        ),
++                ),
++                group(R.string.orca_settings_diagnostics, AppPreference.PlaybackDebugInfo),
++            )
++
++        OrcaSection.APPEARANCE ->
++            listOf(
++                group(R.string.orca_settings_look, AppPreference.ThemeColors, AppPreference.ShowLogos, AppPreference.BackdropStylePref, AppPreference.ShowClock),
++                group(
++                    R.string.orca_settings_home_menus,
++                    AppPreference.CustomizeHome,
++                    AppPreference.UserPinnedNavDrawerItems,
++                    AppPreference.RememberSelectedTab,
++                    AppPreference.DisplayTogglesPref,
++                    AppPreference.ManageMedia,
++                ),
++                group(R.string.orca_settings_extras, AppPreference.PlayThemeMusic, AppPreference.SlideshowDuration, AppPreference.SlideshowPlayVideos),
++            )
++
++        OrcaSection.PROFILE ->
++            listOf(
++                group(R.string.profile_specific_settings, AppPreference.ProtectProfilePreference, AppPreference.UserInterfaceLanguage, AppPreference.UserProfileSettings),
++                PreferenceGroup(
++                    R.string.orca_settings_signin,
++                    buildList {
++                        add(AppPreference.SignInAuto)
++                        add(AppPreference.QuickConnect)
++                        if (BuildConfig.DISCOVER_ENABLED) add(AppPreference.SeerrIntegration)
++                    },
++                ),
++            )
++
++        OrcaSection.SCREENSAVER ->
++            listOf(
++                group(
++                    R.string.screensaver,
++                    ScreensaverPreference.Enabled,
++                    ScreensaverPreference.StartDelay,
++                    ScreensaverPreference.Duration,
++                    ScreensaverPreference.ShowClock,
++                    ScreensaverPreference.Animate,
++                    ScreensaverPreference.MaxAge,
++                    ScreensaverPreference.ItemTypes,
++                    ScreensaverPreference.Start,
++                ),
++                group(R.string.dim_screen, ScreensaverPreference.DimToggle, ScreensaverPreference.DimPercentage),
++            )
++
++        // The Orca+ entry is drawn on its own by PreferencesContent (orcaEntry)
++        OrcaSection.ORCA -> listOf()
++
++        OrcaSection.ABOUT ->
++            listOf(
++                PreferenceGroup(
++                    R.string.about,
++                    buildList {
++                        add(AppPreference.InstalledVersion)
++                        if (UpdateChecker.ACTIVE) {
++                            add(AppPreference.Update)
++                            add(AppPreference.AutoCheckForUpdates)
++                            add(AppPreference.UpdateUrl)
++                        }
++                        add(AppPreference.OssLicenseInfo)
++                    },
++                ),
++                group(
++                    R.string.orca_settings_help,
++                    AppPreference.SendAppLogs,
++                    AppPreference.SendCrashReports,
++                    AppPreference.DebugLogging,
++                    AppPreference.ImageDiskCacheSize,
++                    AppPreference.ClearImageCache,
++                    ExperimentalPreference.Enable,
++                    conditional = listOf(ConditionalPreferences({ it.experimentalPreferences.enabled }, listOf(ExperimentalPreference.ExperimentalSettings))),
++                ),
++            )
++    }
++
++/**
++ * Settings as two panes: topics on the left; the focused topic's settings on the right. Moving
++ * through the topics previews each one; Right (or OK) goes into it, Back comes out to the topics.
++ */
++@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
++@Composable
++fun OrcaSettingsPage(
++    initialPreferences: AppPreferences,
++    modifier: Modifier = Modifier,
++) {
++    var section by rememberSaveable { mutableStateOf(OrcaSection.PLAYBACK) }
++    var focused by remember { mutableStateOf(OrcaSection.PLAYBACK) }
++    var inPane by remember { mutableStateOf(false) }
++    val railFocus = remember { OrcaSection.entries.associateWith { FocusRequester() } }
++    // Entering a topic (Right or OK from the list) lands on its first setting, not on whichever
++    // setting happens to sit level with the topic
++    val paneFocus = remember(section) { FocusRequester() }
++
++    // Follow the focused topic once it rests, so sweeping down the list doesn't rebuild every pane
++    LaunchedEffect(focused) {
++        if (focused != section) {
++            delay(140)
++            section = focused
++        }
++    }
++    LaunchedEffect(Unit) { runCatching { railFocus.getValue(section).requestFocus() } }
++
++    val backToRail = {
++        inPane = false
++        runCatching { railFocus.getValue(section).requestFocus() }
++        Unit
++    }
++    // Back inside a topic returns to the topic list (key route for Android 11, callback for 13+)
++    BackHandler(enabled = inPane) { backToRail() }
++
++    Row(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
++        Column(
++            Modifier.width(340.dp).fillMaxHeight().padding(start = 40.dp, end = 20.dp, top = 28.dp),
++            verticalArrangement = Arrangement.spacedBy(4.dp),
++        ) {
++            Text(stringResource(R.string.settings), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
++            Spacer(Modifier.height(10.dp))
++            // Sized so all nine topics fit on a 1080p TV without scrolling
++            LazyColumn(verticalArrangement = Arrangement.spacedBy(3.dp)) {
++                itemsIndexed(OrcaSection.entries) { _, s ->
++                    RailItem(
++                        s,
++                        selected = s == section,
++                        modifier =
++                            Modifier.focusRequester(railFocus.getValue(s)).onFocusChanged {
++                                if (it.isFocused) {
++                                    focused = s
++                                    inPane = false
++                                }
++                            },
++                        onClick = {
++                            section = s
++                            focused = s
++                        },
++                    )
++                }
++            }
++        }
++        Box(
++            Modifier
++                .weight(1f)
++                .fillMaxHeight()
++                .focusProperties { enter = { paneFocus } }
++            .onFocusChanged { if (it.hasFocus) inPane = true }
++                .onPreviewKeyEvent { e ->
++                    if (inPane && (e.key == Key.Back || e.key == Key.Escape)) {
++                        if (e.type == KeyEventType.KeyUp) backToRail()
++                        true
++                    } else {
++                        false
++                    }
++                },
++        ) {
++            key(section) {
++                PreferencesContent(
++                    initialPreferences,
++                    PreferenceScreenOption.BASIC,
++                    Modifier.fillMaxSize(),
++                    groupsOverride = orcaGroups(section),
++                    titleOverride = stringResource(section.title),
++                    grabFocus = false,
++                    animateIn = false,
++                    orcaEntry = section == OrcaSection.ORCA,
++                    entryFocusRequester = paneFocus,
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun RailItem(
++    section: OrcaSection,
++    selected: Boolean,
++    modifier: Modifier,
++    onClick: () -> Unit,
++) {
++    Surface(
++        onClick = onClick,
++        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
++        colors =
++            ClickableSurfaceDefaults.colors(
++                containerColor = if (selected) MaterialTheme.colorScheme.surfaceVariant else androidx.compose.ui.graphics.Color.Transparent,
++                contentColor = MaterialTheme.colorScheme.onSurface,
++                focusedContainerColor = MaterialTheme.colorScheme.inverseSurface,
++                focusedContentColor = MaterialTheme.colorScheme.inverseOnSurface,
++            ),
++        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.02f),
++        modifier = modifier.fillMaxWidth(),
++    ) {
++        Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
++            Text(stringResource(section.title), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
++            Text(stringResource(section.hint), fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
++        }
++    }
++}
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
-index c97117b7..9e54975c 100644
+index c97117b7..09efa2cf 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
-@@ -248,6 +248,10 @@ fun PreferencesContent(
+@@ -96,10 +96,17 @@ fun PreferencesContent(
+     updateVM: UpdateViewModel = hiltViewModel(),
+     seerrVm: SwitchSeerrViewModel = hiltViewModel(),
+     onFocus: (Int, Int) -> Unit = { _, _ -> },
++    // Orca+: OrcaSettingsPage shows one topic at a time through these
++    groupsOverride: List<PreferenceGroup<AppPreferences>>? = null,
++    titleOverride: String? = null,
++    grabFocus: Boolean = true,
++    animateIn: Boolean = true,
++    orcaEntry: Boolean = false,
++    entryFocusRequester: FocusRequester? = null,
+ ) {
+     val context = LocalContext.current
+     val scope = rememberCoroutineScope()
+-    val focusRequester = remember { FocusRequester() }
++    val focusRequester = entryFocusRequester ?: remember { FocusRequester() } // Orca+: where entering a topic lands
+     val firstFocusRequester = remember { FocusRequester() }
+     val lastFocusRequester = remember { FocusRequester() }
+ 
+@@ -147,7 +154,7 @@ fun PreferencesContent(
+         }
+ 
+     val prefList =
+-        when (preferenceScreenOption) {
++        groupsOverride ?: when (preferenceScreenOption) { // Orca+: a topic's settings when given
+             PreferenceScreenOption.BASIC -> basicPreferences
+             PreferenceScreenOption.ADVANCED -> advancedPreferences
+             PreferenceScreenOption.EXO_PLAYER -> ExoPlayerPreferences
+@@ -167,7 +174,7 @@ fun PreferencesContent(
+             PreferenceScreenOption.EXPERIMENTAL -> R.string.experimental_settings
+         }
+ 
+-    var visible by remember { mutableStateOf(false) }
++    var visible by remember { mutableStateOf(!animateIn) } // Orca+
+     LaunchedEffect(Unit) {
+         // Forces the animated to trigger
+         visible = true
+@@ -202,13 +209,13 @@ fun PreferencesContent(
+         modifier = modifier,
+     ) {
+         LaunchedEffect(Unit) {
+-            focusRequester.tryRequestFocus()
++            if (grabFocus) focusRequester.tryRequestFocus() // Orca+: the topic list keeps focus
+         }
+         Column(
+             modifier = Modifier.background(MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp)),
+         ) {
+             Text(
+-                text = stringResource(screenTitle),
++                text = titleOverride ?: stringResource(screenTitle), // Orca+
+                 style = MaterialTheme.typography.headlineSmall,
+                 color = MaterialTheme.colorScheme.onSurface,
+                 textAlign = TextAlign.Center,
+@@ -248,7 +255,13 @@ fun PreferencesContent(
                          )
                      }
                  }
-+                if (preferenceScreenOption == PreferenceScreenOption.BASIC) {
++                if ((preferenceScreenOption == PreferenceScreenOption.BASIC && groupsOverride == null) || orcaEntry) {
 +                    // Orca+: entry at the top of Settings; wrap-around focus from the last setting lands here
 +                    item { com.wholphinplus.sources.ui.ExtraSourcesEntry(Modifier.focusRequester(firstFocusRequester)) }
 +                }
                  prefList.forEachIndexed { groupIndex, group ->
++                    // Orca+: a heading whose settings are all hidden (e.g. ExoPlayer-only ones under MPV) is left out
++                    if (groupsOverride != null && group.preferences.isEmpty() && group.conditionalPreferences.none { it.condition.invoke(preferences) }) return@forEachIndexed
                      item {
                          Text(
-@@ -269,7 +273,9 @@ fun PreferencesContent(
+                             text = stringResource(group.title),
+@@ -269,7 +282,9 @@ fun PreferencesContent(
                                  .flatten()
                      groupPreferences.forEachIndexed { prefIndex, pref ->
                          pref as AppPreference<AppPreferences, Any>
 -                        val isFirst = groupIndex == 0 && prefIndex == 0 && !showUpdate
 +                        val isFirst =
 +                            groupIndex == 0 && prefIndex == 0 && !showUpdate &&
-+                                preferenceScreenOption != PreferenceScreenOption.BASIC // Orca+: the entry above is first
++                                !((preferenceScreenOption == PreferenceScreenOption.BASIC && groupsOverride == null) || orcaEntry) // Orca+: the entry above is first
                          val isLast =
                              groupIndex == prefList.lastIndex && prefIndex == groupPreferences.lastIndex
                          item {
-@@ -816,6 +822,10 @@ fun PreferencesPage(
+@@ -816,6 +831,15 @@ fun PreferencesPage(
      Box(
          modifier = modifier.background(MaterialTheme.colorScheme.background),
      ) {
++        // Orca+: the main settings screen is reorganised into topics (OrcaSettings.kt)
++        if (preferenceScreenOption == PreferenceScreenOption.BASIC) {
++            OrcaSettingsPage(initialPreferences, Modifier.fillMaxSize())
++            return@Box
++        }
 +        // Orca+: Cinema mode fills the left side with the title art and a big heading
 +        if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
 +            com.wholphinplus.sources.cinema.CinemaSettingsSide(Modifier.fillMaxWidth(.6f).fillMaxHeight().align(Alignment.TopStart))
@@ -501,6 +926,47 @@ index 8ae95b25..e24401d1 100644
                  typography = AppTypography,
                  content = content,
              )
+diff --git a/app/src/main/res/values/orca_settings_strings.xml b/app/src/main/res/values/orca_settings_strings.xml
+new file mode 100644
+index 00000000..1f9116de
+--- /dev/null
++++ b/app/src/main/res/values/orca_settings_strings.xml
+@@ -0,0 +1,35 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Orca+: topics and headings for the reorganised settings (OrcaSettings.kt). Kept in their own
++     file so Wholphin's strings.xml stays untouched. -->
++<resources>
++    <string name="orca_settings_playback">Playback</string>
++    <string name="orca_settings_playback_hint">Remote, skipping and picture</string>
++    <string name="orca_settings_next_up">Next Up &amp; Skipping</string>
++    <string name="orca_settings_next_up_hint">Autoplay, intros, recaps and credits</string>
++    <string name="orca_settings_quality">Audio, Video &amp; Subtitles</string>
++    <string name="orca_settings_quality_hint">Quality, formats and subtitle style</string>
++    <string name="orca_settings_player">Player</string>
++    <string name="orca_settings_player_hint">Built-in, MPV or an external app</string>
++    <string name="orca_settings_appearance">Home &amp; Appearance</string>
++    <string name="orca_settings_appearance_hint">Theme, rows, menus and logos</string>
++    <string name="orca_settings_profile">Profile &amp; Account</string>
++    <string name="orca_settings_profile_hint">PIN, language and sign-in</string>
++    <string name="orca_settings_screensaver">Screensaver</string>
++    <string name="orca_settings_screensaver_hint">What plays when you step away</string>
++    <string name="orca_settings_orca">Orca+</string>
++    <string name="orca_settings_orca_hint">Cinema mode, sources, search, badges</string>
++    <string name="orca_settings_about">About &amp; Help</string>
++    <string name="orca_settings_about_hint">Version, updates and diagnostics</string>
++
++    <string name="orca_settings_controls">Remote &amp; controls</string>
++    <string name="orca_settings_picture">Picture</string>
++    <string name="orca_settings_streaming">Streaming quality</string>
++    <string name="orca_settings_audio_video">Audio &amp; video formats</string>
++    <string name="orca_settings_subtitles">Subtitles</string>
++    <string name="orca_settings_diagnostics">Diagnostics</string>
++    <string name="orca_settings_look">Look</string>
++    <string name="orca_settings_home_menus">Home &amp; menus</string>
++    <string name="orca_settings_extras">Extras</string>
++    <string name="orca_settings_signin">Sign-in</string>
++    <string name="orca_settings_help">Help &amp; diagnostics</string>
++</resources>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
 index cff98add..38579bb2 100644
 --- a/app/src/main/res/values/strings.xml

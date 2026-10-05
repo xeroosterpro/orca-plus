@@ -162,6 +162,7 @@ internal object StreamCache {
         pending =
             io.launch {
                 kotlinx.coroutines.delay(4_000)
+                Conductor.whenQuiet()
                 p.edit().putString(KEY, json.encodeToString(HashMap(map))).apply()
             }
     }

@@ -3,6 +3,7 @@ package com.wholphinplus.sources.cinema
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -65,6 +66,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.lerp
@@ -101,6 +103,8 @@ import coil3.compose.AsyncImage
 import com.wholphinplus.sources.ui.SourcesEntryPoint
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -158,11 +162,16 @@ fun CinemaHome(
         if (tab != CinemaTab.MY_LIST && pages[tab] != null && System.currentTimeMillis() - (TabCache.at[tab] ?: 0L) < 2 * 60_000) return@LaunchedEffect
         // Warm the title art and badge facts for what's on screen first (badges: a few requests
         // per row, batched by the server, not one per card)
+        // The first two rows (on screen) at once; rows further down once the remote is still
         fun warm(d: CinemaHomeData) {
-            d.rows.forEach { row -> row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } } }
-            if (overlays.needsStreams) {
-                d.rows.forEach { row ->
-                    launch { StreamCache.prefetch(row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }, repo::streamTagsBatch) }
+            d.rows.forEachIndexed { i, row ->
+                launch {
+                    if (i >= ON_SCREEN_ROWS) Conductor.whenQuiet()
+                    row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } }
+                    if (overlays.needsStreams) {
+                        val ids = row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }
+                        if (i < ON_SCREEN_ROWS) StreamCache.prefetch(ids, repo::streamTagsBatch) else Conductor.later { StreamCache.prefetch(ids, repo::streamTagsBatch) }
+                    }
                 }
             }
         }
@@ -199,7 +208,8 @@ fun CinemaHome(
         delay(1_500)
         listOf(CinemaTab.SHOWS to true, CinemaTab.MOVIES to false).forEach { (t, series) ->
             if (pages[t] == null) {
-                runCatching { repo.loadKind(series) }.onSuccess {
+                // Off the critical path: only while the remote is still, so browsing stays smooth
+                runCatching { Conductor.later { repo.loadKind(series) } }.onSuccess {
                     TabCache.data[t] = it
                     TabCache.at[t] = System.currentTimeMillis()
                     if (pages[t] == null) pages[t] = it
@@ -214,6 +224,7 @@ fun CinemaHome(
     Box(
         modifier.fillMaxSize().background(Stage).onPreviewKeyEvent {
             lastInput.longValue = android.os.SystemClock.uptimeMillis()
+            Conductor.touch()
             false
         },
     ) {
@@ -261,6 +272,16 @@ enum class CinemaTab(
 
 private val TopNavHeight = 54.dp
 
+// The billboard panel's heights (full, buttons hidden, rolled up) and the gap below it. The rows
+// sit at RowsTopRolled and slide down by the panel's extra height (see CinemaScreen).
+private val PanelTop = 16.dp
+private val PanelFull = 262.dp
+private val PanelNoButtons = 210.dp
+private val PanelRolled = 72.dp
+private val GapFull = 18.dp
+private val GapRolled = 8.dp
+private val RowsTopRolled = TopNavHeight + PanelTop + PanelRolled + GapRolled
+
 /** After this long without a key press the billboard stops rotating. */
 private const val IDLE_MS = 120_000L
 
@@ -296,6 +317,7 @@ private fun CinemaScreen(
     rollUp: Boolean,
     lastInput: androidx.compose.runtime.MutableLongState,
 ) {
+    val context = LocalContext.current
     val focus = remember { HomeFocus() }
     // 0 = full billboard, 1 = rolled up to a quarter while browsing rows (if the setting is on).
     // Read only in layout/draw, so the animation never recomposes the screen.
@@ -319,7 +341,15 @@ private fun CinemaScreen(
     LaunchedEffect(featured) {
         snapshotFlow { if (focus.billboard) featured else focus.focused ?: featured }.collectLatest { target ->
             if (target?.key != shown?.key) {
-                if (!focus.billboard) delay(220)
+                if (!focus.billboard) {
+                    // Start fetching the picture at once, wait out the settle delay, then give it
+                    // a little longer, so text and picture change together
+                    coroutineScope {
+                        val picture = async { preloadBackdrop(context, target?.backdropUrl, 520) }
+                        delay(220)
+                        picture.await()
+                    }
+                }
                 shown = target
             }
         }
@@ -335,6 +365,8 @@ private fun CinemaScreen(
                 val since = lastInput.longValue
                 snapshotFlow { lastInput.longValue }.first { it != since }
             }
+            // Next picture ready first, so the title and its picture swap together
+            preloadBackdrop(context, data.featured[(featuredIndex + 1) % data.featured.size].backdropUrl, 3_000)
             featuredIndex = (featuredIndex + 1) % data.featured.size
         }
     }
@@ -407,19 +439,25 @@ private fun CinemaScreen(
                 },
                 onButtonsFocused = { focus.billboard = true },
             )
-            // Breathing room between the buttons and the first row's title
-            Spacer(Modifier.rollHeight(18.dp, 8.dp) { roll.value })
-            CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
-                LazyColumn(
-                    state = columnState,
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    contentPadding = PaddingValues(bottom = 220.dp),
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                ) {
-                    itemsIndexed(data.rows, key = { _, r -> r.title }, contentType = { _, _ -> "row" }) { i, row ->
-                        val onCard = remember(focus, i) { { item: CinemaItem -> focus.onCard(item, i) } }
-                        CinemaRowView(row, if (row.ranked) topSpec else cardSpec, onCard, onCardClick, if (i == 0) upToBillboard else Modifier)
-                    }
+        }
+        // The rows keep one fixed layout (where they sit when rolled up) and slide down by the
+        // panel's extra height. Animating the panel's height used to re-measure the whole list of
+        // rows on every frame of a roll: 5-6 dropped frames per roll on the emulator.
+        CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
+            LazyColumn(
+                state = columnState,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                contentPadding = PaddingValues(bottom = 220.dp),
+                modifier =
+                    Modifier.fillMaxSize().padding(top = RowsTopRolled).graphicsLayer {
+                        val panel = lerp(lerp(PanelFull, PanelNoButtons, noButtons.value), PanelRolled, roll.value)
+                        val gap = lerp(GapFull, GapRolled, roll.value)
+                        translationY = (panel + gap - PanelRolled - GapRolled).toPx()
+                    },
+            ) {
+                itemsIndexed(data.rows, key = { _, r -> r.title }, contentType = { _, _ -> "row" }) { i, row ->
+                    val onCard = remember(focus, i) { { item: CinemaItem -> focus.onCard(item, i) } }
+                    CinemaRowView(row, if (row.ranked) topSpec else cardSpec, onCard, onCardClick, if (i == 0) upToBillboard else Modifier)
                 }
             }
         }
@@ -453,6 +491,7 @@ private fun NavPill(
 ) {
     Surface(
         onClick = onClick,
+        modifier = Modifier.tapToClick(onClick),
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(50)),
         colors =
             ClickableSurfaceDefaults.colors(
@@ -475,6 +514,7 @@ private fun NavIcon(
 ) {
     Surface(
         onClick = onClick,
+        modifier = Modifier.tapToClick(onClick),
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(50)),
         colors = ClickableSurfaceDefaults.colors(containerColor = Color.Transparent, contentColor = Ink, focusedContainerColor = Ink, focusedContentColor = Stage),
     ) {
@@ -514,7 +554,7 @@ private fun InfoPanel(
     onButtonsFocused: () -> Unit,
 ) {
     // Full: details + buttons (262). Buttons hidden: details only (210). Rolled up: a quarter (72).
-    Box(Modifier.padding(start = 48.dp, top = 16.dp).animatedHeight { lerp(lerp(262.dp, 210.dp, noButtons()), 72.dp, roll()) }.widthIn(max = 480.dp)) {
+    Box(Modifier.padding(start = 48.dp, top = PanelTop).animatedHeight { lerp(lerp(PanelFull, PanelNoButtons, noButtons()), PanelRolled, roll()) }.widthIn(max = 480.dp)) {
         AnimatedContent(
             targetState = item,
             transitionSpec = { fadeIn(tween(380, delayMillis = 90, easing = CinemaEase)) togetherWith fadeOut(tween(160)) },
@@ -527,10 +567,15 @@ private fun InfoPanel(
                 // Kind tag above the logo; it folds away when the billboard rolls up
                 Box(Modifier.rollHeight(18.dp, 0.dp, roll), contentAlignment = Alignment.BottomStart) { KindTag(shownItem.kind) }
                 Box(Modifier.rollHeight(70.dp, 44.dp, roll).widthIn(max = 340.dp), contentAlignment = Alignment.BottomStart) {
-                    if (logo != null) {
-                        AsyncImage(model = logo, contentDescription = shownItem.title, contentScale = ContentScale.Fit, alignment = Alignment.BottomStart, modifier = Modifier.fillMaxSize())
-                    } else {
-                        Text(shownItem.title, color = Ink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 36.sp)
+                    // A logo that arrives a moment late crossfades over the title text
+                    Crossfade(targetState = logo, animationSpec = tween(300, easing = CinemaEase), label = "logo") { l ->
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
+                            if (l != null) {
+                                AsyncImage(model = l, contentDescription = shownItem.title, contentScale = ContentScale.Fit, alignment = Alignment.BottomStart, modifier = Modifier.fillMaxSize())
+                            } else {
+                                Text(shownItem.title, color = Ink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 36.sp)
+                            }
+                        }
                     }
                 }
                 // One fixed line: the episode, else the title's Top 10 place, else blank
@@ -550,7 +595,9 @@ private fun InfoPanel(
         }
         AnimatedVisibility(
             visible = billboard,
-            enter = fadeIn(tween(260, easing = CinemaEase)),
+            // Waits for the panel to finish growing back (320 ms), so the buttons never fade in
+            // over the description while there's no room for them yet
+            enter = fadeIn(tween(220, delayMillis = 240, easing = CinemaEase)),
             exit = fadeOut(tween(180)),
             modifier = Modifier.align(Alignment.BottomStart),
         ) {
@@ -661,7 +708,7 @@ private fun Top10Card(
             scale = CardDefaults.scale(focusedScale = 1.08f),
             glow = CardDefaults.glow(),
             colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
-            modifier = Modifier.width(PosterWidth).height(PosterHeight).onFocusChanged { if (it.isFocused) onFocused(item) },
+            modifier = Modifier.width(PosterWidth).height(PosterHeight).onFocusChanged { if (it.isFocused) onFocused(item) }.tapToClick { onClick(item) },
         ) {
             Box(Modifier.fillMaxSize()) {
                 val url = item.posterUrl ?: item.cardUrl
@@ -697,12 +744,16 @@ internal fun CinemaCard(
         scale = CardDefaults.scale(focusedScale = 1.08f),
         glow = CardDefaults.glow(),
         colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
-        modifier = Modifier.width(width).aspectRatio(16f / 9f).onFocusChanged { if (it.isFocused) onFocused(item) },
+        modifier = Modifier.width(width).aspectRatio(16f / 9f).onFocusChanged { if (it.isFocused) onFocused(item) }.tapToClick { onClick(item) },
     ) {
         Box(Modifier.fillMaxSize()) {
             if (url != null) {
                 // Decoded at card size: small, fast, and cached for the next visit
                 AsyncImage(model = request(context, url, 416, 234), contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                // No wide art on the server or TMDB: the poster on a blurred, enlarged copy of
+                // itself, or a plain title card, instead of an empty grey box
+                NoWideArt(item.posterUrl, context)
             }
             if (titled == null && !item.cardHasTitleArt) {
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.85f))))
@@ -743,6 +794,41 @@ internal fun CinemaCard(
     }
 }
 
+/** A wide card's picture for a title that only has a poster, or nothing at all. */
+@Composable
+private fun NoWideArt(
+    poster: String?,
+    context: android.content.Context,
+) {
+    if (poster != null) {
+        Box(Modifier.fillMaxSize()) {
+            AsyncImage(
+                model = request(context, poster, 224, 336),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier =
+                    Modifier.fillMaxSize().graphicsLayer {
+                        scaleX = 1.3f
+                        scaleY = 1.3f
+                    }.blur(18.dp),
+            )
+            // Blur needs Android 12; on older TVs this dims the enlarged copy instead
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
+            AsyncImage(
+                model = request(context, poster, 224, 336),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                alignment = Alignment.CenterEnd,
+                modifier = Modifier.fillMaxSize().padding(vertical = 8.dp, horizontal = 10.dp),
+            )
+        }
+    } else {
+        Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF2B2734), Color(0xFF141318))))) {
+            Text("+", color = Plus.copy(alpha = 0.35f), fontSize = 44.sp, fontWeight = FontWeight.Black, modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp))
+        }
+    }
+}
+
 /**
  * What a card already knows about a title, handed to its Cinema page so the page draws at once
  * (art, logo, overview, Play) while the rest loads. Episodes aren't handed over: their card
@@ -771,6 +857,20 @@ internal fun homeSuggestions(): List<CinemaItem> {
 private object TabCache {
     val data = java.util.concurrent.ConcurrentHashMap<CinemaTab, CinemaHomeData>()
     val at = java.util.concurrent.ConcurrentHashMap<CinemaTab, Long>()
+}
+
+/** Rows that are on screen when a page opens; their art and badges load first. */
+private const val ON_SCREEN_ROWS = 2
+
+/** What MemoryTrim may drop: every tab's page but Home (they reload in the background). */
+internal object CinemaCaches {
+    fun trim() {
+        TabCache.data.keys.filter { it != CinemaTab.HOME }.forEach {
+            TabCache.data.remove(it)
+            TabCache.at.remove(it)
+        }
+        trimDetails()
+    }
 }
 
 /** My List: every saved title in a calm grid, the focused one's art behind it. */

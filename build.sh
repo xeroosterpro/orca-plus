@@ -68,6 +68,10 @@ rm -rf upstream/app/build/outputs/apk
 # Back to the release tag with the patch as plain edits, so `git -C upstream diff HEAD` is the
 # whole patch again (the version commits above would otherwise hide it).
 git -C upstream reset -q --mixed "$TAG"
+# Files the patch adds come back untracked after that reset, and `git diff HEAD` skips untracked
+# files: a patch regenerated from here silently lost them. Mark them as intended additions.
+NEW=$(git -C upstream ls-files --others --exclude-standard -- app/src)
+[ -n "$NEW" ] && git -C upstream add -N -- $NEW
 OUT=upstream/app/build/outputs/apk/default/release
 VERSION=$(ls "$OUT"/Wholphin-default-release-*.apk | head -1 | sed -E 's/.*Wholphin-default-release-(.+)-[0-9]+(-[a-z0-9_-]+)?\.apk/\1/' | sed -E 's/-(arm64-v8a|armeabi-v7a|x86_64)$//')
 

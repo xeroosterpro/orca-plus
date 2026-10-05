@@ -178,7 +178,30 @@ fun CinemaSearch(
         }
     }
 
-    Box(modifier.fillMaxSize().background(Stage)) {
+    Box(
+        modifier.fillMaxSize().background(Stage).onPreviewKeyEvent { e ->
+            Conductor.touch()
+            when {
+                // Backstop: while the mic is open, Back only closes it, wherever focus is
+                voice.active && (e.key == Key.Back || e.key == Key.Escape) -> {
+                    if (e.type == KeyEventType.KeyUp) voice.cancel()
+                    true
+                }
+                // A real keyboard (PC, Bluetooth) types straight into the search; the device
+                // keyboard's own field handles its keys itself
+                !imeFocused && !voice.active && e.type == KeyEventType.KeyDown && e.key == Key.Backspace -> {
+                    query = query.dropLast(1)
+                    true
+                }
+                !imeFocused && !voice.active && e.type == KeyEventType.KeyDown && typedChar(e) != null -> {
+                    val c = typedChar(e)!!
+                    if (c != ' ' || (query.isNotEmpty() && !query.endsWith(" "))) query += c
+                    true
+                }
+                else -> false
+            }
+        },
+    ) {
         Row(Modifier.fillMaxSize().padding(start = 48.dp, top = 36.dp)) {
             // ---- keyboard column
             Column(Modifier.width(300.dp).fillMaxHeight()) {
@@ -351,6 +374,9 @@ fun CinemaSearch(
             Text("Searching…", color = InkDim, fontSize = 14.sp, modifier = Modifier.align(Alignment.TopStart).padding(start = 384.dp, top = 80.dp))
         }
     }
+    // Android 13+ with predictive back delivers Back as a callback, not a key press, so the key
+    // handlers above never see it there (the Shield's Android 11 still sends the key)
+    androidx.activity.compose.BackHandler(enabled = voice.active) { voice.cancel() }
     VoiceOverlay(voice, onRetry = toggleVoice)
     sheet?.let { TitleSheet(it, service, onDismiss = { sheet = null }) }
 }
@@ -372,7 +398,7 @@ private fun MicButton(
                 focusedContentColor = Stage,
             ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.08f),
-        modifier = modifier.size(44.dp),
+        modifier = modifier.size(44.dp).tapToClick(onClick),
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Icon(MicIcon, contentDescription = "Search by voice", modifier = Modifier.size(24.dp))
@@ -392,6 +418,17 @@ private val KeyboardIcon: ImageVector by lazy {
             ),
             fill = SolidColor(Color.Black),
         ).build()
+}
+
+/**
+ * The letter, digit or space a keyboard key types, or null for remote and control keys (the
+ * D-pad, OK, Back and media keys type nothing).
+ */
+private fun typedChar(e: androidx.compose.ui.input.key.KeyEvent): Char? {
+    val n = e.nativeKeyEvent
+    if (n.isCtrlPressed || n.isAltPressed || n.isMetaPressed) return null
+    val c = n.unicodeChar.takeIf { it != 0 }?.toChar() ?: return null
+    return if (c.isLetterOrDigit() || c == ' ' || c in "'&:-.!") c.lowercaseChar() else null
 }
 
 /** How many best matches lead the results, one grid row. */
@@ -445,6 +482,7 @@ private fun Key(
     Surface(
         onClick = onClick,
         onLongClick = onLongClick,
+        modifier = modifier.width(width).height(40.dp).tapToClick(onClick),
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(4.dp)),
         colors =
             ClickableSurfaceDefaults.colors(
@@ -454,7 +492,6 @@ private fun Key(
                 focusedContentColor = Stage,
             ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
-        modifier = modifier.width(width).height(40.dp),
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (icon != null) {
@@ -476,7 +513,7 @@ private fun Suggestion(
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(4.dp)),
         colors = ClickableSurfaceDefaults.colors(containerColor = Color.Transparent, contentColor = InkDim, focusedContainerColor = Ink, focusedContentColor = Stage),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().tapToClick(onClick),
     ) {
         Text(text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
     }

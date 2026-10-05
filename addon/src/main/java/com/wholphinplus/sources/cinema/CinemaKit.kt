@@ -1,5 +1,9 @@
 package com.wholphinplus.sources.cinema
 
+import androidx.compose.foundation.gestures.detectTapGestures
+
+import androidx.compose.ui.input.pointer.pointerInput
+
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.CubicBezierEasing
@@ -119,7 +123,11 @@ internal fun StableBackdrop(
     val context = LocalContext.current
     var shown by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(url) {
-        if (url == null) return@LaunchedEffect
+        // No backdrop: clear to the stage rather than keep the previous title's picture
+        if (url == null) {
+            shown = null
+            return@LaunchedEffect
+        }
         val ok = SingletonImageLoader.get(context).execute(request(context, url)) is SuccessResult
         if (ok) shown = url
     }
@@ -174,6 +182,19 @@ internal fun StableBackdrop(
             ),
         )
     }
+}
+
+/**
+ * Loads a backdrop into the memory cache (same size as [StableBackdrop] asks for), so when it's
+ * shown it crossfades in the same frame as the title text instead of half a second later.
+ */
+internal suspend fun preloadBackdrop(
+    context: android.content.Context,
+    url: String?,
+    timeoutMs: Long,
+) {
+    if (url == null) return
+    kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { SingletonImageLoader.get(context).execute(request(context, url)) }
 }
 
 /** Fixed-size requests so a preloaded image is a memory-cache hit when it's shown. */
@@ -236,6 +257,7 @@ internal fun HeroButton(
 ) {
     Button(
         onClick = onClick,
+        modifier = modifier.onFocusChanged { if (it.isFocused) onFocused() }.tapToClick(onClick),
         shape = ButtonDefaults.shape(RoundedCornerShape(50)),
         colors =
             ButtonDefaults.colors(
@@ -246,7 +268,6 @@ internal fun HeroButton(
             ),
         border = ButtonDefaults.border(focusedBorder = Border(BorderStroke(2.dp, Ink), inset = (-4).dp, shape = RoundedCornerShape(50))),
         scale = ButtonDefaults.scale(focusedScale = 1.06f),
-        modifier = modifier.onFocusChanged { if (it.isFocused) onFocused() },
     ) {
         Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(8.dp))
@@ -279,3 +300,10 @@ internal fun KindTag(
         Text(if (series) "SERIES" else "FILM", color = InkDim, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
     }
 }
+
+/**
+ * Mouse clicks (and touch) reach a TV app as taps, which only move the focus on TV components.
+ * This makes one tap focus the element and act on it, like OK on the remote.
+ */
+internal fun Modifier.tapToClick(onClick: () -> Unit): Modifier =
+    this.pointerInput(onClick) { detectTapGestures(onTap = { onClick() }) }

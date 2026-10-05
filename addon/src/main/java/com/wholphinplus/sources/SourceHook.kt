@@ -57,6 +57,11 @@ class SourceHook
         internal val overlay: ProgressOverlay,
         val collections: HomeCollections,
     ) {
+        init {
+            // Cinema mode gives memory back when Android asks (see MemoryTrim)
+            context.registerComponentCallbacks(com.wholphinplus.sources.cinema.MemoryTrim(context))
+        }
+
         val client: ServerClient by lazy {
             ServerClient(
                 // Our own client: Wholphin's authenticated one would send the Jellyfin token to other servers.

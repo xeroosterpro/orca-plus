@@ -509,11 +509,14 @@ internal class CinemaRepository(
                         },
                     ).joinToString(" · ").ifBlank { null }
                 val people = d.people.orEmpty()
-                // Nothing in progress: start from the very first episode
+                // Nothing in progress: start from Season 1, Episode 1. Asked for the first real
+                // season (the list puts Specials last); unscoped, Specials sort first and Play
+                // offered "S0:E7"
                 val nextEp =
                     next.await() ?: if (series) {
+                        val firstSeason = seasons.await().firstOrNull()
                         safe {
-                            api.tvShowsApi.getEpisodes(org.jellyfin.sdk.model.api.request.GetEpisodesRequest(seriesId = id, userId = userId, limit = 1, isMissing = false)).content.items
+                            api.tvShowsApi.getEpisodes(org.jellyfin.sdk.model.api.request.GetEpisodesRequest(seriesId = id, userId = userId, seasonId = firstSeason?.id, limit = 1, isMissing = false)).content.items
                         }.firstOrNull()
                     } else {
                         null

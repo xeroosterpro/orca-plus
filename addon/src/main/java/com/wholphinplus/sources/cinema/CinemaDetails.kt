@@ -55,6 +55,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -119,7 +121,12 @@ fun CinemaDetails(
             }.onFailure { if (data == null) error = it.message ?: "Couldn't load this title" }
     }
 
-    Box(modifier.fillMaxSize().background(Stage)) {
+    Box(
+        modifier.fillMaxSize().background(Stage).onPreviewKeyEvent {
+            Conductor.touch()
+            false
+        },
+    ) {
         val d = data
         when {
             d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf)) { DetailsScreen(d, repo, onPlay, onOpen) }
@@ -178,6 +185,9 @@ private fun DetailsScreen(
         StableBackdrop(item.backdropUrl ?: art?.cleanBackdrop?.let { "https://image.tmdb.org/t/p/w1280$it" }, drift = true, widthFraction = 0.78f, heightFraction = 0.9f)
         // Below the hero the art sinks back so episode text stays readable
         val dim by animateFloatAsState(if (focus.hero) 0f else 0.78f, tween(420, easing = CinemaEase), label = "dim")
+        // Scrolled below the top, the title block fades away instead of being sliced by the
+        // screen edge
+        val heroAlpha = animateFloatAsState(if (focus.hero) 1f else 0f, tween(320, easing = CinemaEase), label = "heroAlpha")
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = dim }.background(Stage))
         CompositionLocalProvider(LocalBringIntoViewSpec provides rowsSpec) {
             LazyColumn(
@@ -193,6 +203,7 @@ private fun DetailsScreen(
                     Column(
                         Modifier
                             .fillParentMaxHeight(0.9f)
+                            .graphicsLayer { alpha = heroAlpha.value }
                             .padding(start = 58.dp, top = 56.dp, end = 58.dp)
                             .onFocusChanged {
                                 if (it.hasFocus && !focus.hero) {
@@ -345,6 +356,7 @@ private fun SectionTitle(text: String) {
     Text(text, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 58.dp))
 }
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun Episodes(
     seriesId: UUID,
@@ -376,6 +388,9 @@ private fun Episodes(
         SectionTitle("Episodes")
         if (d.seasons.size > 1) {
             LazyRow(
+                // Entering the tabs (Down from Resume) lands on the season you're on, not on
+                // whichever tab happens to sit under the button
+                modifier = Modifier.focusRestorer(episodesFocus),
                 contentPadding = PaddingValues(horizontal = 58.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -434,7 +449,7 @@ private fun SeasonTab(
                 focusedContentColor = Stage,
             ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.05f),
-        modifier = modifier.onFocusChanged { if (it.isFocused) onFocused() },
+        modifier = modifier.onFocusChanged { if (it.isFocused) onFocused() }.tapToClick(onFocused),
     ) {
         Text(name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp))
     }
@@ -455,7 +470,7 @@ private fun EpisodeCard(
             border = CardDefaults.border(focusedBorder = Border(BorderStroke(3.dp, Ink), shape = shape)),
             scale = CardDefaults.scale(focusedScale = 1.05f),
             colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
-            modifier = modifier.fillMaxWidth().aspectRatio(16f / 9f),
+            modifier = modifier.fillMaxWidth().aspectRatio(16f / 9f).tapToClick(onClick),
         ) {
             Box(Modifier.fillMaxSize()) {
                 e.stillUrl?.let { AsyncImage(model = request(context, it, 600, 338), contentDescription = e.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
@@ -480,6 +495,9 @@ private fun EpisodeCard(
 }
 
 /** Recently opened titles, so Back from the player (or a re-open) draws instantly. */
+/** Drops cached title pages (MemoryTrim); they reload when opened. */
+internal fun trimDetails() = DetailsCache.clear()
+
 private object DetailsCache {
     private val map = object : LinkedHashMap<UUID, CinemaDetailsData>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<UUID, CinemaDetailsData>?) = size > 12
@@ -497,6 +515,8 @@ private object DetailsCache {
     @Synchronized fun remove(id: UUID) {
         map.remove(id)
     }
+
+    @Synchronized fun clear() = map.clear()
 }
 
 /** The page drawn from a card's item before the full details arrive. */

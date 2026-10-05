@@ -66,6 +66,7 @@ class CinemaArt
             pending =
                 io.launch {
                     delay(4_000)
+                    Conductor.whenQuiet()
                     prefs.edit().putString(KEY, json.encodeToString(HashMap(cache))).apply()
                 }
         }

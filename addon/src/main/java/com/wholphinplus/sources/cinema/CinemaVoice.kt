@@ -271,7 +271,14 @@ internal fun VoiceOverlay(
         // The overlay holds focus and eats Back itself: a BackHandler here loses to the app's
         // navigation, which would leave search instead of just closing the mic
         val overlayFocus = remember { FocusRequester() }
-        LaunchedEffect(Unit) { runCatching { overlayFocus.requestFocus() } }
+        // Retried each frame: on its first frame the overlay isn't placed yet, the request fails
+        // silently, and focus stayed on the mic button underneath (Back then left search)
+        LaunchedEffect(Unit) {
+            for (attempt in 0 until 30) {
+                androidx.compose.runtime.withFrameNanos {}
+                if (runCatching { overlayFocus.requestFocus() }.getOrDefault(false)) break
+            }
+        }
         val state = voice.state
         val listening = state == VoiceState.Listening
         val error = state as? VoiceState.Error

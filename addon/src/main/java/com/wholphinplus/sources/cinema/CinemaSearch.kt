@@ -238,7 +238,7 @@ fun CinemaSearch(
                     onSystemKeyboard = openSystemKeyboard,
                 )
                 Spacer(Modifier.height(18.dp))
-                // Netflix-style "explore" list: people the search matched
+                // Streaming-style "explore" list: people the search matched
                 results?.people?.filter { p -> p.knownFor.count { it.backdropPath != null } >= 2 }?.take(4)?.takeIf { it.isNotEmpty() }?.let { people ->
                     Text("Explore titles related to:", color = InkDim, fontSize = 13.sp)
                     Spacer(Modifier.height(6.dp))

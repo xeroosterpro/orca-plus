@@ -67,6 +67,26 @@ class ProgressOverlay internal constructor(
             save()
         }
 
+        /** Every remembered position, for a cloud profile. */
+        fun snapshot(): Map<String, Entry> = HashMap(entries)
+
+        /** Positions from a cloud profile; per title the newer one stays. */
+        fun absorb(more: Map<String, Entry>) {
+            var changed = false
+            more.forEach { (id, e) ->
+                val key = norm(id)
+                val current = entries[key]
+                if (current == null || current.lastPlayed < e.lastPlayed) {
+                    entries[key] = e
+                    changed = true
+                }
+            }
+            if (changed) {
+                prune()
+                save()
+            }
+        }
+
         fun lastPlayed(mainItemId: String): Long? = entries[norm(mainItemId)]?.lastPlayed
 
         // ------------------------------------------------------------ interceptor

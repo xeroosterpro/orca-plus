@@ -105,6 +105,8 @@ class ExternalPlayerActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Recreated with nothing to play (the app was killed meanwhile): it's closing, no view
+        if (!::view.isInitialized) return super.dispatchKeyEvent(event)
         // OK/D-pad: show the controls first, then let them handle the key
         if (event.action == KeyEvent.ACTION_DOWN && !view.isControllerFullyVisible &&
             event.keyCode in setOf(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)

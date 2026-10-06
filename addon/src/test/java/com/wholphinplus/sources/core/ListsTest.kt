@@ -23,4 +23,19 @@ class ListsTest {
         assertNull(ListSource.parse("https://www.imdb.com/list/ls000"))
         assertNull(ListSource.parse("hello"))
     }
+
+    @Test fun `top streaming catalog links`() {
+        val url = "https://top-streaming.stream/0000aaaa-1111-2222-3333-444455556666/catalog/movie/hulu-movies-united-states.json"
+        assertEquals(url, (ListSource.parse(url) as ListSource.TopStreaming).url)
+        // Your own row stands in for the cloud's copy of the same chart
+        assertEquals("ts-movie-hulu-movies-united-states", (ListSource.parse(url) as ListSource.TopStreaming).chartId)
+        assertNull(ListSource.parse("https://top-streaming.stream/configure/"))
+    }
+
+    @Test fun `orca chart links`() {
+        val s = ListSource.parse("https://orca-cloud-production.up.railway.app/v1/charts#trakt-trending-movies") as ListSource.OrcaChart
+        assertEquals("trakt-trending-movies", s.id)
+        assertEquals("https://orca-cloud-production.up.railway.app", s.base)
+        assertNull(ListSource.parse("https://orca-cloud-production.up.railway.app/v1/charts"))
+    }
 }

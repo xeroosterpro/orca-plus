@@ -1,31 +1,38 @@
-// Contains code adapted from a third-party project under the Apache License 2.0 and modified
-// for Orca+. See NOTICE and LICENSES/Apache-2.0.txt.
 package com.wholphinplus.sources.core
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.FormBody
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import timber.log.Timber
 import java.io.IOException
-import java.util.Locale
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
+import kotlin.coroutines.cancellation.CancellationException
 
+/** A server (or web service) answered with a non-2xx status. */
 class ServerRequestException(
     val statusCode: Int,
     message: String,
 ) : IllegalStateException(message)
 
 /**
- * Talks to Plex, Emby and Jellyfin servers: sign-in, and finding playable copies of a title.
- * Every call blocks; callers run it on an IO dispatcher.
+ * Talks to Jellyfin, Emby and Plex servers plus the plex.tv and Emby Connect account services.
+ * Every call blocks; callers run it on an IO dispatcher. Timeouts come from [http].
  */
 class ServerClient(
     private val http: OkHttpClient,
@@ -34,50 +41,58 @@ class ServerClient(
     private val clientVersion: String,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
-    private val jsonType = "application/json; charset=utf-8".toMediaType()
 
-    // ---------------------------------------------------------------- sign-in
+    // ---- Probing and sign-in ----
 
     fun fetchPublicInfo(serverUrl: String): ServerInfo {
-        val info =
+        val answer =
             try {
-                getJson(buildUrl(serverUrl, "/System/Info/Public"))
+                getJson(endpoint(serverUrl, "System/Info/Public"), null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                throw e
+            } catch (e: ServerRequestException) {
+                // A busy or broken server is an outage, not a sign that something else lives here
+                if (e.statusCode == 429 || e.statusCode >= 500) throw e
+                null
             } catch (e: Exception) {
-                // A transport failure won't be fixed by probing another path on the same host.
-                if (e is CancellationException || e is IOException) throw e
-                if (e is ServerRequestException && (e.statusCode == 429 || e.statusCode >= 500)) throw e
                 null
             }
-        if (info != null && info.isNotEmpty()) {
-            return ServerInfo(
-                serverName = info.string("ServerName"),
-                serverId = info.string("Id"),
-                productName = info.string("ProductName"),
-                serverKind =
-                    detectServerKind(info.string("ProductName"), info.string("ServerName"))
-                        .takeUnless { it == ServerKind.UNKNOWN }
-                        // Emby's public info has no ProductName; Jellyfin's always does.
-                        ?: if (info.string("ProductName").isBlank()) ServerKind.EMBY else ServerKind.UNKNOWN,
-            )
+        if (answer != null && answer.isNotEmpty()) {
+            val name = answer.string("ServerName")
+            val product = answer.string("ProductName")
+            val detected = detectServerKind(product, name)
+            // Jellyfin names its product here and Emby doesn't
+            val kind =
+                when {
+                    detected != ServerKind.UNKNOWN -> detected
+                    product.isBlank() -> ServerKind.EMBY
+                    else -> ServerKind.UNKNOWN
+                }
+            return ServerInfo(serverName = name, serverId = answer.string("Id"), productName = product, serverKind = kind)
         }
+
         val identity =
             try {
-                getText(buildUrl(serverUrl, "/identity"))
+                getText(endpoint(serverUrl, "identity"), null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                throw e
             } catch (e: Exception) {
-                if (e is CancellationException || e is IOException) throw e
                 null
             }
-        val (name, id) = parsePlexIdentity(identity.orEmpty())
-        val isPlex = id.isNotBlank() || identity?.contains("MediaContainer") == true
+        val (name, machineId) = plexIdentity(identity.orEmpty())
+        val plex = machineId.isNotBlank() || identity?.contains("MediaContainer") == true
         return ServerInfo(
             serverName = name,
-            serverId = id,
-            productName = if (isPlex) "Plex Media Server" else "",
-            serverKind = if (isPlex) ServerKind.PLEX else ServerKind.UNKNOWN,
+            serverId = machineId,
+            productName = if (plex) "Plex Media Server" else "",
+            serverKind = if (plex) ServerKind.PLEX else ServerKind.UNKNOWN,
         )
     }
 
-    /** Emby/Jellyfin username + password. */
     fun signIn(
         serverUrl: String,
         info: ServerInfo,
@@ -85,195 +100,231 @@ class ServerClient(
         password: String,
         displayName: String,
     ): ServerConnection {
-        require(username.isNotBlank()) { "Enter a username" }
+        if (username.isBlank()) throw IllegalArgumentException("Enter a username")
+        // Older and newer servers read different keys for the password
         val body =
             buildJsonObject {
                 put("Username", username)
                 put("Pw", password)
                 put("Password", password)
             }
-        val response = postJson(buildUrl(serverUrl, "/Users/AuthenticateByName"), body)
-        return connectionFromAuth(serverUrl, info, info.serverKind, response, displayName, username)
+        val answer = postJson(endpoint(serverUrl, "Users/AuthenticateByName"), body, null)
+        return connectionFromAuth(serverUrl, info, info.serverKind, answer, username, displayName)
     }
 
     fun startQuickConnect(serverUrl: String): CodeLogin {
-        val response = postJson(buildUrl(serverUrl, "/QuickConnect/Initiate"), JsonObject(emptyMap()))
-        val code = response.string("Code")
-        val secret = response.string("Secret")
-        require(code.isNotBlank() && secret.isNotBlank()) { "Quick Connect is not enabled on this server" }
-        return CodeLogin(secret, secret, code, serverUrl, ServerKind.JELLYFIN, serverUrl)
+        val answer = postJson(endpoint(serverUrl, "QuickConnect/Initiate"), JsonObject(emptyMap()), null)
+        val code = answer.string("Code")
+        val secret = answer.string("Secret")
+        if (code.isBlank() || secret.isBlank()) throw IllegalArgumentException("Quick Connect is not enabled on this server")
+        return CodeLogin(
+            id = secret,
+            secret = secret,
+            code = code,
+            verificationUrl = serverUrl,
+            kind = ServerKind.JELLYFIN,
+            serverUrl = serverUrl,
+        )
     }
 
-    /** Returns null until the code has been approved on the server. */
     fun pollQuickConnect(
         login: CodeLogin,
         displayName: String,
     ): ServerConnection? {
-        val state = getJson(buildUrl(login.serverUrl, "/QuickConnect/Connect", mapOf("secret" to login.secret)))
+        val state = getJson(endpoint(login.serverUrl, "QuickConnect/Connect", "secret" to login.secret), null)
         if (state.boolean("Authenticated") != true) return null
-        val response =
+        val answer =
             postJson(
-                buildUrl(login.serverUrl, "/Users/AuthenticateWithQuickConnect"),
+                endpoint(login.serverUrl, "Users/AuthenticateWithQuickConnect"),
                 buildJsonObject { put("Secret", login.secret) },
+                null,
             )
         val info = fetchPublicInfo(login.serverUrl)
-        return connectionFromAuth(login.serverUrl, info, ServerKind.JELLYFIN, response, displayName, "")
-    }
-
-    // ------------------------------------------------------------------ Emby Connect
-    // Sign in once with an Emby account (a PIN typed on emby.media/pin, nothing typed on the
-    // TV), then add any of the account's servers. Each server swaps the account for a local
-    // user and token through its Connect exchange.
-
-    fun startEmbyConnectPin(): CodeLogin {
-        val request =
-            Request.Builder()
-                .url(EMBY_CONNECT + "/pin")
-                .post(okhttp3.FormBody.Builder().add("deviceId", deviceId).build())
-                .header("X-Application", "$clientName/$clientVersion")
-                .build()
-        val obj = json.parseToJsonElement(execute(request)) as? JsonObject ?: JsonObject(emptyMap())
-        val pin = obj.string("Pin")
-        require(pin.isNotBlank()) { "Emby Connect did not return a PIN" }
-        return CodeLogin(id = pin, secret = "", code = pin, verificationUrl = "emby.media/pin", kind = ServerKind.EMBY, serverUrl = "", intervalSeconds = 4)
-    }
-
-    /** Null until the PIN has been confirmed at emby.media/pin. */
-    fun pollEmbyConnectPin(login: CodeLogin): EmbyConnectAccount? {
-        val state =
-            Request.Builder()
-                .url(EMBY_CONNECT.toHttpUrlOrNull()!!.newBuilder().addPathSegment("pin").addQueryParameter("deviceId", deviceId).addQueryParameter("pin", login.code).build())
-                .header("X-Application", "$clientName/$clientVersion")
-                .get()
-                .build()
-        val status = json.parseToJsonElement(execute(state)) as? JsonObject ?: return null
-        require(status.boolean("IsExpired") != true) { "The PIN expired. Start again for a new one." }
-        if (status.boolean("IsConfirmed") != true) return null
-        val auth =
-            Request.Builder()
-                .url(EMBY_CONNECT + "/pin/authenticate")
-                .post(okhttp3.FormBody.Builder().add("deviceId", deviceId).add("pin", login.code).build())
-                .header("X-Application", "$clientName/$clientVersion")
-                .build()
-        val obj = json.parseToJsonElement(execute(auth)) as? JsonObject ?: return null
-        val token = obj.string("AccessToken")
-        val userId = obj.string("UserId")
-        require(token.isNotBlank() && userId.isNotBlank()) { "Emby Connect did not return an account" }
-        return EmbyConnectAccount(userId, token)
-    }
-
-    /** The servers linked to an Emby Connect account. */
-    fun embyConnectServers(account: EmbyConnectAccount): List<EmbyConnectServer> {
-        val request =
-            Request.Builder()
-                .url(EMBY_CONNECT.toHttpUrlOrNull()!!.newBuilder().addPathSegment("servers").addQueryParameter("userId", account.userId).build())
-                .header("X-Application", "$clientName/$clientVersion")
-                .header("X-Connect-UserToken", account.token)
-                .get()
-                .build()
-        val list = json.parseToJsonElement(execute(request)) as? kotlinx.serialization.json.JsonArray ?: return emptyList()
-        return list.mapNotNull { it as? JsonObject }.map {
-            EmbyConnectServer(
-                name = it.string("Name"),
-                remoteUrl = it.string("Url"),
-                localUrl = it.string("LocalAddress"),
-                systemId = it.string("SystemId"),
-                accessKey = it.string("AccessKey"),
-            )
-        }.filter { it.accessKey.isNotBlank() && (it.remoteUrl.isNotBlank() || it.localUrl.isNotBlank()) }
-    }
-
-    /** Signs in to one of the account's servers, trying its home address first. */
-    fun connectEmbyServer(
-        account: EmbyConnectAccount,
-        server: EmbyConnectServer,
-        displayName: String,
-    ): ServerConnection {
-        var lastError: Throwable? = null
-        for (url in listOf(server.localUrl, server.remoteUrl).map(::normalizeServerUrl).filter { it.isNotBlank() }.distinct()) {
-            try {
-                val exchange =
-                    Request.Builder()
-                        .url(buildUrl(url, "/Connect/Exchange", mapOf("format" to "json", "ConnectUserId" to account.userId)))
-                        .header("X-Emby-Token", server.accessKey)
-                        .header("X-Emby-Authorization", authHeader(null))
-                        .get()
-                        .build()
-                val obj = json.parseToJsonElement(execute(exchange)) as? JsonObject ?: continue
-                val token = obj.string("AccessToken")
-                val userId = obj.string("LocalUserId")
-                if (token.isBlank() || userId.isBlank()) continue
-                val info = runCatching { fetchPublicInfo(url) }.getOrNull()
-                val shell =
-                    ServerConnection(
-                        connectionId = connectionId(url, ServerKind.EMBY, userId),
-                        serverUrl = url,
-                        displayName = displayName.trim(),
-                        serverName = info?.serverName?.ifBlank { null } ?: server.name.ifBlank { "Emby" },
-                        serverKind = ServerKind.EMBY,
-                        serverId = info?.serverId?.ifBlank { null } ?: server.systemId,
-                        userId = userId,
-                        accessToken = token,
-                        lastConnectedAt = System.currentTimeMillis(),
-                    )
-                return shell.copy(collections = runCatching { fetchCollections(shell) }.getOrDefault(emptyList()))
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                lastError = e
-            }
-        }
-        throw IllegalStateException("Couldn't reach ${server.name.ifBlank { "this server" }}" + (lastError?.message?.let { ": $it" } ?: ""))
+        return connectionFromAuth(login.serverUrl, info, ServerKind.JELLYFIN, answer, "", displayName)
     }
 
     private fun connectionFromAuth(
         serverUrl: String,
         info: ServerInfo,
         kind: ServerKind,
-        response: JsonObject,
-        displayName: String,
+        answer: JsonObject,
         fallbackUser: String,
+        displayName: String,
     ): ServerConnection {
-        val user = response.obj("User")
-        val token = response.string("AccessToken")
-        val userId = user?.string("Id").orEmpty()
-        require(token.isNotBlank() && userId.isNotBlank()) { "The server did not return a usable account" }
-        val shell =
+        val token = answer.string("AccessToken")
+        val user = answer.obj("User") ?: JsonObject(emptyMap())
+        val userId = user.string("Id")
+        if (token.isBlank() || userId.isBlank()) throw IllegalArgumentException("The server did not return a usable account")
+        val connection =
             ServerConnection(
+                enabled = true,
                 connectionId = connectionId(serverUrl, kind, userId),
                 serverUrl = serverUrl,
                 displayName = displayName.trim(),
-                serverName = info.serverName.ifBlank { user?.string("ServerName").orEmpty() }.ifBlank { kind.label },
+                serverName = info.serverName.ifBlank { user.string("ServerName") }.ifBlank { kind.label },
                 serverKind = kind,
-                serverId = response.string("ServerId").ifBlank { info.serverId },
+                serverId = answer.string("ServerId").ifBlank { info.serverId },
                 userId = userId,
-                userName = user?.string("Name").orEmpty().ifBlank { fallbackUser },
+                userName = user.string("Name").ifBlank { fallbackUser },
                 accessToken = token,
+                accountToken = "",
                 lastConnectedAt = System.currentTimeMillis(),
             )
-        return shell.copy(collections = runCatching { fetchCollections(shell) }.getOrDefault(emptyList()))
+        return connection.copy(collections = quietly(emptyList()) { fetchCollections(connection) })
     }
 
-    fun startPlexPin(serverUrl: String): CodeLogin {
-        val url =
-            "https://plex.tv/api/v2/pins"
-                .toHttpUrlOrNull()!!
-                .newBuilder()
-                .addQueryParameter("strong", "false")
-                .addQueryParameter("X-Plex-Client-Identifier", deviceId)
-                .addQueryParameter("X-Plex-Product", clientName)
-                .build()
+    // ---- Emby Connect ----
+
+    fun startEmbyConnectPin(): CodeLogin {
         val request =
-            Request
-                .Builder()
-                .url(url)
-                .post(ByteArray(0).toRequestBody(null))
-                .apply { plexHeaders(null).forEach { (k, v) -> header(k, v) } }
+            connectRequest(endpoint(EMBY_CONNECT, "pin"))
+                .post(FormBody.Builder().add("deviceId", deviceId).build())
                 .build()
-        val body = execute(request)
-        val obj = json.parseToJsonElement(body) as? JsonObject ?: JsonObject(emptyMap())
-        val id = obj.string("id")
-        val code = obj.string("code")
-        require(id.isNotBlank() && code.isNotBlank()) { "Plex did not return a sign-in code" }
+        val answer = parse(call(request)) as? JsonObject ?: JsonObject(emptyMap())
+        val pin = answer.string("Pin")
+        if (pin.isBlank()) throw IllegalArgumentException("Emby Connect did not return a PIN")
+        return CodeLogin(
+            id = pin,
+            secret = "",
+            code = pin,
+            verificationUrl = "emby.media/pin",
+            kind = ServerKind.EMBY,
+            serverUrl = "",
+            intervalSeconds = 4,
+        )
+    }
+
+    fun pollEmbyConnectPin(login: CodeLogin): EmbyConnectAccount? {
+        val status =
+            parse(call(connectRequest(endpoint(EMBY_CONNECT, "pin", "deviceId" to deviceId, "pin" to login.code)).get().build()))
+                as? JsonObject ?: return null
+        if (status.boolean("IsExpired") == true) throw IllegalArgumentException("The PIN expired. Start again for a new one.")
+        if (status.boolean("IsConfirmed") != true) return null
+        val form =
+            FormBody
+                .Builder()
+                .add("deviceId", deviceId)
+                .add("pin", login.code)
+                .build()
+        val answer =
+            parse(call(connectRequest(endpoint(EMBY_CONNECT, "pin/authenticate")).post(form).build())) as? JsonObject
+                ?: return null
+        val token = answer.string("AccessToken")
+        val userId = answer.string("UserId")
+        if (token.isBlank() || userId.isBlank()) throw IllegalArgumentException("Emby Connect did not return an account")
+        return EmbyConnectAccount(userId = userId, token = token)
+    }
+
+    fun embyConnectServers(account: EmbyConnectAccount): List<EmbyConnectServer> {
+        val request =
+            connectRequest(endpoint(EMBY_CONNECT, "servers", "userId" to account.userId))
+                .header("X-Connect-UserToken", account.token)
+                .get()
+                .build()
+        val list = parse(call(request)) as? JsonArray ?: return emptyList()
+        return list
+            .filterIsInstance<JsonObject>()
+            .map {
+                EmbyConnectServer(
+                    name = it.string("Name"),
+                    remoteUrl = it.string("Url"),
+                    localUrl = it.string("LocalAddress"),
+                    systemId = it.string("SystemId"),
+                    accessKey = it.string("AccessKey"),
+                )
+            }.filter { it.accessKey.isNotBlank() && (it.remoteUrl.isNotBlank() || it.localUrl.isNotBlank()) }
+    }
+
+    fun connectEmbyServer(
+        account: EmbyConnectAccount,
+        server: EmbyConnectServer,
+        displayName: String,
+    ): ServerConnection {
+        val addresses =
+            listOf(server.localUrl, server.remoteUrl)
+                .map(::normalizeServerUrl)
+                .filter { it.isNotBlank() }
+                .distinct()
+        var lastError: Exception? = null
+        for (address in addresses) {
+            try {
+                // The exchange wants the server's access key and a token-less client description
+                val request =
+                    Request
+                        .Builder()
+                        .url(endpoint(address, "Connect/Exchange", "format" to "json", "ConnectUserId" to account.userId))
+                        .header("X-Emby-Token", server.accessKey)
+                        .header("X-Emby-Authorization", mediaBrowser(null))
+                        .get()
+                        .build()
+                val answer = parse(call(request)) as? JsonObject ?: continue
+                val token = answer.string("AccessToken")
+                val localUserId = answer.string("LocalUserId")
+                if (token.isBlank() || localUserId.isBlank()) continue
+                val info = quietly<ServerInfo?>(null) { fetchPublicInfo(address) }
+                val connection =
+                    ServerConnection(
+                        connectionId = connectionId(address, ServerKind.EMBY, localUserId),
+                        serverUrl = address,
+                        displayName = displayName.trim(),
+                        serverName =
+                            info
+                                ?.serverName
+                                .orEmpty()
+                                .ifBlank { server.name }
+                                .ifBlank { "Emby" },
+                        serverKind = ServerKind.EMBY,
+                        serverId = info?.serverId.orEmpty().ifBlank { server.systemId },
+                        userId = localUserId,
+                        userName = "",
+                        accessToken = token,
+                        lastConnectedAt = System.currentTimeMillis(),
+                    )
+                return connection.copy(collections = quietly(emptyList()) { fetchCollections(connection) })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        val name = server.name.ifBlank { "this server" }
+        throw IllegalStateException("Couldn't reach $name" + (lastError?.let { ": ${it.message}" } ?: ""))
+    }
+
+    // ---- Libraries ----
+
+    fun fetchCollections(connection: ServerConnection): List<ServerCollection> =
+        if (connection.isPlex) {
+            getJson(endpoint(connection.serverUrl, "library/sections"), connection)
+                .array("MediaContainer", "Directory")
+                .filterIsInstance<JsonObject>()
+                .mapNotNull { d ->
+                    val id = d.string("key").ifBlank { return@mapNotNull null }
+                    ServerCollection(id = id, name = d.string("title").ifBlank { "Library $id" }, type = d.string("type"), enabled = true)
+                }
+        } else {
+            getJson(endpoint(connection.serverUrl, "Users/${connection.userId}/Views"), connection)
+                .objects("Items")
+                .mapNotNull { v ->
+                    val id = v.string("Id").ifBlank { return@mapNotNull null }
+                    ServerCollection(id = id, name = v.string("Name").ifBlank { "Library" }, type = v.string("CollectionType"), enabled = true)
+                }
+        }
+
+    // ---- Plex sign-in ----
+
+    fun startPlexPin(serverUrl: String): CodeLogin {
+        val request =
+            plexHeaders(
+                Request.Builder().url(
+                    endpoint(PLEX_TV, "pins", "strong" to "false", "X-Plex-Client-Identifier" to deviceId, "X-Plex-Product" to clientName),
+                ),
+                null,
+            ).post(ByteArray(0).toRequestBody()).build()
+        val answer = parse(call(request)) as? JsonObject ?: JsonObject(emptyMap())
+        val id = answer.string("id")
+        val code = answer.string("code")
+        if (id.isBlank() || code.isBlank()) throw IllegalArgumentException("Plex did not return a sign-in code")
         return CodeLogin(
             id = id,
             secret = "",
@@ -285,1081 +336,710 @@ class ServerClient(
         )
     }
 
-    /** Returns null until the PIN has been linked at plex.tv/link. */
     fun pollPlexPin(
         login: CodeLogin,
         displayName: String,
     ): ServerConnection? {
-        val url =
-            "https://plex.tv/api/v2/pins/${login.id}"
-                .toHttpUrlOrNull()!!
-                .newBuilder()
-                .addQueryParameter("X-Plex-Client-Identifier", deviceId)
-                .build()
         val request =
-            Request
-                .Builder()
-                .url(url)
+            plexHeaders(Request.Builder().url(endpoint(PLEX_TV, "pins/${login.id}", "X-Plex-Client-Identifier" to deviceId)), null)
                 .get()
-                .apply { plexHeaders(null).forEach { (k, v) -> header(k, v) } }
                 .build()
-        val obj = json.parseToJsonElement(execute(request)) as? JsonObject ?: return null
-        val token = obj.string("authToken").takeIf { it.isNotBlank() } ?: return null
+        val answer = parse(call(request)) as? JsonObject ?: return null
+        val token = answer.string("authToken").ifBlank { return null }
         return buildPlexConnection(token, login.serverUrl, displayName)
     }
 
-    /**
-     * Resolve a Plex account token to one server: the one at [preferredServerUrl] if given,
-     * otherwise the account's own server. Tries local, then remote, then relay addresses.
-     */
+    /** Turns a plex.tv account token into one reachable server with at least one library. */
     fun buildPlexConnection(
         accountToken: String,
         preferredServerUrl: String,
         displayName: String,
     ): ServerConnection {
         val token = accountToken.trim()
-        require(token.isNotBlank()) { "Missing Plex token" }
+        if (token.isBlank()) throw IllegalArgumentException("Missing Plex token")
         val preferredUrl = normalizeServerUrl(preferredServerUrl)
         val preferredId =
-            preferredUrl.takeIf { it.isNotBlank() }?.let { url ->
-                runCatching { parsePlexIdentity(getText(buildUrl(url, "/identity"))).second }.getOrNull()
-            }.orEmpty()
-        val accountName = plexAccountName(token)
-        val devices = fetchPlexResources(token)
-        val device = selectPlexDevice(devices, preferredId, preferredUrl)
-        val serverId = device?.clientIdentifier?.ifBlank { null } ?: preferredId
-        val serverToken = device?.accessToken?.takeIf { it.isNotBlank() } ?: token
-        val candidates =
-            buildList {
-                if (preferredUrl.isNotBlank()) add(preferredUrl)
-                device
-                    ?.connections
-                    ?.sortedWith(
-                        compareByDescending<PlexAddress> { it.local && !it.relay }
-                            .thenBy { it.relay }
-                            .thenByDescending { it.uri.startsWith("https://", true) },
-                    )?.forEach { add(it.uri) }
-            }.map(::normalizeServerUrl).filter { it.isNotBlank() }.distinctBy { it.lowercase(Locale.US) }
-        require(candidates.isNotEmpty()) { "No reachable address for this Plex server" }
+            if (preferredUrl.isEmpty()) {
+                ""
+            } else {
+                quietly("") { plexIdentity(getText(endpoint(preferredUrl, "identity"), null)).second }
+            }
+        val accountName = plexAccountName(token).ifBlank { "Plex account" }
+        val devices = plexServers(token)
 
-        var lastError: Throwable? = null
-        for (candidateUrl in candidates) {
-            val shell =
-                ServerConnection(
-                    serverUrl = candidateUrl,
-                    displayName = displayName.trim(),
-                    serverName = device?.name.orEmpty(),
-                    serverKind = ServerKind.PLEX,
-                    serverId = serverId,
-                    userId = "plex",
-                    userName = accountName,
-                    accessToken = serverToken,
-                    accountToken = token,
-                    lastConnectedAt = System.currentTimeMillis(),
-                )
+        val device =
+            when {
+                devices.isEmpty() -> null
+                preferredId.isNotBlank() && devices.any { it.clientId == preferredId } -> devices.first { it.clientId == preferredId }
+                preferredUrl.isNotBlank() && devices.any { d -> d.addresses.any { sameEndpoint(it.uri, preferredUrl) } } ->
+                    devices.first { d -> d.addresses.any { sameEndpoint(it.uri, preferredUrl) } }
+                else ->
+                    devices
+                        .filter { it.accessToken.isNotBlank() }
+                        .sortedWith(compareByDescending<PlexDevice> { it.owned }.thenByDescending { it.addresses.isNotEmpty() })
+                        .firstOrNull()
+            }
+        val serverId = device?.clientId.orEmpty().ifBlank { preferredId }
+        val serverToken = device?.accessToken.orEmpty().ifBlank { token }
+
+        // Direct LAN first, relays last, https before http
+        val deviceAddresses =
+            device
+                ?.addresses
+                .orEmpty()
+                .sortedWith(
+                    compareBy<PlexAddress> { !(it.local && !it.relay) }
+                        .thenBy { it.relay }
+                        .thenBy { !it.uri.startsWith("https", ignoreCase = true) },
+                ).map { it.uri }
+        val candidates =
+            (listOfNotNull(preferredUrl.ifEmpty { null }) + deviceAddresses)
+                .map(::normalizeServerUrl)
+                .filter { it.isNotBlank() }
+                .distinctBy { it.lowercase() }
+        if (candidates.isEmpty()) throw IllegalArgumentException("No reachable address for this Plex server")
+
+        var lastError: Exception? = null
+        for (candidate in candidates) {
             try {
-                val (name, id) = parsePlexIdentity(getText(buildUrl(candidateUrl, "/identity"), shell))
-                if (serverId.isNotBlank() && id.isNotBlank() && serverId != id) {
-                    lastError = IllegalStateException("$candidateUrl is a different Plex server")
+                val draft =
+                    ServerConnection(
+                        serverUrl = candidate,
+                        displayName = displayName.trim(),
+                        serverName = device?.name.orEmpty(),
+                        serverKind = ServerKind.PLEX,
+                        serverId = serverId,
+                        userId = PLEX_USER,
+                        userName = accountName,
+                        accessToken = serverToken,
+                        accountToken = token,
+                        lastConnectedAt = System.currentTimeMillis(),
+                    )
+                val (name, machineId) = plexIdentity(getText(endpoint(candidate, "identity"), draft))
+                // A stale LAN address can belong to somebody else's server now
+                if (serverId.isNotBlank() && machineId.isNotBlank() && serverId != machineId) {
+                    lastError = IllegalStateException("$candidate is a different Plex server")
                     continue
                 }
-                val resolved =
-                    shell.copy(
-                        connectionId = connectionId(candidateUrl, ServerKind.PLEX, id.ifBlank { accountName }),
-                        serverName = name.ifBlank { shell.serverName }.ifBlank { "Plex" },
-                        serverId = id.ifBlank { serverId },
+                val ready =
+                    draft.copy(
+                        connectionId = connectionId(candidate, ServerKind.PLEX, machineId.ifBlank { accountName }),
+                        serverName = name.ifBlank { device?.name.orEmpty() }.ifBlank { "Plex" },
+                        serverId = machineId.ifBlank { serverId },
                     )
-                val collections = fetchCollections(resolved)
-                if (collections.isNotEmpty()) return resolved.copy(collections = collections)
+                val collections = fetchCollections(ready)
+                if (collections.isNotEmpty()) return ready.copy(collections = collections)
                 lastError = IllegalStateException("No libraries on this Plex server")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                if (e is CancellationException) throw e
                 lastError = e
             }
         }
         throw lastError ?: IllegalStateException("Could not reach the Plex server")
     }
 
-    /** Re-check a saved connection; returns it with fresh name, kind and libraries. */
+    private fun plexAccountName(token: String): String =
+        quietly("") {
+            val request =
+                Request
+                    .Builder()
+                    .url(endpoint(PLEX_TV, "user"))
+                    .header("Accept", "application/json")
+                    .header("X-Plex-Token", token)
+                    .header("X-Plex-Client-Identifier", deviceId)
+                    .get()
+                    .build()
+            val user = parse(call(request)) as? JsonObject ?: JsonObject(emptyMap())
+            user.string("friendlyName").ifBlank { user.string("username") }.ifBlank { user.string("title") }
+        }
+
+    private fun plexServers(token: String): List<PlexDevice> =
+        quietly(emptyList()) {
+            val request =
+                plexHeaders(Request.Builder().url(endpoint(PLEX_TV, "resources", "includeHttps" to "1", "includeRelay" to "1")), token)
+                    .get()
+                    .build()
+            val list = parse(call(request)) as? JsonArray ?: return@quietly emptyList()
+            list
+                .filterIsInstance<JsonObject>()
+                .filter { d -> d.string("provides").split(',').map { it.trim() }.contains("server") }
+                .map { d ->
+                    PlexDevice(
+                        name = d.string("name"),
+                        clientId = d.string("clientIdentifier"),
+                        accessToken = d.string("accessToken"),
+                        owned = d.boolean("owned") == true,
+                        addresses =
+                            d
+                                .objects("connections")
+                                .map { c ->
+                                    PlexAddress(
+                                        uri = normalizeServerUrl(c.string("uri")),
+                                        local = c.boolean("local") == true,
+                                        relay = c.boolean("relay") == true,
+                                    )
+                                }.filter { it.uri.isNotBlank() }
+                                .distinctBy { it.uri.lowercase() },
+                    )
+                }.filter { it.clientId.isNotBlank() }
+        }
+
     fun refresh(connection: ServerConnection): ServerConnection {
-        if (connection.serverKind == ServerKind.PLEX) {
-            val refreshed =
+        if (connection.isPlex) {
+            val fresh =
                 buildPlexConnection(
                     connection.accountToken.ifBlank { connection.accessToken },
                     connection.serverUrl,
                     connection.displayName,
                 )
-            return refreshed.copy(
+            return fresh.copy(
                 enabled = connection.enabled,
-                connectionId = connection.connectionId.ifBlank { refreshed.connectionId },
-                collections = mergeCollections(refreshed.collections, connection.collections),
+                connectionId = connection.connectionId.ifBlank { fresh.connectionId },
+                collections = keepSwitches(connection.collections, fresh.collections),
             )
         }
-        val info = getJson(buildUrl(connection.serverUrl, "/System/Info"), connection)
-        val shell =
+        val info = getJson(endpoint(connection.serverUrl, "System/Info"), connection)
+        val updated =
             connection.copy(
                 serverName = info.string("ServerName").ifBlank { connection.serverName },
                 serverId = info.string("Id").ifBlank { connection.serverId },
                 lastConnectedAt = System.currentTimeMillis(),
             )
-        return shell.copy(collections = mergeCollections(fetchCollections(shell), connection.collections))
+        return updated.copy(collections = keepSwitches(connection.collections, fetchCollections(updated)))
     }
 
-    private fun mergeCollections(
+    /** The fresh list, with each library's on/off switch carried over from before. */
+    private fun keepSwitches(
+        before: List<ServerCollection>,
         fresh: List<ServerCollection>,
-        previous: List<ServerCollection>,
     ): List<ServerCollection> {
-        val byId = previous.associateBy { it.id }
-        return fresh.map { it.copy(enabled = byId[it.id]?.enabled ?: it.enabled) }
+        val switches = before.associate { it.id to it.enabled }
+        return fresh.map { c -> switches[c.id]?.let { c.copy(enabled = it) } ?: c }
     }
 
-    fun fetchCollections(connection: ServerConnection): List<ServerCollection> {
-        if (connection.serverKind == ServerKind.PLEX) {
-            return getJson(buildUrl(connection.serverUrl, "/library/sections"), connection)
-                .array("MediaContainer", "Directory")
-                .filterIsInstance<JsonObject>()
-                .mapNotNull { dir ->
-                    val id = dir.string("key").ifBlank { return@mapNotNull null }
-                    ServerCollection(id, dir.string("title").ifBlank { "Library $id" }, dir.string("type"))
-                }
-        }
-        return getJson(buildUrl(connection.serverUrl, "/Users/${connection.userId}/Views"), connection)
-            .objects("Items")
-            .mapNotNull { item ->
-                val id = item.string("Id").ifBlank { return@mapNotNull null }
-                ServerCollection(id, item.string("Name").ifBlank { "Library" }, item.string("CollectionType"))
-            }
-    }
+    // ---- Finding copies of a title ----
 
-    // ---------------------------------------------------------------- source discovery
-
-    /** Every playable copy of [request] on [connection], best first. Never throws except on cancel. */
+    /** Every playable copy on this server, best first. Never throws, apart from cancellation. */
     suspend fun findSources(
         connection: ServerConnection,
         request: PlayRequest,
     ): List<ExternalSource> =
         try {
-            val items =
-                if (request.isEpisode) {
-                    findEpisodes(connection, request)
-                } else {
-                    findMovies(connection, request)
-                }
-            coroutineScope {
-                items.map { async { buildSources(connection, it) } }.awaitAll().flatten()
-            }.distinctBy { it.url }.sortedWith(sourceRanking)
+            val items = matchItems(connection, request)
+            coroutineScope { items.map { async { sourcesOf(connection, it) } }.awaitAll() }
+                .flatten()
+                .distinctBy { it.url }
+                .sortedWith(sourceRanking)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            timber.log.Timber.w(e, "Source lookup failed on %s", connection.label)
+            Timber.w(e, "Source lookup failed on %s", connection.label)
             emptyList()
         }
 
-    private suspend fun findMovies(
-        connection: ServerConnection,
-        r: PlayRequest,
-    ): List<Item> {
-        val candidates = linkedMapOf<String, Item>()
-        coroutineScope {
-            val plexTitle =
-                async {
-                    if (connection.serverKind == ServerKind.PLEX && r.title.isNotBlank()) {
-                        queryItems(connection, "Movie", mapOf("SearchTerm" to r.title, "Limit" to "25"))
-                    } else {
-                        emptyList()
-                    }
-                }
-            providerQueries(r.imdbId, r.tmdbId, null)
-                .distinctBy { if (connection.serverKind == ServerKind.PLEX) it.lowercase(Locale.US) else it }
-                .map { id ->
-                    async {
-                        quietly { queryItems(connection, "Movie", mapOf("AnyProviderIdEquals" to id, "Limit" to "10")) }
-                    }
-                }.awaitAll()
-                .flatten()
-                .forEach { candidates[it.id] = it }
-            plexTitle.await().forEach { candidates.putIfAbsent(it.id, it) }
-        }
-        val bestScore = candidates.values.maxOfOrNull { score(r, it) } ?: 0
-        if (r.title.isNotBlank() && connection.serverKind != ServerKind.PLEX && bestScore < 900) {
-            queryItems(connection, "Movie", mapOf("SearchTerm" to r.title, "Limit" to "25"))
-                .forEach { candidates[it.id] = it }
-        }
-        return matching(candidates.values, r)
-    }
+    fun currentUserId(connection: ServerConnection): String = getJson(endpoint(connection.serverUrl, "Users/Me"), connection).string("Id")
 
-    private suspend fun findEpisodes(
+    suspend fun matchSeriesIds(
         connection: ServerConnection,
-        r: PlayRequest,
-    ): List<Item> {
-        val season = r.season!!
-        val episode = r.episode!!
-        val series = seriesMatches(connection, r)
-        return episodesFor(connection, r, series, season, episode)
-    }
+        request: PlayRequest,
+    ): List<String> = seriesMatches(connection, request).map { it.id }
 
-    private suspend fun seriesMatches(
+    suspend fun matchItemIds(
         connection: ServerConnection,
-        r: PlayRequest,
+        request: PlayRequest,
+    ): List<String> = matchItems(connection, request).map { it.id }
+
+    private suspend fun matchItems(
+        connection: ServerConnection,
+        request: PlayRequest,
+    ): List<Item> = if (request.isEpisode) episodeMatches(connection, request) else movieMatches(connection, request)
+
+    private suspend fun movieMatches(
+        c: ServerConnection,
+        request: PlayRequest,
     ): List<Item> {
-        val candidates = linkedMapOf<String, Item>()
+        val found = LinkedHashMap<String, Item>()
         coroutineScope {
             val byTitle =
-                async {
-                    if (r.title.isBlank()) {
-                        emptyList()
-                    } else {
-                        quietly { queryItems(connection, "Series", mapOf("SearchTerm" to r.title, "Limit" to "25")) }
-                    }
+                if (c.isPlex && request.title.isNotBlank()) async { queryItems(c, MOVIE, searchTerm = request.title, limit = 25) } else null
+            val byIds =
+                idQueries(c, request.imdbId, request.tmdbId, null).map { id ->
+                    async { quietly(emptyList()) { queryItems(c, MOVIE, anyProviderId = id, limit = 10) } }
                 }
-            providerQueries(r.imdbId, r.tmdbId, r.tvdbId)
-                .distinctBy { if (connection.serverKind == ServerKind.PLEX) it.lowercase(Locale.US) else it }
-                .map { id ->
-                    async {
-                        quietly { queryItems(connection, "Series", mapOf("AnyProviderIdEquals" to id, "Limit" to "10")) }
-                    }
-                }.awaitAll()
-                .flatten()
-                .forEach { candidates[it.id] = it }
-            byTitle.await().forEach { candidates.putIfAbsent(it.id, it) }
+            byIds.awaitAll().flatten().forEach { found[it.id] = it }
+            byTitle?.await()?.forEach { found.putIfAbsent(it.id, it) }
         }
-        // Separate HD/UHD libraries can hold the same show under different series ids.
-        return matching(candidates.values, r.copy(year = null))
+        if (!c.isPlex && request.title.isNotBlank()) {
+            val best = found.values.maxOfOrNull { scoreOf(request, it) } ?: 0
+            // No id hit: ask by name, and let a failing server fail here
+            if (best < ID_MATCH) queryItems(c, MOVIE, searchTerm = request.title, limit = 25).forEach { found[it.id] = it }
+        }
+        return pick(found.values.toList(), request)
     }
 
-    private suspend fun episodesFor(
-        connection: ServerConnection,
-        r: PlayRequest,
-        series: List<Item>,
-        season: Int,
-        episode: Int,
+    /** Series that match; the year is ignored because HD and 4K libraries can disagree on it. */
+    private suspend fun seriesMatches(
+        c: ServerConnection,
+        request: PlayRequest,
     ): List<Item> {
+        val (byTitle, byIds) =
+            coroutineScope {
+                val title =
+                    if (request.title.isNotBlank()) {
+                        async { attempt { queryItems(c, SERIES, searchTerm = request.title, limit = 25) } }
+                    } else {
+                        null
+                    }
+                val ids =
+                    idQueries(c, request.imdbId, request.tmdbId, request.tvdbId).map { id ->
+                        async { attempt { queryItems(c, SERIES, anyProviderId = id, limit = 10) } }
+                    }
+                title?.await() to ids.awaitAll()
+            }
+        val outcomes = listOfNotNull(byTitle) + byIds
+        // Everything failing means the server is down, which must not look like "not there"
+        if (outcomes.isNotEmpty() && outcomes.all { it.isFailure }) throw outcomes.first().exceptionOrNull()!!
+
+        val found = LinkedHashMap<String, Item>()
+        byIds.forEach { r -> r.getOrNull().orEmpty().forEach { found[it.id] = it } }
+        byTitle?.getOrNull().orEmpty().forEach { found.putIfAbsent(it.id, it) }
+        return pick(found.values.toList(), request.copy(year = null))
+    }
+
+    private suspend fun episodeMatches(
+        c: ServerConnection,
+        request: PlayRequest,
+    ): List<Item> {
+        val season = request.season ?: return emptyList()
+        val episode = request.episode ?: return emptyList()
+        val series = seriesMatches(c, request)
         val episodes =
             coroutineScope {
-                series
-                    .map { async { quietly { episodesOf(connection, it.id, season, episode) } } }
-                    .awaitAll()
-                    .flatten()
-                    .distinctBy { it.id }
-            }
+                series.map { s -> async { quietly(emptyList()) { episodeOf(c, s.id, season, episode) } } }.awaitAll()
+            }.flatten().distinctBy { it.id }
         if (episodes.isNotEmpty()) return episodes
-        val bySearch =
-            quietly {
-                queryItems(
-                    connection,
-                    "Episode",
-                    mapOf(
-                        "SearchTerm" to r.title,
-                        "ParentIndexNumber" to season.toString(),
-                        "IndexNumber" to episode.toString(),
-                        "Limit" to "25",
-                    ),
-                ).filter { it.parentIndexNumber == season && it.indexNumber == episode }
-            }
-        return listOfNotNull(bySearch.maxByOrNull { score(r.copy(year = null), it) })
+
+        val noYear = request.copy(year = null)
+        return quietly(emptyList()) {
+            queryItems(c, EPISODE, searchTerm = request.title, parentIndex = season, index = episode, limit = 25)
+        }.filter { it.parentIndex == season && it.index == episode }
+            .maxByOrNull { scoreOf(noYear, it) }
+            ?.let { listOf(it) }
+            .orEmpty()
     }
 
-    private fun episodesOf(
-        connection: ServerConnection,
+    private fun episodeOf(
+        c: ServerConnection,
         seriesId: String,
         season: Int,
         episode: Int,
     ): List<Item> {
-        if (connection.serverKind == ServerKind.PLEX) {
-            return getJson(
-                buildUrl(connection.serverUrl, "/library/metadata/$seriesId/allLeaves", mapOf("includeGuids" to "1")),
-                connection,
-            ).plexItems()
-                .filter { it.parentIndexNumber == season && it.indexNumber == episode }
+        val exact = { it: Item -> it.parentIndex == season && it.index == episode }
+        if (c.isPlex) {
+            return plexItems(getJson(endpoint(c.serverUrl, "library/metadata/$seriesId/allLeaves", "includeGuids" to "1"), c)).filter(exact)
         }
-        val direct =
-            getJson(
-                buildUrl(
-                    connection.serverUrl,
-                    "/Shows/$seriesId/Episodes",
-                    mapOf("UserId" to connection.userId, "Season" to season.toString(), "Fields" to ITEM_FIELDS),
-                ),
-                connection,
-            ).embyItems()
-                .filter { it.parentIndexNumber == season && it.indexNumber == episode }
-        if (direct.isNotEmpty()) return direct
-        return queryItems(
-            connection,
-            "Episode",
-            mapOf(
-                "SeriesId" to seriesId,
-                "ParentIndexNumber" to season.toString(),
-                "IndexNumber" to episode.toString(),
-                "Limit" to "10",
-            ),
-        ).filter { it.parentIndexNumber == season && it.indexNumber == episode }
+        val listed =
+            getJson(endpoint(c.serverUrl, "Shows/$seriesId/Episodes", "UserId" to c.userId, "Season" to season, "Fields" to ITEM_FIELDS), c)
+                .objects("Items")
+                .map(::embyItem)
+                .filter(exact)
+        if (listed.isNotEmpty()) return listed
+        return queryItems(c, EPISODE, seriesId = seriesId, parentIndex = season, index = episode, limit = 10).filter(exact)
     }
 
-    private fun score(
-        r: PlayRequest,
-        item: Item,
-    ): Int = Matcher.score(r.title, r.year, r.imdbId, r.tmdbId, r.tvdbId, item.info())
+    /** The id strings to ask for; Plex ignores case, so it gets each id once. */
+    private fun idQueries(
+        c: ServerConnection,
+        imdb: String?,
+        tmdb: Int?,
+        tvdb: Int?,
+    ): List<String> {
+        val all = mutableListOf<String>()
+        imdb?.trim()?.takeIf { it.isNotBlank() }?.let { all += listOf("imdb.$it", "Imdb.$it") }
+        tmdb?.takeIf { it > 0 }?.let { all += listOf("tmdb.$it", "Tmdb.$it") }
+        tvdb?.takeIf { it > 0 }?.let { all += listOf("tvdb.$it", "Tvdb.$it") }
+        val unique = all.distinct()
+        return if (c.isPlex) unique.distinctBy { it.lowercase() } else unique
+    }
 
-    private fun matching(
-        candidates: Collection<Item>,
-        r: PlayRequest,
+    private fun scoreOf(
+        request: PlayRequest,
+        item: Item,
+    ): Int = Matcher.score(request.title, request.year, request.imdbId, request.tmdbId, request.tvdbId, item.candidate)
+
+    /** Acceptable matches, best first. Keeps every id match and same-version copy (HD and 4K libraries). */
+    private fun pick(
+        candidates: List<Item>,
+        request: PlayRequest,
     ): List<Item> {
-        val scored = candidates.map { it to score(r, it) }.filter { Matcher.isAcceptable(it.second) }
-        val best = scored.maxOfOrNull { it.second } ?: return emptyList()
+        val scored = candidates.map { it to scoreOf(request, it) }.filter { Matcher.isAcceptable(it.second) }
+        if (scored.isEmpty()) return emptyList()
+        val best = scored.maxOf { it.second }
         return scored
-            .filter { (item, s) -> s >= 900 || s == best || Matcher.isLikelySameVersion(r.title, r.year, item.info()) }
-            .sortedByDescending { it.second }
+            .filter { (item, score) ->
+                score >= ID_MATCH || score == best || Matcher.isLikelySameVersion(request.title, request.year, item.candidate)
+            }.sortedByDescending { it.second }
             .map { it.first }
             .distinctBy { it.id }
     }
 
-    private fun providerQueries(
-        imdbId: String?,
-        tmdbId: Int?,
-        tvdbId: Int?,
-    ): List<String> =
-        buildList {
-            imdbId?.trim()?.takeIf { it.isNotBlank() }?.let {
-                add("imdb.$it")
-                add("Imdb.$it")
-            }
-            tmdbId?.takeIf { it > 0 }?.let {
-                add("tmdb.$it")
-                add("Tmdb.$it")
-            }
-            tvdbId?.takeIf { it > 0 }?.let {
-                add("tvdb.$it")
-                add("Tvdb.$it")
-            }
-        }.distinct()
-
     private fun queryItems(
-        connection: ServerConnection,
-        itemTypes: String,
-        query: Map<String, String?>,
+        c: ServerConnection,
+        type: String,
+        searchTerm: String? = null,
+        anyProviderId: String? = null,
+        seriesId: String? = null,
+        parentIndex: Int? = null,
+        index: Int? = null,
+        limit: Int? = null,
     ): List<Item> {
-        if (connection.serverKind == ServerKind.PLEX) return queryPlex(connection, itemTypes, query)
-        return getJson(
-            buildUrl(
-                connection.serverUrl,
-                "/Users/${connection.userId}/Items",
-                mapOf("Recursive" to "true", "IncludeItemTypes" to itemTypes, "Fields" to ITEM_FIELDS) + query,
-            ),
-            connection,
-        ).embyItems()
+        if (c.isPlex) return plexQuery(c, type, searchTerm, anyProviderId, parentIndex, index, limit)
+        val url =
+            endpoint(
+                c.serverUrl,
+                "Users/${c.userId}/Items",
+                "Recursive" to "true",
+                "IncludeItemTypes" to type,
+                "Fields" to ITEM_FIELDS,
+                "SearchTerm" to searchTerm,
+                "AnyProviderIdEquals" to anyProviderId,
+                "SeriesId" to seriesId,
+                "ParentIndexNumber" to parentIndex,
+                "IndexNumber" to index,
+                "Limit" to limit,
+            )
+        return getJson(url, c).objects("Items").map(::embyItem)
     }
 
-    private fun queryPlex(
-        connection: ServerConnection,
-        itemTypes: String,
-        query: Map<String, String?>,
+    private fun plexQuery(
+        c: ServerConnection,
+        type: String,
+        searchTerm: String?,
+        anyProviderId: String?,
+        parentIndex: Int?,
+        index: Int?,
+        limit: Int?,
     ): List<Item> {
         val plexType =
-            when (itemTypes.lowercase(Locale.US)) {
-                "movie" -> "1"
-                "series" -> "2"
-                "episode" -> "4"
-                else -> null
+            when (type) {
+                MOVIE -> "1"
+                SERIES -> "2"
+                else -> "4"
             }
-        val limit = query["Limit"]?.takeIf { it.isNotBlank() } ?: "25"
-        val sections = plexSections(connection, itemTypes)
-        query["AnyProviderIdEquals"]?.takeIf { it.isNotBlank() }?.let { providerId ->
-            val provider = providerId.substringBefore('.').lowercase(Locale.US)
-            val id = providerId.substringAfter('.', "").trim()
+        val max = (limit ?: 25).toString()
+        val sectionTypes = if (type == MOVIE) setOf("movies", "movie") else setOf("tvshows", "series", "show")
+        val sections = c.collections.filter { it.enabled && it.type.lowercase() in sectionTypes }
+
+        if (anyProviderId != null) {
+            val provider = anyProviderId.substringBefore('.').lowercase()
+            val id = anyProviderId.substringAfter('.', "").trim()
             if (provider in setOf("imdb", "tmdb", "tvdb") && id.isNotBlank()) {
-                val guid = "$provider://$id"
-                val found =
+                val hits =
                     sections
-                        .flatMap { section ->
-                            quietly {
-                                getJson(
-                                    buildUrl(
-                                        connection.serverUrl,
-                                        "/library/sections/${section.id}/all",
-                                        mapOf("type" to plexType, "guid" to guid, "includeGuids" to "1", "limit" to limit),
+                        .flatMap { s ->
+                            quietly(emptyList()) {
+                                plexItems(
+                                    getJson(
+                                        endpoint(
+                                            c.serverUrl,
+                                            "library/sections/${s.id}/all",
+                                            "type" to plexType,
+                                            "guid" to "$provider://$id",
+                                            "includeGuids" to "1",
+                                            "limit" to max,
+                                        ),
+                                        c,
                                     ),
-                                    connection,
-                                ).plexItems()
+                                )
                             }
                         }.distinctBy { it.id }
-                if (found.isNotEmpty()) return found
+                if (hits.isNotEmpty()) return hits
             }
-            // Shared servers may reject guid filters; the caller searches by title next.
         }
 
-        val term = query["SearchTerm"]?.takeIf { it.isNotBlank() } ?: return emptyList()
-        val global =
-            quietly {
-                getJson(
-                    buildUrl(
-                        connection.serverUrl,
-                        "/search",
-                        mapOf("query" to term, "type" to plexType, "includeGuids" to "1", "limit" to limit),
+        val term = searchTerm?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val sectionIds = sections.map { it.id }.toSet()
+        val searched =
+            quietly(emptyList()) {
+                plexItems(
+                    getJson(
+                        endpoint(c.serverUrl, "search", "query" to term, "type" to plexType, "includeGuids" to "1", "limit" to max),
+                        c,
                     ),
-                    connection,
-                ).plexItems()
-            }.filter { item -> sections.isEmpty() || item.librarySectionId.isBlank() || sections.any { it.id == item.librarySectionId } }
-        val exact = global.any { Matcher.normalizeTitle(it.name) == Matcher.normalizeTitle(term) }
-        val perSection =
-            if (exact) {
-                emptyList()
-            } else {
-                sections.flatMap { section ->
-                    quietly {
-                        getJson(
-                            buildUrl(
-                                connection.serverUrl,
-                                "/library/sections/${section.id}/all",
-                                mapOf("type" to plexType, "title" to term, "includeGuids" to "1", "limit" to limit),
+                )
+            }.filter { sections.isEmpty() || it.sectionId.isBlank() || it.sectionId in sectionIds }
+        // The global search can miss things; then filter each library by title too
+        val wanted = Matcher.normalizeTitle(term)
+        val filtered =
+            if (searched.none { Matcher.normalizeTitle(it.name) == wanted }) {
+                sections.flatMap { s ->
+                    quietly(emptyList()) {
+                        plexItems(
+                            getJson(
+                                endpoint(
+                                    c.serverUrl,
+                                    "library/sections/${s.id}/all",
+                                    "type" to plexType,
+                                    "title" to term,
+                                    "includeGuids" to "1",
+                                    "limit" to max,
+                                ),
+                                c,
                             ),
-                            connection,
-                        ).plexItems()
+                        )
                     }
                 }
+            } else {
+                emptyList()
             }
-        val season = query["ParentIndexNumber"]?.toIntOrNull()
-        val episode = query["IndexNumber"]?.toIntOrNull()
-        return (global + perSection)
-            .filter { (season == null || it.parentIndexNumber == season) && (episode == null || it.indexNumber == episode) }
+        return (searched + filtered)
+            .filter { (parentIndex == null || it.parentIndex == parentIndex) && (index == null || it.index == index) }
             .distinctBy { it.id }
     }
 
-    private fun plexSections(
-        connection: ServerConnection,
-        itemTypes: String,
-    ): List<ServerCollection> {
-        val type = itemTypes.lowercase(Locale.US)
-        return connection.collections.filter { it.enabled }.filter {
-            val t = it.type.lowercase(Locale.US)
-            when (type) {
-                "movie" -> t in setOf("movies", "movie")
-                "series", "episode" -> t in setOf("tvshows", "series", "show")
-                else -> true
-            }
-        }
-    }
+    // ---- Building sources ----
 
-    private fun buildSources(
-        connection: ServerConnection,
+    private fun sourcesOf(
+        c: ServerConnection,
         item: Item,
     ): List<ExternalSource> {
-        val media =
-            if (connection.serverKind == ServerKind.PLEX) {
-                val fresh =
-                    quietly {
-                        getJson(
-                            buildUrl(
-                                connection.serverUrl,
-                                "/library/metadata/${item.id}",
-                                mapOf("includeGuids" to "1", "includeMedia" to "1"),
-                            ),
-                            connection,
-                        ).plexItems()
-                            .firstOrNull()
-                            ?.media
-                            .orEmpty()
-                    }
-                (fresh + item.media).distinctBy { it.identityKey() }
+        // Plex only reports stream details on the item itself; Emby/Jellyfin's PlaybackInfo is the freshest list
+        val detailed =
+            if (c.isPlex) {
+                quietly(emptyList()) {
+                    plexItems(
+                        getJson(endpoint(c.serverUrl, "library/metadata/${item.id}", "includeGuids" to "1", "includeMedia" to "1"), c),
+                    ).firstOrNull()?.media.orEmpty()
+                }
             } else {
-                val fromPlaybackInfo =
-                    quietly {
-                        postJson(
-                            buildUrl(
-                                connection.serverUrl,
-                                "/Items/${item.id}/PlaybackInfo",
-                                mapOf(
-                                    "UserId" to connection.userId,
-                                    "StartTimeTicks" to "0",
-                                    "IsPlayback" to "true",
-                                    "AutoOpenLiveStream" to "true",
-                                    "MaxStreamingBitrate" to "2147483647",
-                                ),
-                            ),
-                            JsonObject(emptyMap()),
-                            connection,
-                        ).objects("MediaSources").map { it.toEmbyMedia() }
-                    }
-                (fromPlaybackInfo + item.media).distinctBy { it.identityKey() }
+                quietly(emptyList()) {
+                    val url =
+                        endpoint(
+                            c.serverUrl,
+                            "Items/${item.id}/PlaybackInfo",
+                            "UserId" to c.userId,
+                            "StartTimeTicks" to "0",
+                            "IsPlayback" to "true",
+                            "AutoOpenLiveStream" to "true",
+                            "MaxStreamingBitrate" to "2147483647",
+                        )
+                    postJson(url, JsonObject(emptyMap()), c).objects("MediaSources").map(::embyMedia)
+                }
             }
-        return media.flatMap { m ->
-            val direct = m.playbackUrl(connection, item.id) ?: return@flatMap emptyList()
-            val directSource = m.toSource(connection, direct, compatible = false).copy(itemId = item.id, mediaSourceId = m.id, runTimeTicks = m.runTimeTicks)
-            if (connection.serverKind != ServerKind.PLEX || !m.needsPlexCompatible()) return@flatMap listOf(directSource)
-            val compatible = m.plexCompatibleUrl(connection, item.id) ?: return@flatMap listOf(directSource)
-            listOf(directSource, m.toSource(connection, compatible, compatible = true).copy(itemId = item.id, mediaSourceId = m.id, runTimeTicks = m.runTimeTicks))
+        val versions = (detailed + item.media).distinctBy { it.identity }
+
+        val out = mutableListOf<ExternalSource>()
+        for (media in versions) {
+            val direct = directUrl(c, item, media) ?: continue
+            out += source(c, item, media, direct, compatible = false)
+            if (c.isPlex && media.needsCompatibleStream) {
+                compatibleUrl(c, item, media)?.let { out += source(c, item, media, it, compatible = true) }
+            }
         }
+        return out
     }
 
-    private fun Media.toSource(
-        connection: ServerConnection,
+    private fun source(
+        c: ServerConnection,
+        item: Item,
+        media: Media,
         url: String,
         compatible: Boolean,
     ): ExternalSource {
-        val quality = qualityLabel(videoHeight, videoWidth, name)
+        val quality = qualityLabel(media.height, media.width, media.name)
         return ExternalSource(
-            connectionId = connection.connectionId,
-            serverLabel = connection.label,
-            serverKind = connection.serverKind,
+            connectionId = c.connectionId,
+            serverLabel = c.label,
+            serverKind = c.serverKind,
             url = url,
-            quality = quality.ifBlank { "?" },
+            quality = quality.ifEmpty { "?" },
             qualityRank = qualityRank(quality),
-            videoCodec = Labels.videoCodec(videoCodec),
-            hdr = hdr.ifBlank { Labels.hdrFromName(name) },
-            audio = audio,
-            container = container.substringBefore(',').uppercase(Locale.US),
-            sizeBytes = sizeBytes,
-            fileName = name,
+            videoCodec = Labels.videoCodec(media.videoCodec),
+            hdr = media.hdr.ifEmpty { Labels.hdrFromName(media.name) },
+            audio = media.audioLabel,
+            container = media.container.substringBefore(',').uppercase(),
+            sizeBytes = media.size,
+            fileName = media.name,
             compatible = compatible,
+            itemId = item.id,
+            mediaSourceId = media.id,
+            runTimeTicks = media.runTimeTicks,
         )
     }
 
-    /**
-     * Direct play first. Using the server's TranscodingUrl whenever one is offered would make
-     * the server re-encode files the TV plays natively.
-     */
-    private fun Media.playbackUrl(
-        connection: ServerConnection,
-        itemId: String,
+    /** The original file. The server's TranscodingUrl is never used. */
+    private fun directUrl(
+        c: ServerConnection,
+        item: Item,
+        media: Media,
     ): String? {
-        if (connection.serverKind == ServerKind.PLEX) {
-            key.takeIf { it.isNotBlank() }?.let { return withPlexToken(connection, absoluteUrl(connection.serverUrl, it)) }
-            path.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }?.let {
-                return withPlexToken(connection, it)
-            }
-            return id.takeIf { it.isNotBlank() }?.let {
-                buildUrl(connection.serverUrl, "/library/parts/$it/file", mapOf("X-Plex-Token" to connection.accessToken))
+        if (c.isPlex) {
+            return when {
+                media.key.isNotBlank() -> withPlexToken(absolutePlexUrl(c.serverUrl, media.key), c.accessToken)
+                media.path.isHttp() -> withPlexToken(media.path, c.accessToken)
+                media.id.isNotBlank() -> endpoint(c.serverUrl, "library/parts/${media.id}/file", "X-Plex-Token" to c.accessToken).toString()
+                else -> null
             }
         }
-        if (isRemote) path.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }?.let { return it }
+        if (media.remote && media.path.isHttp()) return media.path
         val ext =
-            container
-                .split(',')
-                .first()
+            media.container
+                .substringBefore(',')
                 .trim()
-                .lowercase(Locale.US)
+                .lowercase()
                 .replace("matroska", "mkv")
-                .replace(Regex("[^a-z0-9]"), "")
-                .takeIf { it.isNotBlank() && it.length <= 5 }
-        return buildUrl(
-            connection.serverUrl,
-            if (ext != null) "/Videos/$itemId/stream.$ext" else "/Videos/$itemId/stream",
-            mapOf(
-                "Static" to "true",
-                "MediaSourceId" to id,
-                "DeviceId" to deviceId,
-                "api_key" to connection.accessToken,
-                "Tag" to eTag.takeIf { it.isNotBlank() },
-            ),
-        )
+                .filter { it in 'a'..'z' || it in '0'..'9' }
+                .takeIf { it.length in 1..5 }
+        val path = if (ext != null) "Videos/${item.id}/stream.$ext" else "Videos/${item.id}/stream"
+        // The player can't send headers, so the token rides in the query
+        return endpoint(
+            c.serverUrl,
+            path,
+            "Static" to "true",
+            "MediaSourceId" to media.id,
+            "DeviceId" to deviceId,
+            "api_key" to c.accessToken,
+            "Tag" to media.etag,
+        ).toString()
     }
 
     private fun withPlexToken(
-        connection: ServerConnection,
-        raw: String,
+        url: String,
+        token: String,
     ): String {
-        val parsed = raw.toHttpUrlOrNull() ?: return raw
-        if (!parsed.queryParameter("X-Plex-Token").isNullOrBlank()) return raw
+        val parsed = url.toHttpUrlOrNull() ?: return url
+        if (!parsed.queryParameter("X-Plex-Token").isNullOrBlank()) return url
         return parsed
             .newBuilder()
-            .addQueryParameter("X-Plex-Token", connection.accessToken)
+            .addQueryParameter("X-Plex-Token", token)
             .build()
             .toString()
     }
 
-    /** MKV with HEVC Main10 or HE-AAC: ExoPlayer can stall on these, so offer Plex's HLS path too. */
-    private fun Media.needsPlexCompatible(): Boolean {
-        val isMkv = container.lowercase(Locale.US) in setOf("mkv", "matroska")
-        val isHevc = videoCodec.lowercase(Locale.US) in setOf("hevc", "h265", "h.265")
-        val isMain10 = videoBitDepth >= 10 || "main 10" in videoProfile.lowercase(Locale.US) || "main10" in videoProfile.lowercase(Locale.US)
-        val ap = audioProfile.lowercase(Locale.US)
-        val isHeAac = audioCodec.lowercase(Locale.US) == "aac" && ("he" in ap || "sbr" in ap)
-        return isMkv && ((isHevc && isMain10) || isHeAac)
+    private fun absolutePlexUrl(
+        serverUrl: String,
+        key: String,
+    ): String {
+        if (key.isHttp()) return key
+        val builder = serverUrl.toHttpUrlOrNull()?.newBuilder() ?: return key
+        key
+            .substringBefore('?')
+            .split('/')
+            .filter { it.isNotEmpty() }
+            .forEach { builder.addPathSegment(it) }
+        key
+            .substringAfter('?', "")
+            .split('&')
+            .filter { it.isNotEmpty() }
+            .forEach { pair -> builder.addEncodedQueryParameter(pair.substringBefore('='), pair.substringAfter('=', "")) }
+        return builder.build().toString()
     }
 
-    private fun Media.plexCompatibleUrl(
-        connection: ServerConnection,
-        itemId: String,
+    /**
+     * A Plex HLS conversion for files the Android player can stall on. It replaces the server
+     * URL's path, so a reverse-proxy prefix is not kept for this one URL.
+     */
+    private fun compatibleUrl(
+        c: ServerConnection,
+        item: Item,
+        media: Media,
     ): String? {
-        if (itemId.isBlank()) return null
-        val base = connection.serverUrl.toHttpUrlOrNull() ?: return null
+        if (item.id.isBlank()) return null
+        val base = c.serverUrl.toHttpUrlOrNull() ?: return null
+        val part = media.id.ifBlank { media.partIndex.toString() }
         return base
             .newBuilder()
             .encodedPath("/video/:/transcode/universal/start.m3u8")
-            .addQueryParameter("path", "/library/metadata/$itemId")
-            .addQueryParameter("mediaIndex", mediaIndex.toString())
-            .addQueryParameter("partIndex", partIndex.toString())
+            .query(null)
+            .addQueryParameter("path", "/library/metadata/${item.id}")
+            .addQueryParameter("mediaIndex", media.mediaIndex.toString())
+            .addQueryParameter("partIndex", media.partIndex.toString())
             .addQueryParameter("protocol", "hls")
             .addQueryParameter("directPlay", "0")
             .addQueryParameter("directStream", "1")
             .addQueryParameter("videoQuality", "100")
             .addQueryParameter("maxVideoBitrate", "40000")
-            .addQueryParameter("session", "$clientName-$deviceId-$itemId-${id.ifBlank { partIndex.toString() }}")
+            .addQueryParameter("session", "$clientName-$deviceId-${item.id}-$part")
             .addQueryParameter("X-Plex-Client-Identifier", deviceId)
             .addQueryParameter("X-Plex-Product", clientName)
-            .addQueryParameter("X-Plex-Token", connection.accessToken)
+            .addQueryParameter("X-Plex-Token", c.accessToken)
             .build()
             .toString()
     }
 
-    // ---------------------------------------------------------------- parsing
+    // ---- Watch state ----
 
-    private class Item(
-        val id: String,
-        val name: String,
-        val productionYear: Int?,
-        val providerIds: Map<String, String>,
-        val librarySectionId: String,
-        val indexNumber: Int?,
-        val parentIndexNumber: Int?,
-        val media: List<Media>,
-    ) {
-        fun info() = CandidateInfo(name, productionYear, providerIds)
-    }
-
-    private class Media(
-        val id: String,
-        val key: String,
-        val name: String,
-        val path: String,
-        val container: String,
-        val eTag: String,
-        val sizeBytes: Long,
-        val isRemote: Boolean,
-        val videoWidth: Int,
-        val videoHeight: Int,
-        val videoCodec: String,
-        val videoProfile: String,
-        val videoBitDepth: Int,
-        val hdr: String,
-        val audioCodec: String,
-        val audioProfile: String,
-        val audio: String,
-        val variantKey: String = "",
-        val runTimeTicks: Long = 0L,
-        val mediaIndex: Int = 0,
-        val partIndex: Int = 0,
-    ) {
-        fun identityKey(): String =
-            variantKey.ifBlank { null } ?: id.ifBlank { null } ?: key.ifBlank { null } ?: path.ifBlank { null }
-                ?: "$container|$sizeBytes|$videoWidth|$videoHeight"
-    }
-
-    private fun JsonObject.embyItems(): List<Item> = objects("Items").map { it.toEmbyItem() }
-
-    private fun JsonObject.toEmbyItem(): Item =
-        Item(
-            id = string("Id"),
-            name = string("Name"),
-            productionYear = int("ProductionYear") ?: string("PremiereDate").take(4).toIntOrNull(),
-            providerIds =
-                obj("ProviderIds")
-                    ?.mapNotNull { (k, v) -> (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { k.lowercase(Locale.US) to it } }
-                    ?.toMap()
-                    .orEmpty(),
-            librarySectionId = "",
-            indexNumber = int("IndexNumber"),
-            parentIndexNumber = int("ParentIndexNumber"),
-            media = objects("MediaSources").map { it.toEmbyMedia() },
-        )
-
-    private fun JsonObject.toEmbyMedia(): Media {
-        val streams = objects("MediaStreams")
-        val video = streams.firstOrNull { it.string("Type").equals("Video", true) }
-        val defaultAudio =
-            streams.filter { it.string("Type").equals("Audio", true) }.let { audio ->
-                audio.firstOrNull { it.boolean("IsDefault") == true } ?: audio.firstOrNull()
-            }
-        val rangeType = video?.string("VideoRangeType").orEmpty()
-        val range = video?.string("VideoRange").orEmpty()
-        val hdr =
-            when {
-                rangeType.startsWith("DOVI", true) || video?.string("DvProfile")?.isNotBlank() == true ||
-                    video?.string("ExtendedVideoType")?.contains("DolbyVision", true) == true -> "Dolby Vision"
-                rangeType.equals("HDR10Plus", true) || video?.string("ExtendedVideoSubType")?.contains("Plus", true) == true -> "HDR10+"
-                rangeType.equals("HLG", true) -> "HLG"
-                rangeType.startsWith("HDR", true) || range.equals("HDR", true) -> "HDR10"
-                else -> ""
-            }
-        return Media(
-            id = string("Id"),
-            key = "",
-            name = string("Name").ifBlank { string("Path").substringAfterLast('/').substringAfterLast('\\') },
-            path = string("Path"),
-            container = string("Container"),
-            eTag = string("ETag").ifBlank { string("Etag") },
-            sizeBytes = long("Size") ?: 0L,
-            isRemote = boolean("IsRemote") == true,
-            runTimeTicks = long("RunTimeTicks") ?: 0L,
-            videoWidth = video?.int("Width") ?: 0,
-            videoHeight = video?.int("Height") ?: 0,
-            videoCodec = video?.string("Codec").orEmpty(),
-            videoProfile = video?.string("Profile").orEmpty(),
-            videoBitDepth = video?.int("BitDepth") ?: 0,
-            hdr = hdr,
-            audioCodec = defaultAudio?.string("Codec").orEmpty(),
-            audioProfile = defaultAudio?.string("Profile").orEmpty(),
-            audio =
-                defaultAudio
-                    ?.let {
-                        Labels.audio(it.string("Codec"), it.string("Profile"), it.int("Channels"), it.string("DisplayTitle"), string("Path").ifBlank { string("Name") })
-                    }.orEmpty(),
-        )
-    }
-
-    private fun JsonObject.plexItems(): List<Item> =
-        (array("MediaContainer", "Metadata").ifEmpty { array("Metadata") })
-            .filterIsInstance<JsonObject>()
-            .map { it.toPlexItem() }
-
-    private fun JsonObject.toPlexItem(): Item {
-        val providerIds =
-            objects("Guid")
-                .map { it.string("id") }
-                .mapNotNull { guid ->
-                    val provider = guid.substringBefore("://").lowercase(Locale.US)
-                    val id = guid.substringAfter("://", "").substringBefore("?")
-                    if (provider.isNotBlank() && id.isNotBlank()) provider to id else null
-                }.toMap()
-        return Item(
-            id = string("ratingKey").ifBlank { string("key") },
-            name = string("title"),
-            productionYear = int("year") ?: string("originallyAvailableAt").take(4).toIntOrNull(),
-            providerIds = providerIds,
-            librarySectionId = string("librarySectionID"),
-            indexNumber = int("index"),
-            parentIndexNumber = int("parentIndex"),
-            media =
-                objects("Media").flatMapIndexed { mediaIndex, media ->
-                    media.objects("Part").mapIndexed { partIndex, part -> part.toPlexMedia(media, mediaIndex, partIndex) }
-                },
-        )
-    }
-
-    private fun JsonObject.toPlexMedia(
-        parent: JsonObject,
-        mediaIndex: Int,
-        partIndex: Int,
-    ): Media {
-        val width = parent.int("width") ?: int("width") ?: 0
-        val height = parent.int("height") ?: int("height") ?: 0
-        val streams = objects("Stream")
-        val video = streams.firstOrNull { it.string("streamType") == "1" }
-        val audio =
-            streams.filter { it.string("streamType") == "2" }.let { all ->
-                all.firstOrNull { it.boolean("selected") == true || it.boolean("default") == true } ?: all.firstOrNull()
-            }
-        val trc = video?.string("colorTrc").orEmpty()
-        val hdr =
-            when {
-                video?.boolean("DOVIPresent") == true || video?.string("DOVIProfile")?.isNotBlank() == true -> "Dolby Vision"
-                video?.string("displayTitle")?.contains("HDR10+", true) == true -> "HDR10+"
-                trc.equals("arib-std-b67", true) -> "HLG"
-                trc.equals("smpte2084", true) || video?.string("displayTitle")?.contains("HDR", true) == true -> "HDR10"
-                else -> ""
-            }
-        val audioCodec = audio?.string("codec").orEmpty().ifBlank { parent.string("audioCodec") }
-        return Media(
-            id = string("id"),
-            key = string("key"),
-            name = string("file").substringAfterLast('/').substringAfterLast('\\').ifBlank { parent.string("title") },
-            path = string("file"),
-            container = parent.string("container").ifBlank { string("container") },
-            eTag = "",
-            sizeBytes = long("size") ?: 0L,
-            isRemote = false,
-            videoWidth = width,
-            videoHeight = height,
-            videoCodec = video?.string("codec").orEmpty().ifBlank { parent.string("videoCodec") },
-            videoProfile = video?.string("profile").orEmpty().ifBlank { parent.string("videoProfile") },
-            videoBitDepth = video?.int("bitDepth") ?: parent.int("bitDepth") ?: 0,
-            hdr = hdr,
-            audioCodec = audioCodec,
-            audioProfile = audio?.string("profile").orEmpty(),
-            audio =
-                Labels.audio(
-                    audioCodec,
-                    audio?.string("profile").orEmpty(),
-                    audio?.int("channels") ?: parent.int("audioChannels"),
-                    audio?.string("displayTitle").orEmpty() + " " + audio?.string("title").orEmpty(),
-                    string("file"),
-                ),
-            variantKey =
-                listOf(parent.string("id"), parent.string("bitrate"), string("id"), string("key"), string("file"), string("size"))
-                    .filter { it.isNotBlank() }
-                    .joinToString("|"),
-            runTimeTicks = (parent.long("duration") ?: long("duration") ?: 0L) * 10_000L,
-            mediaIndex = mediaIndex,
-            partIndex = partIndex,
-        )
-    }
-
-    // ---------------------------------------------------------------- HTTP
-
-    private fun authHeader(token: String?): String {
-        val base = "MediaBrowser Client=\"$clientName\", Device=\"Android TV\", DeviceId=\"$deviceId\", Version=\"$clientVersion\""
-        return if (token.isNullOrBlank()) base else "$base, Token=\"$token\""
-    }
-
-    private fun plexHeaders(token: String?): Map<String, String> =
-        buildMap {
-            put("Accept", "application/json")
-            put("X-Plex-Client-Identifier", deviceId)
-            put("X-Plex-Product", clientName)
-            put("X-Plex-Version", clientVersion)
-            put("X-Plex-Device", "Android TV")
-            put("X-Plex-Platform", "Android")
-            if (!token.isNullOrBlank()) put("X-Plex-Token", token)
-        }
-
-    private fun request(
-        url: String,
-        connection: ServerConnection?,
-    ): Request.Builder {
-        val builder =
-            Request
-                .Builder()
-                .url(url)
-                .header("Accept", "application/json")
-                .header("User-Agent", "$clientName/$clientVersion")
-        if (connection?.serverKind == ServerKind.PLEX) {
-            plexHeaders(connection.accessToken).forEach { (k, v) -> builder.header(k, v) }
-        } else {
-            builder.header("Authorization", authHeader(connection?.accessToken))
-            builder.header("X-Emby-Authorization", authHeader(connection?.accessToken))
-            connection?.accessToken?.takeIf { it.isNotBlank() }?.let { builder.header("X-Emby-Token", it) }
-        }
-        return builder
-    }
-
-    private fun execute(request: Request): String =
-        http.newCall(request).execute().use { response ->
-            val body = response.body.string()
-            if (!response.isSuccessful) {
-                val hint =
-                    when (response.code) {
-                        401 -> " (wrong username/password or expired token)"
-                        404, 405 -> " (not a Plex/Emby/Jellyfin API address)"
-                        else -> ""
-                    }
-                throw ServerRequestException(response.code, "Server answered HTTP ${response.code}$hint")
-            }
-            body
-        }
-
-    private fun getJson(
-        url: String,
-        connection: ServerConnection? = null,
-    ): JsonObject = json.parseToJsonElement(execute(request(url, connection).get().build()).ifBlank { "{}" }) as? JsonObject ?: JsonObject(emptyMap())
-
-    private fun getText(
-        url: String,
-        connection: ServerConnection? = null,
-    ): String = execute(request(url, connection).get().build())
-
-    private fun postJson(
-        url: String,
-        body: JsonObject,
-        connection: ServerConnection? = null,
-    ): JsonObject {
-        val req =
-            request(url, connection)
-                .post(body.toString().toRequestBody(jsonType))
-                .build()
-        return json.parseToJsonElement(execute(req).ifBlank { "{}" }) as? JsonObject ?: JsonObject(emptyMap())
-    }
-
-    private fun buildUrl(
-        baseUrl: String,
-        path: String,
-        query: Map<String, String?> = emptyMap(),
-    ): String {
-        val builder = (baseUrl.toHttpUrlOrNull() ?: error("Invalid server address")).newBuilder()
-        path.trim('/').split('/').filter { it.isNotBlank() }.forEach { builder.addPathSegment(it) }
-        query.forEach { (k, v) -> if (!v.isNullOrBlank()) builder.addQueryParameter(k, v) }
-        return builder.build().toString()
-    }
-
-    private fun absoluteUrl(
-        baseUrl: String,
-        pathOrUrl: String,
-    ): String {
-        if (pathOrUrl.startsWith("http://", true) || pathOrUrl.startsWith("https://", true)) return pathOrUrl
-        val builder = baseUrl.toHttpUrlOrNull()?.newBuilder() ?: return pathOrUrl
-        pathOrUrl.substringBefore('?').trim('/').split('/').filter { it.isNotBlank() }.forEach { builder.addPathSegment(it) }
-        pathOrUrl.substringAfter('?', "").split('&').filter { it.isNotBlank() }.forEach { part ->
-            builder.addEncodedQueryParameter(part.substringBefore('='), part.substringAfter('=', ""))
-        }
-        return builder.build().toString()
-    }
-
-    // ---------------------------------------------------------------- Plex account
-
-    private class PlexAddress(
-        val uri: String,
-        val local: Boolean,
-        val relay: Boolean,
-    )
-
-    private class PlexDevice(
-        val name: String,
-        val clientIdentifier: String,
-        val accessToken: String,
-        val owned: Boolean,
-        val connections: List<PlexAddress>,
-    )
-
-    private fun plexAccountName(token: String): String =
-        runCatching {
-            val req =
-                Request
-                    .Builder()
-                    .url("https://plex.tv/api/v2/user")
-                    .header("Accept", "application/json")
-                    .header("X-Plex-Token", token)
-                    .header("X-Plex-Client-Identifier", deviceId)
-                    .build()
-            val obj = json.parseToJsonElement(execute(req)) as JsonObject
-            obj.string("friendlyName").ifBlank { obj.string("username") }.ifBlank { obj.string("title") }
-        }.getOrDefault("").ifBlank { "Plex account" }
-
-    private fun fetchPlexResources(token: String): List<PlexDevice> {
-        val url =
-            "https://plex.tv/api/v2/resources"
-                .toHttpUrlOrNull()!!
-                .newBuilder()
-                .addQueryParameter("includeHttps", "1")
-                .addQueryParameter("includeRelay", "1")
-                .build()
-        val req =
-            Request
-                .Builder()
-                .url(url)
-                .apply { plexHeaders(token).forEach { (k, v) -> header(k, v) } }
-                .build()
-        val body = runCatching { execute(req) }.getOrNull() ?: return emptyList()
-        val arr = runCatching { json.parseToJsonElement(body) as kotlinx.serialization.json.JsonArray }.getOrNull() ?: return emptyList()
-        return arr
-            .filterIsInstance<JsonObject>()
-            .filter { d -> d.string("provides").split(',').any { it.trim() == "server" } }
-            .map { d ->
-                PlexDevice(
-                    name = d.string("name"),
-                    clientIdentifier = d.string("clientIdentifier"),
-                    accessToken = d.string("accessToken"),
-                    owned = d.boolean("owned") == true,
-                    connections =
-                        d
-                            .objects("connections")
-                            .map { PlexAddress(normalizeServerUrl(it.string("uri")), it.boolean("local") == true, it.boolean("relay") == true) }
-                            .filter { it.uri.isNotBlank() }
-                            .distinctBy { it.uri.lowercase(Locale.US) },
-                )
-            }.filter { it.clientIdentifier.isNotBlank() }
-    }
-
-    private fun selectPlexDevice(
-        devices: List<PlexDevice>,
-        preferredId: String,
-        preferredUrl: String,
-    ): PlexDevice? {
-        if (devices.isEmpty()) return null
-        if (preferredId.isNotBlank()) devices.firstOrNull { it.clientIdentifier == preferredId }?.let { return it }
-        if (preferredUrl.isNotBlank()) {
-            devices.firstOrNull { d -> d.connections.any { sameEndpoint(it.uri, preferredUrl) } }?.let { return it }
-        }
-        return devices
-            .filter { it.accessToken.isNotBlank() }
-            .sortedWith(compareByDescending<PlexDevice> { it.owned }.thenByDescending { it.connections.isNotEmpty() })
-            .firstOrNull()
-    }
-
-    private fun parsePlexIdentity(body: String): Pair<String, String> {
-        val container =
-            runCatching {
-                val obj = json.parseToJsonElement(body) as JsonObject
-                obj.obj("MediaContainer") ?: obj
-            }.getOrNull()
-        val name = container?.string("friendlyName").orEmpty()
-        val id = container?.string("machineIdentifier").orEmpty()
-        if (name.isNotBlank() || id.isNotBlank()) return name to id
-        fun attr(n: String) =
-            Regex("\\b$n=[\"']([^\"']*)[\"']")
-                .find(body)
-                ?.groupValues
-                ?.get(1)
-                .orEmpty()
-        return attr("friendlyName") to attr("machineIdentifier")
-    }
-
-    private inline fun <T> quietly(block: () -> List<T>): List<T> =
-        try {
-            block()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            emptyList()
-        }
-
-    // ---------------------------------------------------------------- watch state
-
-    fun currentUserId(connection: ServerConnection): String = getJson(buildUrl(connection.serverUrl, "/Users/Me"), connection).string("Id")
-
-    /** Items started or finished on an Emby/Jellyfin server after [since], newest first. */
     fun recentWatchActivity(
         connection: ServerConnection,
-        since: java.time.Instant,
+        since: Instant,
         limit: Int,
     ): List<WatchEntry> {
-        if (connection.serverKind == ServerKind.PLEX) return emptyList()
-        val base = "/Users/${connection.userId}/Items"
-        val fields = "ProviderIds,ProductionYear"
+        if (connection.isPlex) return emptyList()
+        val base = connection.serverUrl
+        val user = connection.userId
         val resume =
             getJson(
-                buildUrl(connection.serverUrl, "$base/Resume", mapOf("Limit" to "$limit", "MediaTypes" to "Video", "Fields" to fields, "EnableUserData" to "true")),
+                endpoint(
+                    base,
+                    "Users/$user/Items/Resume",
+                    "Limit" to limit,
+                    "MediaTypes" to "Video",
+                    "Fields" to "ProviderIds,ProductionYear",
+                    "EnableUserData" to "true",
+                ),
                 connection,
             ).objects("Items")
         val played =
             getJson(
-                buildUrl(
-                    connection.serverUrl,
+                endpoint(
                     base,
-                    mapOf(
-                        "Recursive" to "true",
-                        "Filters" to "IsPlayed",
-                        "IncludeItemTypes" to "Movie,Episode",
-                        "SortBy" to "DatePlayed",
-                        "SortOrder" to "Descending",
-                        "Limit" to "$limit",
-                        "Fields" to fields,
-                        "EnableUserData" to "true",
-                    ),
+                    "Users/$user/Items",
+                    "Recursive" to "true",
+                    "Filters" to "IsPlayed",
+                    "IncludeItemTypes" to "Movie,Episode",
+                    "SortBy" to "DatePlayed",
+                    "SortOrder" to "Descending",
+                    "Limit" to limit,
+                    "Fields" to "ProviderIds,ProductionYear",
+                    "EnableUserData" to "true",
                 ),
                 connection,
             ).objects("Items")
-        val seriesCache = mutableMapOf<String, JsonObject?>()
-        return (resume + played)
-            .mapNotNull { item ->
+
+        val seriesById = HashMap<String, JsonObject?>()
+        fun series(id: String): JsonObject? =
+            seriesById.getOrPut(id) {
+                quietly<JsonObject?>(null) { getJson(endpoint(base, "Users/$user/Items/$id", "Fields" to "ProviderIds,ProductionYear"), connection) }
+            }
+
+        val entries =
+            (resume + played).mapNotNull { item ->
                 val data = item.obj("UserData") ?: return@mapNotNull null
-                val lastPlayed = parseInstant(data.string("LastPlayedDate")) ?: return@mapNotNull null
-                if (!lastPlayed.isAfter(since)) return@mapNotNull null
+                val lastPlayed = parseDate(data.string("LastPlayedDate"))?.takeIf { it.isAfter(since) } ?: return@mapNotNull null
                 val request =
-                    if (item.string("Type").equals("Episode", true)) {
+                    if (item.string("Type").equals("Episode", ignoreCase = true)) {
                         val seriesId = item.string("SeriesId").ifBlank { return@mapNotNull null }
-                        val series =
-                            seriesCache.getOrPut(seriesId) {
-                                runCatching { getJson(buildUrl(connection.serverUrl, "$base/$seriesId", mapOf("Fields" to fields)), connection) }.getOrNull()
-                            } ?: return@mapNotNull null
-                        val ids = series.providerIds()
+                        val show = series(seriesId) ?: return@mapNotNull null
+                        val ids = providerIds(show)
                         PlayRequest(
-                            title = series.string("Name"),
-                            year = series.int("ProductionYear"),
-                            imdbId = ids["imdb"],
+                            title = show.string("Name"),
+                            year = show.int("ProductionYear"),
+                            imdbId = ids["imdb"]?.takeIf { it.isNotBlank() },
                             tmdbId = ids["tmdb"]?.toIntOrNull(),
                             tvdbId = ids["tvdb"]?.toIntOrNull(),
                             season = item.int("ParentIndexNumber") ?: return@mapNotNull null,
                             episode = item.int("IndexNumber") ?: return@mapNotNull null,
                         )
                     } else {
-                        val ids = item.providerIds()
-                        PlayRequest(item.string("Name"), item.int("ProductionYear"), ids["imdb"], ids["tmdb"]?.toIntOrNull(), null)
+                        val ids = providerIds(item)
+                        PlayRequest(
+                            item.string("Name"),
+                            item.int("ProductionYear"),
+                            ids["imdb"]?.takeIf { it.isNotBlank() },
+                            ids["tmdb"]?.toIntOrNull(),
+                            null,
+                        )
                     }
                 WatchEntry(
                     itemId = item.string("Id"),
@@ -1368,48 +1048,34 @@ class ServerClient(
                     played = data.boolean("Played") == true,
                     lastPlayed = lastPlayed,
                 )
-            }.distinctBy { it.itemId }
-            .sortedByDescending { it.lastPlayed }
+            }
+        // A resume entry beats a played entry for the same item
+        return entries.distinctBy { it.itemId }.sortedByDescending { it.lastPlayed }
     }
-
-    private fun JsonObject.providerIds(): Map<String, String> =
-        obj("ProviderIds")
-            ?.mapNotNull { (k, v) -> (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { k.lowercase(Locale.US) to it } }
-            ?.toMap()
-            .orEmpty()
-
-    /** Ids of the series matching [request] (title/year/ids; season and episode are ignored). */
-    suspend fun matchSeriesIds(
-        connection: ServerConnection,
-        request: PlayRequest,
-    ): List<String> = seriesMatches(connection, request).map { it.id }
-
-    /** Ids of every copy of [request] on [connection] (HD and 4K libraries can both hold it). */
-    suspend fun matchItemIds(
-        connection: ServerConnection,
-        request: PlayRequest,
-    ): List<String> = (if (request.isEpisode) findEpisodes(connection, request) else findMovies(connection, request)).map { it.id }
 
     fun userData(
         connection: ServerConnection,
         itemId: String,
     ): UserItemData? {
-        val item =
-            withFallback(
-                { getJson(buildUrl(connection.serverUrl, "/Items/$itemId", mapOf("userId" to connection.userId)), connection) },
-                { getJson(buildUrl(connection.serverUrl, "/Users/${connection.userId}/Items/$itemId"), connection) },
-                newFirst = connection.serverKind == ServerKind.JELLYFIN,
-            )
-        val data = item.obj("UserData") ?: return null
+        // Jellyfin 10.9+ moved item user data; Emby and older Jellyfin keep the per-user route
+        val current = { getJson(endpoint(connection.serverUrl, "Items/$itemId", "userId" to connection.userId), connection) }
+        val legacy = { getJson(endpoint(connection.serverUrl, "Users/${connection.userId}/Items/$itemId"), connection) }
+        val (first, second) = if (connection.serverKind == ServerKind.JELLYFIN) current to legacy else legacy to current
+        val answer =
+            try {
+                first()
+            } catch (e: ServerRequestException) {
+                if (e.statusCode == 404 || e.statusCode == 405) second() else throw e
+            }
+        val data = answer.obj("UserData") ?: return null
         return UserItemData(
-            data.long("PlaybackPositionTicks") ?: 0L,
-            data.boolean("Played") == true,
-            parseInstant(data.string("LastPlayedDate")),
-            item.string("SeriesId").ifBlank { null },
+            positionTicks = data.long("PlaybackPositionTicks") ?: 0L,
+            played = data.boolean("Played") == true,
+            lastPlayed = parseDate(data.string("LastPlayedDate")),
+            seriesId = answer.string("SeriesId").ifBlank { null },
         )
     }
 
-    /** Tell the server a stream from it is playing, so its own Continue Watching stays current. */
     fun reportPlayback(
         connection: ServerConnection,
         source: ExternalSource,
@@ -1420,7 +1086,7 @@ class ServerClient(
         playSessionId: String,
     ) {
         if (source.itemId.isBlank()) return
-        if (connection.serverKind == ServerKind.PLEX) {
+        if (connection.isPlex) {
             val state =
                 when {
                     event == PlayEvent.STOP -> "stopped"
@@ -1428,16 +1094,14 @@ class ServerClient(
                     else -> "playing"
                 }
             getText(
-                buildUrl(
+                endpoint(
                     connection.serverUrl,
-                    "/:/timeline",
-                    mapOf(
-                        "ratingKey" to source.itemId,
-                        "key" to "/library/metadata/${source.itemId}",
-                        "state" to state,
-                        "time" to "$positionMs",
-                        "duration" to "$durationMs",
-                    ),
+                    ":/timeline",
+                    "ratingKey" to source.itemId,
+                    "key" to "/library/metadata/${source.itemId}",
+                    "state" to state,
+                    "time" to positionMs,
+                    "duration" to durationMs,
                 ),
                 connection,
             )
@@ -1445,9 +1109,9 @@ class ServerClient(
         }
         val path =
             when (event) {
-                PlayEvent.START -> "/Sessions/Playing"
-                PlayEvent.PROGRESS -> "/Sessions/Playing/Progress"
-                PlayEvent.STOP -> "/Sessions/Playing/Stopped"
+                PlayEvent.START -> "Sessions/Playing"
+                PlayEvent.PROGRESS -> "Sessions/Playing/Progress"
+                PlayEvent.STOP -> "Sessions/Playing/Stopped"
             }
         val body =
             buildJsonObject {
@@ -1459,39 +1123,409 @@ class ServerClient(
                 put("CanSeek", true)
                 put("PlayMethod", "DirectPlay")
             }
-        postJson(buildUrl(connection.serverUrl, path), body, connection)
+        postJson(endpoint(connection.serverUrl, path), body, connection)
     }
 
-    /** Jellyfin 10.9 moved user-data routes; Emby and older Jellyfin keep the /Users/{id}/ ones. */
-    private fun <T> withFallback(
-        new: () -> T,
-        old: () -> T,
-        newFirst: Boolean,
-    ): T {
-        val (first, second) = if (newFirst) new to old else old to new
+    // ---- Parsing ----
+
+    private fun embyItem(o: JsonObject): Item =
+        Item(
+            id = o.string("Id"),
+            name = o.string("Name"),
+            year = o.int("ProductionYear") ?: o.string("PremiereDate").take(4).toIntOrNull(),
+            providerIds = providerIds(o),
+            sectionId = "",
+            index = o.int("IndexNumber"),
+            parentIndex = o.int("ParentIndexNumber"),
+            media = o.objects("MediaSources").map(::embyMedia),
+        )
+
+    /** Keys lowercased. A JSON null value becomes the text "null", as the shared accessors do. */
+    private fun providerIds(o: JsonObject): Map<String, String> =
+        o
+            .obj("ProviderIds")
+            ?.entries
+            ?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.let { k.lowercase() to it.content } }
+            ?.toMap()
+            .orEmpty()
+
+    private fun embyMedia(o: JsonObject): Media {
+        val streams = o.objects("MediaStreams")
+        val video = streams.firstOrNull { it.string("Type").equals("Video", ignoreCase = true) }
+        val audios = streams.filter { it.string("Type").equals("Audio", ignoreCase = true) }
+        val audio = audios.firstOrNull { it.boolean("IsDefault") == true } ?: audios.firstOrNull()
+        val path = o.string("Path")
+        val name = o.string("Name").ifBlank { lastPathPart(path) }
+        return Media(
+            id = o.string("Id"),
+            key = "",
+            name = name,
+            path = path,
+            container = o.string("Container"),
+            etag = o.string("ETag").ifBlank { o.string("Etag") },
+            size = o.long("Size") ?: 0L,
+            remote = o.boolean("IsRemote") == true,
+            runTimeTicks = o.long("RunTimeTicks") ?: 0L,
+            width = video?.int("Width") ?: 0,
+            height = video?.int("Height") ?: 0,
+            videoCodec = video?.string("Codec").orEmpty(),
+            videoProfile = video?.string("Profile").orEmpty(),
+            bitDepth = video?.int("BitDepth") ?: 0,
+            audioCodec = audio?.string("Codec").orEmpty(),
+            audioProfile = audio?.string("Profile").orEmpty(),
+            audioLabel =
+                audio
+                    ?.let {
+                        Labels.audio(it.string("Codec"), it.string("Profile"), it.int("Channels"), it.string("DisplayTitle"), path.ifBlank { name })
+                    }.orEmpty(),
+            hdr = video?.let(::embyHdr).orEmpty(),
+            mediaIndex = 0,
+            partIndex = 0,
+            variantKey = "",
+        )
+    }
+
+    private fun embyHdr(video: JsonObject): String {
+        val range = video.string("VideoRangeType")
+        return when {
+            range.startsWith("DOVI", ignoreCase = true) ||
+                video.string("DvProfile").isNotBlank() ||
+                video.string("ExtendedVideoType").contains("DolbyVision", ignoreCase = true) -> "Dolby Vision"
+            range.equals("HDR10Plus", ignoreCase = true) || video.string("ExtendedVideoSubType").contains("Plus") -> "HDR10+"
+            range.equals("HLG", ignoreCase = true) -> "HLG"
+            range.startsWith("HDR", ignoreCase = true) || video.string("VideoRange").equals("HDR", ignoreCase = true) -> "HDR10"
+            else -> ""
+        }
+    }
+
+    private fun plexItems(root: JsonObject): List<Item> {
+        val inContainer = root.array("MediaContainer", "Metadata").filterIsInstance<JsonObject>()
+        val list = inContainer.ifEmpty { root.objects("Metadata") }
+        return list.map(::plexItem)
+    }
+
+    private fun plexItem(o: JsonObject): Item {
+        val ids = LinkedHashMap<String, String>()
+        for (guid in o.objects("Guid")) {
+            val text = guid.string("id")
+            val provider = text.substringBefore("://").lowercase()
+            val value = text.substringAfter("://", "").substringBefore('?')
+            if (provider.isNotBlank() && value.isNotBlank()) ids[provider] = value
+        }
+        return Item(
+            id = o.string("ratingKey").ifBlank { o.string("key") },
+            name = o.string("title"),
+            year = o.int("year") ?: o.string("originallyAvailableAt").take(4).toIntOrNull(),
+            providerIds = ids,
+            sectionId = o.string("librarySectionID"),
+            index = o.int("index"),
+            parentIndex = o.int("parentIndex"),
+            media =
+                o.objects("Media").flatMapIndexed { mediaIndex, m ->
+                    m.objects("Part").mapIndexed { partIndex, p -> plexMedia(m, p, mediaIndex, partIndex) }
+                },
+        )
+    }
+
+    private fun plexMedia(
+        m: JsonObject,
+        p: JsonObject,
+        mediaIndex: Int,
+        partIndex: Int,
+    ): Media {
+        val streams = p.objects("Stream")
+        val video = streams.firstOrNull { it.string("streamType") == "1" }
+        val audios = streams.filter { it.string("streamType") == "2" }
+        val audio = audios.firstOrNull { it.boolean("selected") == true || it.boolean("default") == true } ?: audios.firstOrNull()
+        val file = p.string("file")
+        val audioCodec = audio?.string("codec").orEmpty().ifBlank { m.string("audioCodec") }
+        val audioProfile = audio?.string("profile").orEmpty()
+        val trackText = audio?.string("displayTitle").orEmpty() + " " + audio?.string("title").orEmpty()
+        val duration = m.long("duration") ?: p.long("duration") ?: 0L
+        return Media(
+            id = p.string("id"),
+            key = p.string("key"),
+            name = lastPathPart(file).ifBlank { m.string("title") },
+            path = file,
+            container = m.string("container").ifBlank { p.string("container") },
+            etag = "",
+            size = p.long("size") ?: 0L,
+            remote = false,
+            // Plex durations are milliseconds; ticks are 100 ns
+            runTimeTicks = duration * 10_000L,
+            width = m.int("width") ?: p.int("width") ?: 0,
+            height = m.int("height") ?: p.int("height") ?: 0,
+            videoCodec = video?.string("codec").orEmpty().ifBlank { m.string("videoCodec") },
+            videoProfile = video?.string("profile").orEmpty().ifBlank { m.string("videoProfile") },
+            bitDepth = video?.int("bitDepth") ?: m.int("bitDepth") ?: 0,
+            audioCodec = audioCodec,
+            audioProfile = audioProfile,
+            audioLabel = Labels.audio(audioCodec, audioProfile, audio?.int("channels") ?: m.int("audioChannels"), trackText, file),
+            hdr = video?.let(::plexHdr).orEmpty(),
+            mediaIndex = mediaIndex,
+            partIndex = partIndex,
+            variantKey =
+                listOf(m.string("id"), m.string("bitrate"), p.string("id"), p.string("key"), file, p.string("size"))
+                    .filter { it.isNotBlank() }
+                    .joinToString("|"),
+        )
+    }
+
+    private fun plexHdr(video: JsonObject): String {
+        val title = video.string("displayTitle")
+        val transfer = video.string("colorTrc")
+        return when {
+            video.boolean("DOVIPresent") == true || video.string("DOVIProfile").isNotBlank() -> "Dolby Vision"
+            title.contains("HDR10+", ignoreCase = true) -> "HDR10+"
+            transfer.equals("arib-std-b67", ignoreCase = true) -> "HLG"
+            transfer.equals("smpte2084", ignoreCase = true) || title.contains("HDR", ignoreCase = true) -> "HDR10"
+            else -> ""
+        }
+    }
+
+    /** (friendlyName, machineIdentifier) from a Plex /identity answer, JSON or XML. */
+    private fun plexIdentity(body: String): Pair<String, String> {
+        try {
+            val root = json.parseToJsonElement(body) as? JsonObject
+            if (root != null) {
+                val container = root.obj("MediaContainer") ?: root
+                val name = container.string("friendlyName")
+                val id = container.string("machineIdentifier")
+                if (name.isNotBlank() || id.isNotBlank()) return name to id
+            }
+        } catch (e: Exception) {
+            // Not JSON: read it as XML below
+        }
+        return xmlAttribute(body, "friendlyName") to xmlAttribute(body, "machineIdentifier")
+    }
+
+    private fun xmlAttribute(
+        body: String,
+        name: String,
+    ): String = Regex("(?<![A-Za-z0-9_])$name=(?:\"([^\"]*)\"|'([^']*)')").find(body)?.let { it.groupValues[1].ifEmpty { it.groupValues[2] } }.orEmpty()
+
+    private fun parseDate(text: String): Instant? {
+        if (text.isBlank()) return null
         return try {
-            first()
-        } catch (e: ServerRequestException) {
-            if (e.statusCode == 404 || e.statusCode == 405) second() else throw e
+            OffsetDateTime.parse(text, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant()
+        } catch (e: Exception) {
+            try {
+                Instant.parse(text)
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
-    private fun parseInstant(value: String): java.time.Instant? =
-        value.takeIf { it.isNotBlank() }?.let {
-            runCatching { java.time.OffsetDateTime.parse(it).toInstant() }.getOrNull()
-                ?: runCatching { java.time.Instant.parse(it) }.getOrNull()
+    // ---- HTTP plumbing ----
+
+    /** A server URL plus path segments and the non-blank query values, in the order given. */
+    private fun endpoint(
+        base: String,
+        path: String,
+        vararg query: Pair<String, Any?>,
+    ): HttpUrl {
+        val builder = base.toHttpUrlOrNull()?.newBuilder() ?: throw IllegalStateException("Invalid server address")
+        path.split('/').filter { it.isNotEmpty() }.forEach { builder.addPathSegment(it) }
+        for ((name, value) in query) {
+            val text = value?.toString()
+            if (!text.isNullOrBlank()) builder.addQueryParameter(name, text)
         }
+        return builder.build()
+    }
+
+    private fun mediaBrowser(token: String?): String {
+        val base = "MediaBrowser Client=\"$clientName\", Device=\"Android TV\", DeviceId=\"$deviceId\", Version=\"$clientVersion\""
+        return if (token.isNullOrBlank()) base else "$base, Token=\"$token\""
+    }
+
+    private fun plexHeaders(
+        builder: Request.Builder,
+        token: String?,
+    ): Request.Builder =
+        builder
+            .header("Accept", "application/json")
+            .header("X-Plex-Client-Identifier", deviceId)
+            .header("X-Plex-Product", clientName)
+            .header("X-Plex-Version", clientVersion)
+            .header("X-Plex-Device", "Android TV")
+            .header("X-Plex-Platform", "Android")
+            .apply { if (!token.isNullOrBlank()) header("X-Plex-Token", token) }
+
+    /** Headers for a Jellyfin, Emby or Plex server; no connection means no token. */
+    private fun serverRequest(
+        url: HttpUrl,
+        connection: ServerConnection?,
+    ): Request.Builder {
+        val builder =
+            Request
+                .Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .header("User-Agent", "$clientName/$clientVersion")
+        if (connection?.isPlex == true) return plexHeaders(builder, connection.accessToken)
+        val token = connection?.accessToken
+        val auth = mediaBrowser(token)
+        builder.header("Authorization", auth).header("X-Emby-Authorization", auth)
+        if (!token.isNullOrBlank()) builder.header("X-Emby-Token", token)
+        return builder
+    }
+
+    private fun connectRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url).header("X-Application", "$clientName/$clientVersion")
+
+    private fun call(request: Request): String =
+        http.newCall(request).execute().use { response ->
+            val body = response.body.string()
+            if (!response.isSuccessful) throw ServerRequestException(response.code, httpError(response.code))
+            body
+        }
+
+    private fun httpError(code: Int): String {
+        val hint =
+            when (code) {
+                401 -> " (wrong username/password or expired token)"
+                404, 405 -> " (not a Plex/Emby/Jellyfin API address)"
+                else -> ""
+            }
+        return "Server answered HTTP $code$hint"
+    }
+
+    /** A blank body counts as an empty object. Malformed JSON throws. */
+    private fun parse(body: String): JsonElement = if (body.isBlank()) JsonObject(emptyMap()) else json.parseToJsonElement(body)
+
+    private fun getJson(
+        url: HttpUrl,
+        connection: ServerConnection?,
+    ): JsonObject = parse(getText(url, connection)) as? JsonObject ?: JsonObject(emptyMap())
+
+    private fun getText(
+        url: HttpUrl,
+        connection: ServerConnection?,
+    ): String = call(serverRequest(url, connection).get().build())
+
+    private fun postJson(
+        url: HttpUrl,
+        body: JsonObject,
+        connection: ServerConnection?,
+    ): JsonObject {
+        val request = serverRequest(url, connection).post(body.toString().toRequestBody(JSON_TYPE)).build()
+        return parse(call(request)) as? JsonObject ?: JsonObject(emptyMap())
+    }
+
+    /** Runs [block]; any failure except cancellation gives [fallback]. */
+    private inline fun <T> quietly(
+        fallback: T,
+        block: () -> T,
+    ): T =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fallback
+        }
+
+    private inline fun <T> attempt(block: () -> T): Result<T> =
+        try {
+            Result.success(block())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+
+    private val ServerConnection.isPlex: Boolean get() = serverKind == ServerKind.PLEX
+
+    private fun String.isHttp(): Boolean = startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+
+    private fun lastPathPart(path: String): String = path.substringAfterLast('/').substringAfterLast('\\')
+
+    private data class Item(
+        val id: String,
+        val name: String,
+        val year: Int?,
+        val providerIds: Map<String, String>,
+        val sectionId: String,
+        val index: Int?,
+        val parentIndex: Int?,
+        val media: List<Media>,
+    ) {
+        val candidate: CandidateInfo get() = CandidateInfo(name, year, providerIds)
+    }
+
+    /** One playable version (Emby media source, or Plex media + part). */
+    private data class Media(
+        val id: String,
+        val key: String,
+        val name: String,
+        val path: String,
+        val container: String,
+        val etag: String,
+        val size: Long,
+        val remote: Boolean,
+        val runTimeTicks: Long,
+        val width: Int,
+        val height: Int,
+        val videoCodec: String,
+        val videoProfile: String,
+        val bitDepth: Int,
+        val audioCodec: String,
+        val audioProfile: String,
+        val audioLabel: String,
+        val hdr: String,
+        val mediaIndex: Int,
+        val partIndex: Int,
+        val variantKey: String,
+    ) {
+        val identity: String
+            get() =
+                variantKey.ifBlank { id }.ifBlank { key }.ifBlank { path }.ifBlank { "$container|$size|$width|$height" }
+
+        /** MKV with 10-bit HEVC or HE-AAC, which the Android player can stall on. */
+        val needsCompatibleStream: Boolean
+            get() {
+                val box = container.lowercase()
+                if (box != "mkv" && box != "matroska") return false
+                val profile = videoProfile.lowercase()
+                val hevc10 =
+                    videoCodec.lowercase() in setOf("hevc", "h265", "h.265") &&
+                        (bitDepth >= 10 || "main 10" in profile || "main10" in profile)
+                val heAac = audioCodec.lowercase() == "aac" && audioProfile.lowercase().let { "he" in it || "sbr" in it }
+                return hevc10 || heAac
+            }
+    }
+
+    private data class PlexAddress(
+        val uri: String,
+        val local: Boolean,
+        val relay: Boolean,
+    )
+
+    private data class PlexDevice(
+        val name: String,
+        val clientId: String,
+        val accessToken: String,
+        val owned: Boolean,
+        val addresses: List<PlexAddress>,
+    )
 
     companion object {
+        private const val PLEX_TV = "https://plex.tv/api/v2"
         private const val EMBY_CONNECT = "https://connect.emby.media/service"
+        private const val PLEX_USER = "plex"
+        private const val ID_MATCH = 900
+        private const val MOVIE = "Movie"
+        private const val SERIES = "Series"
+        private const val EPISODE = "Episode"
         private const val ITEM_FIELDS = "ProviderIds,MediaSources,MediaStreams,Path,PremiereDate,ProductionYear"
+        private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
+        private val unsafeIdChars = Regex("[^A-Za-z0-9:._-]+")
 
+        /** Stored with each connection and used to spot duplicates: the format must never change. */
         fun connectionId(
             serverUrl: String,
             kind: ServerKind,
             user: String,
-        ): String =
-            "${kind.name}:${serverUrl.trimEnd('/').lowercase(Locale.US)}:${user.lowercase(Locale.US)}"
-                .replace(Regex("[^a-z0-9:._-]+", RegexOption.IGNORE_CASE), "_")
+        ): String = "${kind.name}:${serverUrl.trimEnd('/').lowercase()}:${user.lowercase()}".replace(unsafeIdChars, "_")
     }
 }

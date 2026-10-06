@@ -44,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -107,6 +108,8 @@ fun WelcomeServerFlow(
     modifier: Modifier = Modifier,
 ) {
     var intro by rememberSaveable { mutableStateOf(true) }
+    val context = LocalContext.current
+    val hook = remember { context.welcomeHook() }
     Box(modifier.fillMaxSize()) {
         WelcomeBackdrop(emptyList())
         AnimatedContent(
@@ -114,13 +117,18 @@ fun WelcomeServerFlow(
             transitionSpec = { (fadeIn(tween(700, delayMillis = 200)) + slideInHorizontally(tween(700, easing = CinemaEase)) { it / 8 }) togetherWith fadeOut(tween(400)) },
             label = "welcome",
         ) { showIntro ->
-            if (showIntro) Intro(onStart = { intro = false }) else ServerStep(found, connecting, error, onPick, onAddress, onSearchAgain, onBack = { intro = true })
+            if (showIntro) {
+                Intro(onStart = { returning ->
+                    hook.profileSync.welcomeReturning = returning
+                    intro = false
+                })
+            } else ServerStep(found, connecting, error, onPick, onAddress, onSearchAgain, onBack = { intro = true })
         }
     }
 }
 
 @Composable
-private fun Intro(onStart: () -> Unit) {
+private fun Intro(onStart: (returning: Boolean) -> Unit) {
     val letters = "ORCA"
     val reveal = remember { letters.map { Animatable(0f) } }
     val plus = remember { Animatable(0f) }
@@ -179,8 +187,12 @@ private fun Intro(onStart: () -> Unit) {
             Text("Every library you love. One beautiful home.", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(10.dp))
             Text("STARTS WITH YOUR JELLYFIN OR SILO SERVER  ·  ADD EMBY, PLEX AND MORE", color = InkDim, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
-            Spacer(Modifier.height(40.dp))
-            PillButton("Get started", modifier = Modifier.focusRequester(start), onClick = onStart)
+            Spacer(Modifier.height(36.dp))
+            // Two doors: a guided setup, or bringing a saved setup back with the sync PIN
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                ChoiceCard("I'm new to Orca+", "A quick tour sets up your server, look and pages", "+", Violet, modifier = Modifier.width(400.dp).focusRequester(start)) { onStart(false) }
+                ChoiceCard("I have an Orca+ account", "Sign in, enter your sync PIN, and it's all back", "↺", Rose, modifier = Modifier.width(400.dp)) { onStart(true) }
+            }
         }
     }
 }
@@ -222,11 +234,21 @@ private fun ServerStep(
         searching = false
     }
     LaunchedEffect(typing) { runCatching { if (typing) field.requestFocus() else firstCard.requestFocus() } }
+    // A server found after the screen opened takes the focus, unless the remote has been used
+    var touched by remember { mutableStateOf(false) }
+    LaunchedEffect(found.isNotEmpty()) { if (found.isNotEmpty() && !typing && !touched) runCatching { firstCard.requestFocus() } }
 
-    Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp).onPreviewKeyEvent {
+            touched = true
+            false
+        },
+        horizontalArrangement = Arrangement.spacedBy(56.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(0.42f), verticalArrangement = Arrangement.spacedBy(22.dp)) {
             StepHeader(
-                "STEP 1 OF 3",
+                "SIGN IN  ·  1 OF 2",
                 "Connect your main server",
                 "Orca+ runs on one main server. Pick it below, or type its address. Your other servers come next.",
             )
@@ -274,7 +296,7 @@ private fun ServerStep(
                     val kind = wrongKind
                     if (kind != null) {
                         Text("That's ${if (kind == ServerKind.PLEX) "a Plex" else "an Emby"} server", color = Color(0xFFFFC46B), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                        Text("Your main server needs to be Jellyfin or Silo. Connect that here, then add your ${if (kind == ServerKind.PLEX) "Plex" else "Emby"} server in step 3.", color = InkDim, fontSize = 13.sp, lineHeight = 18.sp)
+                        Text("Your main server needs to be Jellyfin or Silo. Connect that here, then add your ${if (kind == ServerKind.PLEX) "Plex" else "Emby"} server once you're signed in.", color = InkDim, fontSize = 13.sp, lineHeight = 18.sp)
                     } else {
                         Text("Couldn't connect to that server", color = Color(0xFFFF8A80), fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Text("Check the address and that the server is switched on. Orca+ tried it with and without https and the usual ports.", color = InkDim, fontSize = 13.sp, lineHeight = 18.sp)
@@ -304,6 +326,10 @@ fun WelcomeSignIn(
     onPassword: (user: String, password: String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Over the headline: the first run's step, or a plain "SIGN IN" when signing in again. */
+    eyebrow: String = "SIGN IN  ·  2 OF 2",
+    /** A user picked from the list (a user already signed in on this TV can switch straight in). */
+    onPickUser: (String) -> Unit = {},
 ) {
     var username by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
@@ -315,7 +341,8 @@ fun WelcomeSignIn(
     LaunchedEffect(Unit) { softKeyboard?.hide() }
     LaunchedEffect(Unit) {
         delay(300)
-        runCatching { if (users.isEmpty()) userField.requestFocus() }
+        // The first listed user, or the username box when the server lists none
+        runCatching { userField.requestFocus() }
         // Focusing a text box opens the keyboard on Android TV; keep it closed until OK is pressed
         delay(120)
         softKeyboard?.hide()
@@ -325,7 +352,7 @@ fun WelcomeSignIn(
         Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp), horizontalArrangement = Arrangement.spacedBy(48.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(0.42f), verticalArrangement = Arrangement.spacedBy(28.dp)) {
                 StepHeader(
-                    "STEP 2 OF 3",
+                    eyebrow,
                     "Sign in to ${serverName.ifBlank { "your server" }}",
                     if (quickEnabled) "Approve the code from your phone and Orca+ carries on by itself. Or sign in with your password." else "Sign in with your Jellyfin username and password.",
                 )
@@ -342,6 +369,7 @@ fun WelcomeSignIn(
                                 UserChip(u, selected = u.name == username, modifier = if (i == 0) Modifier.focusRequester(userField) else Modifier) {
                                     username = u.name
                                     runCatching { passField.requestFocus() }
+                                    onPickUser(u.name)
                                 }
                             }
                         }
@@ -392,12 +420,12 @@ private fun UserChip(
 
 @Composable
 private fun StepDotsAtBottom(current: Int) {
-    Box(Modifier.fillMaxSize().padding(bottom = 28.dp), contentAlignment = Alignment.BottomCenter) { StepDots(current, 3) }
+    Box(Modifier.fillMaxSize().padding(bottom = 28.dp), contentAlignment = Alignment.BottomCenter) { StepDots(current, 2) }
 }
 
 // ======================================================================== after sign-in
 
-private enum class FinishStep { LIBRARIES, EMBY_CHOOSE, EMBY, EMBY_PICK, EMBY_ADDRESS, PLEX, JELLYFIN_CHOOSE, SILO_CHOOSE, JELLYFIN, OTHER_ADDRESS, LOOK, OUTRO }
+private enum class FinishStep { CHECKING, RESTORE, NO_PROFILE, TAGS, PAGES, POWERUPS, SAVE, LIBRARIES, EMBY_CHOOSE, EMBY, EMBY_PICK, EMBY_ADDRESS, PLEX, JELLYFIN_CHOOSE, SILO_CHOOSE, JELLYFIN, OTHER_ADDRESS, LOOK, OUTRO }
 
 /**
  * Signed in: bring in other libraries (Emby Connect, Plex, more Jellyfin) and choose the look,
@@ -412,7 +440,25 @@ fun WelcomeFinish(
     val hook = remember { context.welcomeHook() }
     val scope = rememberCoroutineScope()
     val connections by hook.store.connections.collectAsState()
-    var step by rememberSaveable { mutableStateOf(FinishStep.LIBRARIES) }
+    val cinemaMode by hook.store.cinemaMode.collectAsState()
+    // Until a look is picked the tour counts Cinema's stops (it's the one offered first)
+    var lookPicked by rememberSaveable { mutableStateOf(false) }
+    val cinema = cinemaMode || !lookPicked
+    var step by rememberSaveable { mutableStateOf(FinishStep.CHECKING) }
+    // Whether the account already has a cloud profile (null: the cloud couldn't be asked)
+    var cloudHas by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(Unit) {
+        if (step != FinishStep.CHECKING) return@LaunchedEffect
+        // The default rows start loading now, so they're matched by the time the tour ends
+        hook.collections.refreshStale(hook)
+        cloudHas = kotlinx.coroutines.withTimeoutOrNull(8_000) { hook.profileSync.cloudHasProfile(hook) }
+        step =
+            when {
+                cloudHas == true && !hook.profileSync.status.value.on -> FinishStep.RESTORE
+                hook.profileSync.welcomeReturning -> FinishStep.NO_PROFILE
+                else -> FinishStep.LIBRARIES
+            }
+    }
     var posters by remember { mutableStateOf<List<String>>(emptyList()) }
     var message by remember { mutableStateOf<String?>(null) }
     var otherIsSilo by rememberSaveable { mutableStateOf(false) }
@@ -426,94 +472,140 @@ fun WelcomeFinish(
 
     Box(modifier.fillMaxSize()) {
         WelcomeBackdrop(posters)
-        BackHandler(enabled = step != FinishStep.LIBRARIES && step != FinishStep.OUTRO) {
+        // Back on the tour's first stop (and while checking or leaving) stays put: leaving the app
+        // mid-welcome would only start it again next time
+        BackHandler(enabled = step != FinishStep.OUTRO) {
             step =
                 when (step) {
+                    FinishStep.CHECKING, FinishStep.LIBRARIES -> step
+                    FinishStep.SAVE -> FinishStep.POWERUPS
+                    FinishStep.POWERUPS -> if (cinema) FinishStep.PAGES else FinishStep.LOOK
+                    FinishStep.PAGES -> if (hook.store.cinemaMode.value) FinishStep.TAGS else FinishStep.LOOK
+                    FinishStep.TAGS -> FinishStep.LOOK
+                    FinishStep.LOOK -> FinishStep.LIBRARIES
                     FinishStep.EMBY_PICK -> FinishStep.EMBY
                     FinishStep.EMBY, FinishStep.EMBY_ADDRESS -> FinishStep.EMBY_CHOOSE
                     FinishStep.JELLYFIN, FinishStep.OTHER_ADDRESS -> if (otherIsSilo) FinishStep.SILO_CHOOSE else FinishStep.JELLYFIN_CHOOSE
                     else -> FinishStep.LIBRARIES
                 }
         }
-        AnimatedContent(
-            targetState = step,
-            transitionSpec = { fadeIn(tween(500, delayMillis = 120, easing = CinemaEase)) togetherWith fadeOut(tween(250)) },
-            label = "finish",
-        ) { s ->
-            when (s) {
-                FinishStep.LIBRARIES -> LibrariesStep(connections, message, onPick = { step = it }, onNext = { step = FinishStep.LOOK })
-                FinishStep.EMBY_CHOOSE ->
-                    ChooseStep(
-                        "Add your Emby server",
-                        "Use your Emby Connect account to pick from your servers, or enter one server's details yourself.",
-                        codeTitle = "Emby Connect",
-                        codeSubtitle = "Enter a code at emby.media/pin on your phone, then pick your servers",
-                        glyph = "E",
-                        accent = Color(0xFF52B54B),
-                        onCode = { step = FinishStep.EMBY },
-                        onAddress = { step = FinishStep.EMBY_ADDRESS },
-                        onCancel = { step = FinishStep.LIBRARIES },
-                    )
-                FinishStep.JELLYFIN_CHOOSE, FinishStep.SILO_CHOOSE -> {
-                    val silo = s == FinishStep.SILO_CHOOSE
-                    otherIsSilo = silo
-                    ChooseStep(
-                        if (silo) "Add a Silo server" else "Add a Jellyfin server",
-                        if (silo) "Silo works like Jellyfin. Sign in with its address and your account, or approve a Quick Connect code if the server has it on." else "Approve a Quick Connect code from your phone, or sign in with the server's address and your account.",
-                        codeTitle = "Quick Connect",
-                        codeSubtitle = "Type the address, then approve a code on your phone",
-                        glyph = if (silo) "S" else "J",
-                        accent = if (silo) Color(0xFF3D8BD8) else Violet,
-                        onCode = { step = FinishStep.JELLYFIN },
-                        onAddress = { step = FinishStep.OTHER_ADDRESS },
-                        onCancel = { step = FinishStep.LIBRARIES },
-                        addressFirst = silo,
-                    )
+        val stops = if (cinema) TourStop.entries.toList() else TourStop.entries - TourStop.TAGS - TourStop.PAGES
+        androidx.compose.runtime.CompositionLocalProvider(LocalTourStops provides stops) {
+            AnimatedContent(
+                targetState = step,
+                transitionSpec = { fadeIn(tween(500, delayMillis = 120, easing = CinemaEase)) togetherWith fadeOut(tween(250)) },
+                label = "finish",
+            ) { s ->
+                when (s) {
+                    FinishStep.CHECKING ->
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("One moment…", color = InkDim, fontSize = 18.sp) }
+                    // The account has a cloud profile: the PIN brings everything, so the rest is skipped
+                    FinishStep.RESTORE ->
+                        com.wholphinplus.sources.ui.CloudPinFlow(
+                            hook,
+                            exists = true,
+                            onDone = { step = FinishStep.OUTRO },
+                            onSkip = {
+                                hook.profileSync.markPrompted()
+                                step = FinishStep.LIBRARIES
+                            },
+                            skipLabel = "Start fresh instead",
+                            // Picked "I'm new", but this account already saved a setup from another TV
+                            greeting = if (hook.profileSync.welcomeReturning) null else "You already have a setup",
+                            modifier = Modifier.fillMaxSize().background(Stage.copy(alpha = 0.82f)),
+                        )
+                    FinishStep.NO_PROFILE -> NoProfileStep(offline = cloudHas == null, onNew = { step = FinishStep.LIBRARIES })
+                    FinishStep.TAGS -> TagsStep(hook, onNext = { step = FinishStep.PAGES })
+                    FinishStep.PAGES -> PagesStep(hook, onNext = { step = FinishStep.POWERUPS })
+                    FinishStep.POWERUPS -> PowerUpsStep(hook, onNext = { step = if (cloudHas == false && !hook.profileSync.status.value.on) FinishStep.SAVE else FinishStep.OUTRO })
+                    FinishStep.SAVE ->
+                        com.wholphinplus.sources.ui.CloudPinFlow(
+                            hook,
+                            exists = false,
+                            onDone = { step = FinishStep.OUTRO },
+                            onSkip = {
+                                hook.profileSync.markPrompted()
+                                step = FinishStep.OUTRO
+                            },
+                            skipLabel = "Skip for now",
+                            modifier = Modifier.fillMaxSize().background(Stage.copy(alpha = 0.82f)),
+                        )
+                    FinishStep.LIBRARIES -> LibrariesStep(connections, message, onPick = { step = it }, onNext = { step = FinishStep.LOOK })
+                    FinishStep.EMBY_CHOOSE ->
+                        ChooseStep(
+                            "Add your Emby server",
+                            "Use your Emby Connect account to pick from your servers, or enter one server's details yourself.",
+                            codeTitle = "Emby Connect",
+                            codeSubtitle = "Enter a code at emby.media/pin on your phone, then pick your servers",
+                            glyph = "E",
+                            accent = Color(0xFF52B54B),
+                            onCode = { step = FinishStep.EMBY },
+                            onAddress = { step = FinishStep.EMBY_ADDRESS },
+                            onCancel = { step = FinishStep.LIBRARIES },
+                        )
+                    FinishStep.JELLYFIN_CHOOSE, FinishStep.SILO_CHOOSE -> {
+                        val silo = s == FinishStep.SILO_CHOOSE
+                        otherIsSilo = silo
+                        ChooseStep(
+                            if (silo) "Add a Silo server" else "Add a Jellyfin server",
+                            if (silo) "Silo works like Jellyfin. Sign in with its address and your account, or approve a Quick Connect code if the server has it on." else "Approve a Quick Connect code from your phone, or sign in with the server's address and your account.",
+                            codeTitle = "Quick Connect",
+                            codeSubtitle = "Type the address, then approve a code on your phone",
+                            glyph = if (silo) "S" else "J",
+                            accent = if (silo) Color(0xFF3D8BD8) else Violet,
+                            onCode = { step = FinishStep.JELLYFIN },
+                            onAddress = { step = FinishStep.OTHER_ADDRESS },
+                            onCancel = { step = FinishStep.LIBRARIES },
+                            addressFirst = silo,
+                        )
+                    }
+                    FinishStep.OTHER_ADDRESS ->
+                        AddressStep(
+                            title = if (otherIsSilo) "Your Silo server" else "Your Jellyfin server",
+                            example = if (otherIsSilo) "silo.example.com" else "10.0.0.20:8096",
+                            defaultKind = ServerKind.JELLYFIN,
+                            onConnected = {
+                                save(it)
+                                step = FinishStep.LIBRARIES
+                            },
+                            onCancel = { step = if (otherIsSilo) FinishStep.SILO_CHOOSE else FinishStep.JELLYFIN_CHOOSE },
+                        )
+                    FinishStep.EMBY -> EmbyStep(onAccount = { step = FinishStep.EMBY_PICK }, onCancel = { step = FinishStep.EMBY_CHOOSE }, onError = { message = it })
+                    FinishStep.EMBY_ADDRESS -> AddressStep(title = "Your Emby server", example = "10.0.0.30:8096", defaultKind = ServerKind.EMBY, onConnected = {
+                        save(it)
+                        step = FinishStep.LIBRARIES
+                    }, onCancel = { step = FinishStep.EMBY_CHOOSE })
+                    FinishStep.EMBY_PICK -> EmbyPickStep(onAdded = {
+                        it.forEach(::save)
+                        step = FinishStep.LIBRARIES
+                    }, onCancel = { step = FinishStep.LIBRARIES })
+                    FinishStep.PLEX ->
+                        CodeStep(
+                            title = "Sign in to Plex",
+                            start = { hook.client.startPlexPin("") },
+                            poll = { hook.client.pollPlexPin(it, "") },
+                            where = "On your phone or computer go to plex.tv/link and enter this code.",
+                            onConnected = {
+                                save(it)
+                                step = FinishStep.LIBRARIES
+                            },
+                            onCancel = { step = FinishStep.LIBRARIES },
+                        )
+                    FinishStep.JELLYFIN -> JellyfinStep(silo = otherIsSilo, onConnected = {
+                        save(it)
+                        step = FinishStep.LIBRARIES
+                    }, onCancel = { step = if (otherIsSilo) FinishStep.SILO_CHOOSE else FinishStep.JELLYFIN_CHOOSE })
+                    FinishStep.LOOK -> LookStep(onChoose = { cinema ->
+                        hook.store.setCinemaMode(cinema)
+                        lookPicked = true
+                        // Cinema shows poster tags and its pages; both looks then see power-ups
+                        step = if (cinema) FinishStep.TAGS else FinishStep.POWERUPS
+                    })
+                    FinishStep.OUTRO -> Outro(onFinished = {
+                        hook.store.setOnboarding(Onboarding.DONE)
+                        onDone()
+                    })
                 }
-                FinishStep.OTHER_ADDRESS ->
-                    AddressStep(
-                        title = if (otherIsSilo) "Your Silo server" else "Your Jellyfin server",
-                        example = if (otherIsSilo) "silo.example.com" else "10.0.0.20:8096",
-                        defaultKind = ServerKind.JELLYFIN,
-                        onConnected = {
-                            save(it)
-                            step = FinishStep.LIBRARIES
-                        },
-                        onCancel = { step = if (otherIsSilo) FinishStep.SILO_CHOOSE else FinishStep.JELLYFIN_CHOOSE },
-                    )
-                FinishStep.EMBY -> EmbyStep(onAccount = { step = FinishStep.EMBY_PICK }, onCancel = { step = FinishStep.EMBY_CHOOSE }, onError = { message = it })
-                FinishStep.EMBY_ADDRESS -> AddressStep(title = "Your Emby server", example = "10.0.0.30:8096", defaultKind = ServerKind.EMBY, onConnected = {
-                    save(it)
-                    step = FinishStep.LIBRARIES
-                }, onCancel = { step = FinishStep.EMBY_CHOOSE })
-                FinishStep.EMBY_PICK -> EmbyPickStep(onAdded = {
-                    it.forEach(::save)
-                    step = FinishStep.LIBRARIES
-                }, onCancel = { step = FinishStep.LIBRARIES })
-                FinishStep.PLEX ->
-                    CodeStep(
-                        title = "Sign in to Plex",
-                        start = { hook.client.startPlexPin("") },
-                        poll = { hook.client.pollPlexPin(it, "") },
-                        where = "On your phone or computer go to plex.tv/link and enter this code.",
-                        onConnected = {
-                            save(it)
-                            step = FinishStep.LIBRARIES
-                        },
-                        onCancel = { step = FinishStep.LIBRARIES },
-                    )
-                FinishStep.JELLYFIN -> JellyfinStep(onConnected = {
-                    save(it)
-                    step = FinishStep.LIBRARIES
-                }, onCancel = { step = if (otherIsSilo) FinishStep.SILO_CHOOSE else FinishStep.JELLYFIN_CHOOSE })
-                FinishStep.LOOK -> LookStep(onChoose = { cinema ->
-                    hook.store.setCinemaMode(cinema)
-                    step = FinishStep.OUTRO
-                })
-                FinishStep.OUTRO -> Outro(onFinished = {
-                    hook.store.setOnboarding(Onboarding.DONE)
-                    onDone()
-                })
             }
         }
     }
@@ -526,26 +618,28 @@ private fun LibrariesStep(
     onPick: (FinishStep) -> Unit,
     onNext: () -> Unit,
 ) {
+    // Most people have one server: Skip is where the remote starts
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
     fun added(kind: ServerKind) = connections.count { it.serverKind == kind }
     Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
         StepHeader(
-            "STEP 3 OF 3  ·  OPTIONAL",
+            tourStep(TourStop.SERVERS, "OPTIONAL"),
             "Add more servers",
             "You're in. Add Emby, Plex, or another Jellyfin or Silo server, and Orca+ finds every title wherever it lives: press Play and pick the best copy. You can do this later in Settings too.",
             Modifier.weight(0.42f),
         )
         GlassPanel(Modifier.weight(0.58f)) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                ChoiceCard("Emby", "Emby Connect, or address and sign-in", "E", Color(0xFF52B54B), modifier = Modifier.focusRequester(first), compact = true, trailing = if (added(ServerKind.EMBY) > 0) "${added(ServerKind.EMBY)} added ✓" else "›") { onPick(FinishStep.EMBY_CHOOSE) }
+                ChoiceCard("Emby", "Emby Connect, or address and sign-in", "E", Color(0xFF52B54B), compact = true, trailing = if (added(ServerKind.EMBY) > 0) "${added(ServerKind.EMBY)} added ✓" else "›") { onPick(FinishStep.EMBY_CHOOSE) }
                 ChoiceCard("Plex", "A code at plex.tv/link, nothing to type", "P", Color(0xFFE5A00D), compact = true, trailing = if (added(ServerKind.PLEX) > 0) "${added(ServerKind.PLEX)} added ✓" else "›") { onPick(FinishStep.PLEX) }
-                ChoiceCard("Jellyfin", "A Quick Connect code, or address and sign-in", "J", Violet, compact = true, trailing = "›") { onPick(FinishStep.JELLYFIN_CHOOSE) }
+                // Extra Jellyfin and Silo servers count together (Silo speaks Jellyfin's API)
+                ChoiceCard("Jellyfin", "Quick Connect, or address and sign-in", "J", Violet, compact = true, trailing = if (added(ServerKind.JELLYFIN) > 0) "${added(ServerKind.JELLYFIN)} added ✓" else "›") { onPick(FinishStep.JELLYFIN_CHOOSE) }
                 ChoiceCard("Silo", "Address and sign-in, or a Quick Connect code", "S", Color(0xFF3D8BD8), compact = true, trailing = "›") { onPick(FinishStep.SILO_CHOOSE) }
                 message?.let { Text(it, color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
                 Spacer(Modifier.height(4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PillButton(if (connections.isEmpty()) "Skip for now" else "Continue", onClick = onNext)
+                    PillButton(if (connections.isEmpty()) "Skip for now" else "Continue", modifier = Modifier.focusRequester(first), onClick = onNext)
                 }
             }
         }
@@ -572,9 +666,10 @@ private fun <T> CodeStep(
             login = l
             val deadline = System.currentTimeMillis() + 10 * 60_000L
             while (System.currentTimeMillis() < deadline) {
-                delay(l.intervalSeconds * 1000L)
+                delay(l.intervalSeconds.coerceAtLeast(2) * 1000L)
                 val result = withContext(Dispatchers.IO) { runCatching { poll(l) } }
-                result.exceptionOrNull()?.let { if (it is CancellationException) throw it else error = it.message }
+                // A blip shows while it lasts; the next good answer clears it
+                error = result.exceptionOrNull()?.let { if (it is CancellationException) throw it else it.message }
                 result.getOrNull()?.let {
                     onConnected(it)
                     return@LaunchedEffect
@@ -786,6 +881,7 @@ private fun AddressStep(
 private fun JellyfinStep(
     onConnected: (ServerConnection) -> Unit,
     onCancel: () -> Unit,
+    silo: Boolean = false,
 ) {
     val hook = LocalContext.current.welcomeHook()
     var address by rememberSaveable { mutableStateOf("") }
@@ -805,7 +901,7 @@ private fun JellyfinStep(
         return
     }
     Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
-        StepHeader("ADD A SERVER", "Another Jellyfin server", "Type its address, then approve the code Orca+ shows you.", Modifier.weight(0.42f))
+        StepHeader("ADD A SERVER", if (silo) "Another Silo server" else "Another Jellyfin server", "Type its address, then approve the code Orca+ shows you.", Modifier.weight(0.42f))
         GlassPanel(Modifier.weight(0.58f)) {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 WelcomeField(address, { address = it }, "Server address", keyboard = KeyboardType.Uri, imeAction = ImeAction.Go, focusRequester = field, onDone = { if (address.isNotBlank()) go = address.trim() })
@@ -824,11 +920,11 @@ private fun LookStep(onChoose: (Boolean) -> Unit) {
     var cinema by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) { runCatching { cinemaCard.requestFocus() } }
     Column(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 32.dp), verticalArrangement = Arrangement.Center) {
-        StepHeader("MAKE IT YOURS", "Pick your home screen", "Cinema is the big-screen look with a featured billboard. Classic is Wholphin's familiar home. Switch any time in Settings.")
+        StepHeader(tourStep(TourStop.LOOK), "Pick your home screen", "Cinema is the big-screen look with a featured billboard. Classic is the familiar home with a side menu. Switch any time in Settings.")
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
             LookCard("Cinema", "Billboard, tall rows, title art", selected = cinema, modifier = Modifier.width(360.dp).focusRequester(cinemaCard), onFocus = { cinema = true }, onClick = { onChoose(true) }) { CinemaPreview() }
-            LookCard("Classic", "Wholphin's home with a side menu", selected = !cinema, modifier = Modifier.width(360.dp), onFocus = { cinema = false }, onClick = { onChoose(false) }) { ClassicPreview() }
+            LookCard("Classic", "The familiar home with a side menu", selected = !cinema, modifier = Modifier.width(360.dp), onFocus = { cinema = false }, onClick = { onChoose(false) }) { ClassicPreview() }
         }
         Spacer(Modifier.height(12.dp))
         Text("Press OK to start watching", color = InkDim, fontSize = 13.sp)
@@ -953,6 +1049,69 @@ private fun RoleRow(
                     Box(Modifier.size(7.dp).clip(CircleShape).background(colour))
                     Spacer(Modifier.width(5.dp))
                     Text(name, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+
+/** A saved server on the "pick a server" screen. [reachable]: null while it's being checked. */
+data class SavedServer(
+    val key: String,
+    val name: String,
+    val address: String,
+    val reachable: Boolean?,
+)
+
+/**
+ * Signing in again (the sign-in ran out, or "Change server"): the saved servers in the welcome's
+ * look, and a way to add another. [onPick] opens a server's sign-in; [onAdd] starts adding one.
+ */
+@Composable
+fun WelcomeServerChoice(
+    servers: List<SavedServer>,
+    onPick: (SavedServer) -> Unit,
+    onAdd: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val first = remember { FocusRequester() }
+    LaunchedEffect(servers.isNotEmpty()) { runCatching { first.requestFocus() } }
+    Box(modifier.fillMaxSize()) {
+        WelcomeBackdrop(emptyList())
+        Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
+            StepHeader(
+                "SIGN IN",
+                "Pick your server",
+                "Pick the server to sign in to. Your Orca+ setup, rows and settings stay as they are.",
+                Modifier.weight(0.42f),
+            )
+            GlassPanel(Modifier.weight(0.58f)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    servers.forEachIndexed { i, sv ->
+                        ChoiceCard(
+                            title = sv.name.ifBlank { "Jellyfin server" },
+                            subtitle = sv.address,
+                            glyph = sv.name.firstOrNull()?.uppercase() ?: "J",
+                            accent = Violet,
+                            trailing =
+                                when (sv.reachable) {
+                                    null -> "Checking…"
+                                    true -> "›"
+                                    false -> "Can't reach it · try again"
+                                },
+                            modifier = if (i == 0) Modifier.focusRequester(first) else Modifier,
+                            onClick = { onPick(sv) },
+                        )
+                    }
+                    ChoiceCard(
+                        title = "Add a server",
+                        subtitle = "Another Jellyfin or Silo server, by address",
+                        glyph = "+",
+                        accent = Indigo,
+                        modifier = if (servers.isEmpty()) Modifier.focusRequester(first) else Modifier,
+                        onClick = onAdd,
+                    )
                 }
             }
         }

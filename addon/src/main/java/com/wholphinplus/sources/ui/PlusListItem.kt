@@ -40,3 +40,16 @@ internal fun PlusListItem(
         modifier = modifier,
     )
 }
+
+/** Switch colours for Orca+ settings rows: the red track the app's own switches use with the Cinema home (Classic: the default). */
+@Composable
+internal fun plusSwitchColors(): androidx.tv.material3.SwitchColors =
+    if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
+        androidx.tv.material3.SwitchDefaults.colors(
+            checkedThumbColor = Color.White,
+            checkedTrackColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
+            checkedBorderColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
+        )
+    } else {
+        androidx.tv.material3.SwitchDefaults.colors()
+    }

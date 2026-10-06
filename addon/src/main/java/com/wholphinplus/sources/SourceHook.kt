@@ -35,6 +35,7 @@ import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaStreamType
 import org.jellyfin.sdk.model.api.VideoRangeType
+import org.jellyfin.sdk.api.client.extensions.systemApi
 import timber.log.Timber
 import java.security.MessageDigest
 import java.util.UUID
@@ -56,10 +57,39 @@ class SourceHook
         val store: ConnectionStore,
         internal val overlay: ProgressOverlay,
         val collections: HomeCollections,
+        val profileSync: com.wholphinplus.sources.sync.ProfileSync,
     ) {
         init {
             // Cinema mode gives memory back when Android asks (see MemoryTrim)
             context.registerComponentCallbacks(com.wholphinplus.sources.cinema.MemoryTrim(context))
+            // Leaving the app (Home button, sleep): upload what changed to the cloud profile
+            context.registerComponentCallbacks(
+                object : android.content.ComponentCallbacks2 {
+                    override fun onTrimMemory(level: Int) {
+                        if (level == android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) profileSync.syncSoon(this@SourceHook, force = true)
+                    }
+
+                    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {}
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onLowMemory() {}
+                },
+            )
+        }
+
+        @Volatile private var serverIdFor: Pair<String, String>? = null
+
+        /** The main Jellyfin server's own id (the cloud profile is keyed by it), remembered per address. */
+        internal suspend fun mainServerId(): String? {
+            val url = jellyfin.baseUrl ?: return null
+            serverIdFor?.takeIf { it.first == url }?.let { return it.second }
+            return kotlinx.coroutines.withContext(Dispatchers.IO) {
+                runCatching { jellyfin.systemApi.getPublicSystemInfo().content.id }
+                    .onFailure { Timber.w(it, "Cannot read the main server's id") }
+                    .getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.also { serverIdFor = url to it }
+            }
         }
 
         val client: ServerClient by lazy {
@@ -93,8 +123,9 @@ class SourceHook
 
         /** Bring progress from the extra servers into the main one. Cheap to call often (throttled). */
         suspend fun syncWatchState() {
-            // Home is loading: refresh Trakt/MDBList collections older than 6 h in the background
-            if (collections.lists.value.isNotEmpty()) collections.refreshStale(this)
+            // Home is loading: fetch the Orca+ charts and refresh lists older than 6 h in the
+            // background (also with no lists yet: an install that skipped the welcome has none)
+            collections.refreshStale(this)
             if (store.connections.value.any { it.isUsable }) watchSync.syncIfStale()
         }
 
@@ -106,6 +137,7 @@ class SourceHook
          */
         fun syncWatchStateLater() {
             background.launch { runCatching { syncWatchState() }.onFailure { Timber.w(it, "Background watch sync failed") } }
+            profileSync.syncSoon(this)
         }
 
         /**
@@ -114,7 +146,7 @@ class SourceHook
          */
         val homeRows: kotlinx.coroutines.flow.Flow<List<HomeRow>> =
             collections.lists.map { list ->
-                list.filter { it.showOnHome && it.name != HomeCollections.PENDING_NAME }.map { c ->
+                list.filter { it.showOnHome && it.name != HomeCollections.PENDING_NAME && collections.enough(it) }.map { c ->
                     HomeRow(c.name, org.jellyfin.sdk.model.api.request.GetItemsRequest(tags = listOf(c.tag), recursive = true))
                 }
             }

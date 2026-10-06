@@ -33,6 +33,9 @@ class ConnectionStore
         @Volatile private var secretKey: SecretKey? = null
 
         private val json = Json { ignoreUnknownKeys = true }
+
+        // Poster tags and scores keep every value, so a later change of default can't move them
+        private val fullJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
         private val _connections = MutableStateFlow(load())
         val connections: StateFlow<List<ServerConnection>> = _connections.asStateFlow()
 
@@ -74,7 +77,7 @@ class ConnectionStore
 
         private val _overlays =
             MutableStateFlow(
-                runCatching { json.decodeFromString<com.wholphinplus.sources.cinema.PosterOverlays>(prefs.getString(OVERLAYS_KEY, null) ?: "") }
+                runCatching { com.wholphinplus.sources.cinema.PosterOverlays.fromSaved(json, prefs.getString(OVERLAYS_KEY, null)!!) }
                     .getOrDefault(com.wholphinplus.sources.cinema.PosterOverlays()),
             )
 
@@ -82,8 +85,53 @@ class ConnectionStore
         val overlays: StateFlow<com.wholphinplus.sources.cinema.PosterOverlays> = _overlays.asStateFlow()
 
         fun setOverlays(o: com.wholphinplus.sources.cinema.PosterOverlays) {
-            prefs.edit().putString(OVERLAYS_KEY, json.encodeToString(o)).apply()
+            prefs.edit().putString(OVERLAYS_KEY, fullJson.encodeToString(o)).apply()
             _overlays.value = o
+        }
+
+        private val _ratingPrefs =
+            MutableStateFlow(
+                runCatching { com.wholphinplus.sources.cinema.RatingPrefs.fromSaved(json, prefs.getString(RATINGS_KEY, null)!!) }
+                    .getOrDefault(com.wholphinplus.sources.cinema.RatingPrefs()),
+            )
+
+        /** Which review scores Cinema mode shows (Settings → Orca+ → Ratings), and where. */
+        val ratingPrefs: StateFlow<com.wholphinplus.sources.cinema.RatingPrefs> = _ratingPrefs.asStateFlow()
+
+        fun setRatingPrefs(r: com.wholphinplus.sources.cinema.RatingPrefs) {
+            prefs.edit().putString(RATINGS_KEY, fullJson.encodeToString(r)).apply()
+            _ratingPrefs.value = r
+        }
+
+        private fun layoutKey(page: com.wholphinplus.sources.cinema.RowsPage) =
+            if (page == com.wholphinplus.sources.cinema.RowsPage.HOME) HOME_LAYOUT_KEY else HOME_LAYOUT_KEY + "_" + page.name.lowercase()
+
+        private val _pageLayouts =
+            MutableStateFlow(
+                com.wholphinplus.sources.cinema.RowsPage.entries.mapNotNull { page ->
+                    runCatching { prefs.getString(layoutKey(page), null)?.let { page to json.decodeFromString<com.wholphinplus.sources.cinema.HomeLayout>(it) } }.getOrNull()
+                }.toMap(),
+            )
+
+        /** Each Cinema page's rows as you arranged them; a page that's missing uses its defaults. */
+        val pageLayouts: StateFlow<Map<com.wholphinplus.sources.cinema.RowsPage, com.wholphinplus.sources.cinema.HomeLayout>> = _pageLayouts.asStateFlow()
+
+        fun setPageLayout(
+            page: com.wholphinplus.sources.cinema.RowsPage,
+            layout: com.wholphinplus.sources.cinema.HomeLayout?,
+        ) {
+            prefs.edit().apply { if (layout == null) remove(layoutKey(page)) else putString(layoutKey(page), json.encodeToString(layout)) }.apply()
+            _pageLayouts.value = if (layout == null) _pageLayouts.value - page else _pageLayouts.value + (page to layout)
+        }
+
+        private val _mdblistKey = MutableStateFlow(decrypt(prefs.getString(MDBLIST_KEY, "").orEmpty()))
+
+        /** The user's MDBList API key: IMDb, Rotten Tomatoes, Metacritic, Letterboxd and Trakt scores. */
+        val mdblistKey: StateFlow<String> = _mdblistKey.asStateFlow()
+
+        fun setMdblistKey(key: String) {
+            prefs.edit().putString(MDBLIST_KEY, encrypt(key.trim())).apply()
+            _mdblistKey.value = key.trim()
         }
 
         /** The user's own TMDB API key, for smart search. Empty = Wholphin's normal search. */
@@ -132,6 +180,37 @@ class ConnectionStore
                 emptyList()
             }
 
+        /** Everything here that a cloud profile carries, tokens and keys in the clear. */
+        fun snapshot(): com.wholphinplus.sources.sync.OrcaSettings =
+            com.wholphinplus.sources.sync.OrcaSettings(
+                connections = _connections.value,
+                tmdbKey = _tmdbKey.value,
+                mdblistKey = _mdblistKey.value,
+                cinemaMode = _cinemaMode.value,
+                rollUp = _cinemaRollUp.value,
+                overlays = _overlays.value,
+                ratings = _ratingPrefs.value,
+                layouts = _pageLayouts.value,
+            )
+
+        /** A cloud profile's settings, through the usual setters so every screen follows. */
+        @Synchronized
+        fun restore(s: com.wholphinplus.sources.sync.OrcaSettings) {
+            if (s.connections != _connections.value) write(s.connections)
+            if (s.tmdbKey != _tmdbKey.value) setTmdbKey(s.tmdbKey)
+            if (s.mdblistKey != _mdblistKey.value) setMdblistKey(s.mdblistKey)
+            if (s.cinemaMode != _cinemaMode.value) setCinemaMode(s.cinemaMode)
+            if (s.rollUp != _cinemaRollUp.value) setCinemaRollUp(s.rollUp)
+            if (s.overlays != _overlays.value) setOverlays(s.overlays)
+            if (s.ratings != _ratingPrefs.value) setRatingPrefs(s.ratings)
+            com.wholphinplus.sources.cinema.RowsPage.entries.forEach { page -> if (s.layouts[page] != _pageLayouts.value[page]) setPageLayout(page, s.layouts[page]) }
+        }
+
+        /** Encrypts a small secret with this TV's Keystore key (the cloud profile's PIN seed). */
+        internal fun seal(plain: String): String = encrypt(plain)
+
+        internal fun unseal(stored: String): String = decrypt(stored)
+
         private fun key(): SecretKey = secretKey ?: synchronized(this) { secretKey ?: openKey().also { secretKey = it } }
 
         private fun openKey(): SecretKey {
@@ -178,6 +257,9 @@ class ConnectionStore
             const val ONBOARDING_KEY = "onboarding_stage"
 
             const val OVERLAYS_KEY = "poster_overlays"
+            const val RATINGS_KEY = "rating_prefs"
+            const val HOME_LAYOUT_KEY = "home_layout_v1"
+            const val MDBLIST_KEY = "mdblist_key_v1"
             const val ALIAS = "wholphinplus_sources_v1"
             const val PREFIX = "enc1:"
         }

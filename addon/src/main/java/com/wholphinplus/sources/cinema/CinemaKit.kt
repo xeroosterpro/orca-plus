@@ -82,7 +82,9 @@ internal val LocalArt = staticCompositionLocalOf<CinemaArt?> { null }
 internal fun rememberArt(item: CinemaItem?): TitleArt? {
     val art = LocalArt.current
     val tmdb = item?.tmdbId
-    return produceState(tmdb?.let { art?.cached(item.tmdbTv, it) }, item?.key) {
+    // Keyed on the TMDB id too: an episode's card can draw before its series' id is known (the
+    // first rows don't wait for it), and would otherwise never look its art up
+    return produceState(tmdb?.let { art?.cached(item.tmdbTv, it) }, item?.key, tmdb) {
         if (value == null && tmdb != null) value = art?.art(item.tmdbTv, tmdb)
     }.value
 }
@@ -312,3 +314,24 @@ internal fun Modifier.tapToClick(onClick: () -> Unit): Modifier =
 internal object TapHelper {
     fun Modifier.tap(onClick: () -> Unit): Modifier = tapToClick(onClick)
 }
+
+/**
+ * Wholphin's navigation pushes a page per call, so a quick double OK (or a held key) opened the
+ * same title page twice, or two players, and Back then showed it again. One push per press.
+ */
+internal object NavGuard {
+    private var last = 0L
+
+    fun allow(): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - last < WINDOW_MS) return false
+        last = now
+        return true
+    }
+
+    private const val WINDOW_MS = 800L
+}
+
+/** [f] behind [NavGuard], for a screen's onOpen and onPlay. */
+@Composable
+internal fun <A, B> guarded(f: (A, B) -> Unit): (A, B) -> Unit = remember(f) { { a, b -> if (NavGuard.allow()) f(a, b) } }

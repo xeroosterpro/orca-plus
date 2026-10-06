@@ -42,7 +42,20 @@ data class HomeCollection(
     val listSize: Int = 0,
     val refreshedAt: Long = 0L,
     val error: String? = null,
+    /** Orca+ charts: "movie", "series" or null (both). */
+    val kind: String? = null,
+    /** Orca+ charts: the Cinema pages it starts on (RowsPage names); null for your own lists. */
+    val pages: List<String>? = null,
+    /** Orca+ charts: their place on each page they start on (page name → position). */
+    val order: Map<String, Int>? = null,
+    /** Orca+ charts shown only on a Services or Genres page, never offered as a row of their own. */
+    val hidden: Boolean = false,
+    /** Each of [itemIds]' place in the list (1 = first), so a Top 10 keeps its real numbers. */
+    val ranks: List<Int> = emptyList(),
 ) {
+    /** Main-server item id (dashes or not) → its place in the list; empty for rows saved before ranks. */
+    fun rankById(): Map<String, Int> = if (ranks.size != itemIds.size) emptyMap() else itemIds.zip(ranks).associate { (id, r) -> id.replace("-", "").lowercase() to r }
+
     /** Jellyfin "tag" put on this row's request; the [ProgressOverlay] swaps it for [itemIds]. */
     val tag: String get() = TAG_PREFIX + id
 
@@ -85,6 +98,145 @@ class HomeCollections
         fun setTraktClientId(id: String) {
             prefs.edit().putString(TRAKT_KEY, id.trim()).apply()
             _traktClientId.value = id.trim()
+        }
+
+        private val _topStreaming = MutableStateFlow(prefs.getString(TOP_STREAMING_KEY, "").orEmpty())
+
+        /** The Top Streaming account ID whose catalogs are offered as rows ("" = none). */
+        val topStreamingAccount: StateFlow<String> = _topStreaming.asStateFlow()
+
+        /**
+         * Saves a Top Streaming account (its ID, or any link with it in) and returns the ID;
+         * blank removes it and its rows.
+         */
+        fun setTopStreamingAccount(raw: String): String {
+            val id = ACCOUNT.find(raw)?.value?.lowercase().orEmpty()
+            prefs.edit().putString(TOP_STREAMING_KEY, id).apply()
+            _topStreaming.value = id
+            if (id.isEmpty()) save(_lists.value.filterNot { isTopStreaming(it) })
+            return id
+        }
+
+        private val _cloudPages = MutableStateFlow(runCatching { json.decodeFromString(com.wholphinplus.sources.core.CloudPages.serializer(), prefs.getString(PAGES_KEY, null)!!) }.getOrElse { com.wholphinplus.sources.core.CloudPages() })
+
+        /** The Services and Genres pages and where each tab shows their tiles (kept, so they show offline). */
+        val cloudPages: StateFlow<com.wholphinplus.sources.core.CloudPages> = _cloudPages.asStateFlow()
+
+        /** The list behind a page's chart: the cloud's own, or your Top Streaming row standing in for it. */
+        fun forChart(chartId: String): HomeCollection? {
+            val url = com.wholphinplus.sources.sync.ProfileSync.ENDPOINT + "/v1/charts#" + chartId
+            return _lists.value.firstOrNull { it.url == url }
+                ?: _lists.value.firstOrNull { isTopStreaming(it) && (com.wholphinplus.sources.core.ListSource.parse(it.url) as? com.wholphinplus.sources.core.ListSource.TopStreaming)?.chartId == chartId }
+        }
+
+        /**
+         * Whether a list has enough titles in the library to make a row: an Orca+ chart needs
+         * [MIN_ROW] ([MIN_TOP] for a Top 10), so a small library doesn't get rows of one or two
+         * cards (they join once the library has more); your own lists show with any.
+         */
+        fun enough(c: HomeCollection): Boolean = c.itemIds.size >= (if (!isChart(c)) 1 else minFor(c.name))
+
+        /** Fewest library titles a chart named [name] shows with. */
+        fun minFor(name: String): Int = if (com.wholphinplus.sources.cinema.CinemaRepository.isTopList(name)) MIN_TOP else MIN_ROW
+
+        /** An Orca+ chart (the cloud's default rows: Trakt, TMDB, streaming Top 10s). */
+        fun isChart(c: HomeCollection): Boolean = c.url.startsWith(com.wholphinplus.sources.sync.ProfileSync.ENDPOINT + "/v1/charts#")
+
+        /** Bumped after a refresh changed any row, so the Cinema pages reload. */
+        private val _changed = MutableStateFlow(0)
+        val changed: StateFlow<Int> = _changed.asStateFlow()
+
+        /**
+         * Brings the Orca+ charts in line with the cloud's: new ones join (on the pages the cloud
+         * suggests; on the classic home when Home is one of them), gone ones leave. The shared
+         * Top 10s step aside when you have your own Top Streaming account, and your own rows take
+         * their places (the same chart); your other Top 10s start off.
+         */
+        fun syncCharts() {
+            val tilesBefore = _cloudPages.value.tiles
+            val own = _topStreaming.value.isNotBlank()
+            val all = client.charts()
+            val shared = all.filter { it.source == "top-streaming" }.associateBy { it.id }
+            val charts = all.filter { !(own && it.source == "top-streaming") }
+            val urls = charts.associateBy { it.url }
+            val current = _lists.value
+            val have = current.map { it.url }.toSet()
+            val kept =
+                current.filter { !isChart(it) || it.url in urls }.map { c ->
+                    urls[c.url]?.let { ch -> c.copy(kind = ch.kind, pages = ch.pages, order = ch.order, name = ch.name, hidden = ch.hidden) }
+                        ?: standIn(c, shared).takeIf { own }
+                        ?: c
+                }
+            val added =
+                charts.filter { it.url !in have }.map { ch ->
+                    HomeCollection(UUID.randomUUID().toString().take(8), ch.url, ch.name, showOnHome = "HOME" in ch.pages, kind = ch.kind, pages = ch.pages, order = ch.order, hidden = ch.hidden)
+                }
+            val pages = client.cloudPages()
+            if (pages != _cloudPages.value) {
+                prefs.edit().putString(PAGES_KEY, json.encodeToString(com.wholphinplus.sources.core.CloudPages.serializer(), pages)).apply()
+                _cloudPages.value = pages
+            }
+            if (kept != current || added.isNotEmpty() || pages.tiles != tilesBefore) {
+                save(kept + added)
+                // Charts came, went or moved pages: the Cinema pages rebuild with them
+                com.wholphinplus.sources.cinema.CinemaCaches.homeChanged()
+                _changed.value++
+            }
+        }
+
+        /** Your own Top Streaming row, placed where the cloud places the same chart (null for other lists). */
+        private fun standIn(
+            c: HomeCollection,
+            shared: Map<String, com.wholphinplus.sources.core.ListClient.Chart>,
+        ): HomeCollection? {
+            val source = com.wholphinplus.sources.core.ListSource.parse(c.url) as? com.wholphinplus.sources.core.ListSource.TopStreaming ?: return null
+            val pages = shared[source.chartId]?.pages.orEmpty()
+            val order = shared[source.chartId]?.order.orEmpty()
+            // The first time only: after that its Home switch is yours
+            val home = if (c.pages == null) "HOME" in pages else c.showOnHome
+            return c.copy(pages = pages, order = order, showOnHome = home)
+        }
+
+        /** A Top Streaming chart or Orca+ chart of shows (true) or movies (false); null for mixed charts and other lists. */
+        fun chartSeries(c: HomeCollection): Boolean? =
+            when {
+                c.kind != null -> c.kind == "series"
+                !isTopStreaming(c) || c.url.contains("overall") -> null
+                c.url.contains("/catalog/series/") -> true
+                c.url.contains("/catalog/movie/") -> false
+                else -> null
+            }
+
+        fun isTopStreaming(c: HomeCollection): Boolean = c.url.contains(com.wholphinplus.sources.core.ListSource.TOP_STREAMING_HOST)
+
+        /**
+         * Brings the Top Streaming rows in line with the account's catalogs (as picked on its
+         * website): new ones join switched off, ones no longer offered go, the rest keep their
+         * name and switch. Returns how many catalogs there are.
+         */
+        fun syncTopStreaming(): Int {
+            val account = _topStreaming.value.ifBlank { return 0 }
+            val catalogs = client.topStreamingCatalogs(account)
+            val urls = catalogs.map { it.url }.toSet()
+            val current = _lists.value
+            val have = current.map { it.url }.toSet()
+            val added = catalogs.filter { it.url !in have }.map { HomeCollection(UUID.randomUUID().toString().take(8), it.url, it.name, showOnHome = false) }
+            save(current.filter { !isTopStreaming(it) || it.url in urls } + added)
+            return catalogs.size
+        }
+
+        /** Lists, charts and their accounts, for a cloud profile. */
+        fun snapshot(): com.wholphinplus.sources.sync.ListsState =
+            com.wholphinplus.sources.sync.ListsState(_lists.value, _traktClientId.value, _topStreaming.value)
+
+        /** A cloud profile's lists (their matches came with them, so rows show at once). */
+        fun restore(s: com.wholphinplus.sources.sync.ListsState) {
+            if (s.traktClientId != _traktClientId.value) setTraktClientId(s.traktClientId)
+            if (s.topStreaming != _topStreaming.value) {
+                prefs.edit().putString(TOP_STREAMING_KEY, s.topStreaming).apply()
+                _topStreaming.value = s.topStreaming
+            }
+            if (s.lists != _lists.value) save(s.lists)
         }
 
         fun byTag(tag: String): HomeCollection? = _lists.value.firstOrNull { it.tag == tag }
@@ -148,11 +300,36 @@ class HomeCollections
                             forgetMisses()
                             prefs.edit().putLong(MISS_RESET_KEY, now).apply()
                         }
-                        for (c in _lists.value.filter { (onlyId == null || it.id == onlyId) && now - it.refreshedAt > maxAgeMs }) {
+                        // Catalogs picked or dropped on the Top Streaming website follow here
+                        runCatching { syncTopStreaming() }.onFailure { Timber.w(it, "Top Streaming catalogs unavailable") }
+                        runCatching { syncCharts() }.onFailure { Timber.w(it, "Orca+ charts unavailable") }
+                        var before = _lists.value.map { it.itemIds }
+                        // Rows changed: the Cinema pages load them now (they show what they gained)
+                        fun announce() {
+                            val after = _lists.value.map { it.itemIds }
+                            if (after == before) return
+                            before = after
+                            com.wholphinplus.sources.cinema.CinemaCaches.homeChanged()
+                            _changed.value++
+                        }
+                        // Home's rows first, then the other tabs', then rows that start off and the
+                        // Services / Genres pages' charts (~2 min on a first start); the pages show
+                        // each group as soon as it's matched
+                        fun group(c: HomeCollection) =
+                            when {
+                                c.hidden -> 3
+                                if (isChart(c)) c.pages?.contains("HOME") == true else c.showOnHome -> 0
+                                !c.pages.isNullOrEmpty() -> 1
+                                else -> 2
+                            }
+                        val stale = _lists.value.filter { (onlyId == null || it.id == onlyId) && now - it.refreshedAt > maxAgeMs }.sortedWith(compareBy({ group(it) }, { it.order?.get("HOME") ?: Int.MAX_VALUE }))
+                        stale.forEachIndexed { i, c ->
+                            if (i > 0 && group(c) != group(stale[i - 1])) announce()
                             _refreshing.value = c.name
                             refreshOne(hook, c)
                         }
                         _refreshing.value = null
+                        announce()
                     }
             }
         }
@@ -163,19 +340,38 @@ class HomeCollections
         ) {
             val updated =
                 try {
-                    val source = ListSource.parse(c.url) ?: error("Not a Trakt or MDBList link")
+                    val source = ListSource.parse(c.url) ?: error("Not a Trakt, MDBList, Top Streaming or Orca+ chart link")
                     val fetched = client.fetch(source)
                     val main = hook.mainConnection() ?: error("Not signed in")
                     val gate = Semaphore(6)
-                    val ids =
+                    // Titles the server couldn't be asked about (it didn't answer) aren't misses
+                    val failed = java.util.concurrent.atomic.AtomicInteger()
+                    // Each title found, with its place in the list
+                    val found =
                         coroutineScope {
-                            fetched.entries.map { e -> async { gate.withPermit { match(hook, main, e) } } }.awaitAll()
-                        }.filterNotNull().distinct()
+                            fetched.entries.mapIndexed { i, e ->
+                                async {
+                                    gate.withPermit {
+                                        try {
+                                            match(hook, main, e)?.let { it to i + 1 }
+                                        } catch (ex: Exception) {
+                                            if (ex is kotlinx.coroutines.CancellationException) throw ex
+                                            failed.incrementAndGet()
+                                            null
+                                        }
+                                    }
+                                }
+                            }.awaitAll()
+                        }.filterNotNull().distinctBy { it.first }
+                    val ids = found.map { it.first }
                     saveMatches()
+                    // A refresh that hit server errors never shrinks the row: keep it as it was
+                    if (failed.get() > 0 && ids.size < c.itemIds.size) error("The server didn't answer for ${failed.get()} titles")
                     Timber.i("Home collection %s: %d of %d titles in the library", c.name, ids.size, fetched.entries.size)
                     c.copy(
                         name = if (c.name.isBlank() || c.name == PENDING_NAME) fetched.name else c.name,
                         itemIds = ids,
+                        ranks = found.map { it.second },
                         listSize = fetched.entries.size,
                         refreshedAt = System.currentTimeMillis(),
                         error = null,
@@ -198,10 +394,10 @@ class HomeCollections
         ): String? {
             matchCache[e.key]?.let { return it.ifBlank { null } }
             val request = PlayRequest(e.title, e.year, e.imdbId, e.tmdbId, e.tvdbId)
+            // Throws when the server doesn't answer: that's not a miss, so nothing is remembered
             val id =
-                runCatching {
-                    if (e.type == TmdbType.TV) hook.client.matchSeriesIds(main, request) else hook.client.matchItemIds(main, request)
-                }.getOrNull()?.firstOrNull()
+                (if (e.type == TmdbType.TV) hook.client.matchSeriesIds(main, request) else hook.client.matchItemIds(main, request))
+                    .firstOrNull()
             // Remember misses too (as ""), so a 500-title list doesn't re-search every refresh;
             // misses are forgotten daily and on "Refresh now".
             matchCache[e.key] = id.orEmpty()
@@ -219,9 +415,16 @@ class HomeCollections
         companion object {
             private const val KEY = "lists_v1"
             private const val MATCH_KEY = "matches_v1"
+            private const val PAGES_KEY = "cloud_pages_v1"
             private const val TRAKT_KEY = "trakt_client_id"
+            private const val TOP_STREAMING_KEY = "top_streaming_account"
+            private val ACCOUNT = Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
             private const val MISS_RESET_KEY = "miss_reset_at"
             const val PENDING_NAME = "Loading list…"
             const val STALE_MS = 6 * 60 * 60 * 1000L
+
+            /** Fewest library titles an Orca+ chart row shows with ([MIN_TOP] for a numbered Top 10). */
+            const val MIN_ROW = 5
+            const val MIN_TOP = 3
         }
     }

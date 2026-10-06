@@ -36,7 +36,7 @@ class CinemaArt
         private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private var pending: Job? = null
 
-        val enabled: Boolean get() = search.tmdb.hasKey
+        val enabled: Boolean get() = search.tmdb.available
 
         /** Already-known art, readable on the first frame (no flash from server art to TMDB art). */
         fun cached(
@@ -74,10 +74,14 @@ class CinemaArt
         }
 
         private fun load(): Map<String, TitleArt> =
-            runCatching { prefs.getString(KEY, null)?.let { json.decodeFromString<Map<String, TitleArt>>(it) } }.getOrNull().orEmpty()
+            // The previous version's copy is replaced, not kept beside it
+            also { prefs.edit().remove("art_v1").remove("art_v2").remove("art_v3").apply() }.let {
+                runCatching { prefs.getString(KEY, null)?.let { json.decodeFromString<Map<String, TitleArt>>(it) } }.getOrNull().orEmpty()
+            }
 
         private companion object {
-            const val KEY = "art_v1"
+            // v4: titles carry their services, TMDB score and release date; older entries are fetched again
+            const val KEY = "art_v4"
             const val MAX = 3_000
         }
     }

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -99,12 +101,17 @@ fun CinemaDetails(
     onOpen: (UUID, BaseItemKind) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    @Suppress("NAME_SHADOWING") val onPlay = guarded(onPlay)
+    @Suppress("NAME_SHADOWING") val onOpen = guarded(onOpen)
     val context = LocalContext.current
     val entry = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java) }
     val hook = remember { entry.sourceHook() }
     val art = remember { entry.cinemaArt() }
+    val search = remember { entry.searchService() }
     val repo = remember { CinemaRepository(hook, hook.collections) }
     val overlays by hook.store.overlays.collectAsState()
+    val ratingPrefs by hook.store.ratingPrefs.collectAsState()
+    val ratings = remember { entry.ratings() }
     remember { StreamCache.attach(context) }
     DisposableEffect(Unit) { onDispose { art.save() } }
 
@@ -119,11 +126,28 @@ fun CinemaDetails(
         var tries = 0
         while (true) {
             try {
-                val it = repo.details(itemId, kind)
-                DetailsCache[itemId] = it
-                data = it
-                // More Like This badges in one request
-                if (overlays.needsStreams) launch { StreamCache.prefetch(it.similar.filter { s -> s.kind != BaseItemKind.SERIES }.map { s -> s.id }, repo::streamTagsBatch) }
+                val loaded = repo.details(itemId, kind)
+                // More Like This is loaded on its own (below); a refresh keeps the one already found
+                val known = (DetailsCache[itemId] ?: data)?.similar.orEmpty()
+                val page = loaded.copy(similar = known)
+                DetailsCache[itemId] = page
+                data = page
+                if (known.isEmpty()) {
+                    launch {
+                        val similar =
+                            try {
+                                repo.moreLikeThis(page.item, search.tmdb)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                timber.log.Timber.w(e, "More Like This failed for %s", itemId)
+                                return@launch
+                            }
+                        data = data?.copy(similar = similar)?.also { DetailsCache[itemId] = it }
+                        // Their badges in one request
+                        if (overlays.needsStreams) StreamCache.prefetch(similar.filter { s -> s.kind != BaseItemKind.SERIES }.map { s -> s.id }, repo::streamTagsBatch)
+                    }
+                }
                 break
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -150,7 +174,7 @@ fun CinemaDetails(
             // A card's preview of a show can't play (its episode never came): show the error
             failed != null && (d == null || d.play?.pending == true) ->
                 LoadError(failed, onRetry = { attempt++ }, onClassic = null, modifier = Modifier.align(Alignment.Center))
-            d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf)) { DetailsScreen(d, repo, onPlay, onOpen) }
+            d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf), LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) { DetailsScreen(d, repo, onPlay, onOpen) }
         }
     }
 }
@@ -159,7 +183,16 @@ fun CinemaDetails(
 private class DetailsFocus {
     /** True while focus is in the top section, which pins the list to the top. */
     var hero by mutableStateOf(true)
+
+    /**
+     * True while focus is in the episodes: the page rests with their heading at the top (it
+     * moved to each card before, scrolling the heading away) and More Like This dims below.
+     */
+    var episodes by mutableStateOf(false)
 }
+
+/** Where the Episodes heading rests while you browse episodes. */
+private val EpisodesTop = 36.dp
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -176,21 +209,31 @@ private fun DetailsScreen(
     val list = rememberLazyListState()
     val playFocus = remember { FocusRequester() }
     val episodesFocus = remember { FocusRequester() }
+    val currentEp = remember { FocusRequester() }
     val art = rememberArt(item)
 
-    // Rows settle 64dp below the top so their heading stays in view; the hero never moves
-    val rowsSpec =
-        remember(density) {
-            val base = pivot(with(density) { 64.dp.toPx() })
+    // Rows settle 64dp below the top so their heading stays in view; the hero never moves.
+    // The page can't scroll that far for its last row (More Like This): aimed at the
+    // unreachable spot, the quick-start ease used up the whole ~40dp that's left in the first
+    // frame, a snap. So the page aims only as far as it can go, and that glides.
+    val rowSpec = remember(density) { pivot(with(density) { 64.dp.toPx() }) }
+    val pageSpec =
+        remember(rowSpec, list) {
             object : BringIntoViewSpec {
                 @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-                override val scrollAnimationSpec = base.scrollAnimationSpec
+                override val scrollAnimationSpec = rowSpec.scrollAnimationSpec
 
                 override fun calculateScrollDistance(
                     offset: Float,
                     size: Float,
                     containerSize: Float,
-                ): Float = if (focus.hero) 0f else base.calculateScrollDistance(offset, size, containerSize)
+                ): Float {
+                    // The top section and the episodes each have one resting place (set when focus
+                    // enters them), so moving inside them never scrolls the page
+                    if (focus.hero || focus.episodes) return 0f
+                    val wanted = rowSpec.calculateScrollDistance(offset, size, containerSize)
+                    return if (wanted > 0f) wanted.coerceAtMost(scrollLeft(list)) else wanted
+                }
             }
         }
 
@@ -199,7 +242,8 @@ private fun DetailsScreen(
     val enter = remember { Animatable(0f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, tween(480, easing = CinemaEase)) }
 
-    var favorite by remember(d) { mutableStateOf(d.favorite) }
+    // Keyed on the facts, not the whole page: More Like This arriving must not undo a tick
+    var favorite by remember(d.item.id, d.favorite) { mutableStateOf(d.favorite) }
 
     Box(Modifier.fillMaxSize()) {
         StableBackdrop(item.backdropUrl ?: art?.cleanBackdrop?.let { "https://image.tmdb.org/t/p/w1280$it" }, drift = true, widthFraction = 0.78f, heightFraction = 0.9f)
@@ -209,7 +253,7 @@ private fun DetailsScreen(
         // screen edge
         val heroAlpha = animateFloatAsState(if (focus.hero) 1f else 0f, tween(320, easing = CinemaEase), label = "heroAlpha")
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = dim }.background(Stage))
-        CompositionLocalProvider(LocalBringIntoViewSpec provides rowsSpec) {
+        CompositionLocalProvider(LocalBringIntoViewSpec provides pageSpec) {
             LazyColumn(
                 state = list,
                 contentPadding = PaddingValues(bottom = 80.dp),
@@ -220,9 +264,13 @@ private fun DetailsScreen(
                     },
             ) {
                 item(key = "hero") {
+                    // At least 90% of the screen (the episodes peek in below), taller when it has
+                    // to be: a show with a progress line and a long overview got its "13m left"
+                    // cut in half by the Episodes heading at a fixed 90%
+                    val screen = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
                     Column(
                         Modifier
-                            .fillParentMaxHeight(0.9f)
+                            .heightIn(min = screen * 0.9f)
                             .graphicsLayer { alpha = heroAlpha.value }
                             .padding(start = 58.dp, top = 56.dp, end = 58.dp)
                             .onFocusChanged {
@@ -253,34 +301,66 @@ private fun DetailsScreen(
                                     }
                                 }
                             },
-                            onEpisodes = { runCatching { episodesFocus.requestFocus() } },
+                            // Straight to the episode you're up to; else the season tabs
+                            onEpisodes = {
+                                if (!runCatching { currentEp.requestFocus() }.getOrDefault(false)) runCatching { episodesFocus.requestFocus() }
+                            },
                         )
                     }
                 }
                 if (d.series && d.seasons.isNotEmpty()) {
                     item(key = "episodes") {
-                        Box(Modifier.onFocusChanged { if (it.hasFocus) focus.hero = false }) {
-                            Episodes(item.id, d, repo, episodesFocus, onPlay)
+                        Box(
+                            Modifier.onFocusChanged {
+                                if (it.hasFocus && !focus.episodes) {
+                                    focus.hero = false
+                                    focus.episodes = true
+                                    // Settle once: the Episodes heading at the top, whatever got focus
+                                    scope.launch {
+                                        val section = list.layoutInfo.visibleItemsInfo.firstOrNull { i -> i.key == "episodes" }
+                                        if (section == null) {
+                                            list.scrollToItem(1)
+                                        } else {
+                                            val by = (section.offset - with(density) { EpisodesTop.toPx() }).coerceAtMost(scrollLeft(list))
+                                            list.animateScrollBy(by, tween(360, easing = CinemaEase))
+                                        }
+                                    }
+                                } else if (!it.hasFocus) {
+                                    focus.episodes = false
+                                }
+                            },
+                        ) {
+                            CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) { Episodes(item.id, d, repo, episodesFocus, currentEp, onPlay) }
                         }
                     }
                 }
                 if (d.similar.isNotEmpty()) {
                     item(key = "similar") {
-                        Column(Modifier.padding(top = 18.dp).onFocusChanged { if (it.hasFocus) focus.hero = false }) {
+                        // Below the episodes it waits lower and dimmed (just its top showing), and
+                        // lights up when you come down to it
+                        val dimmed by animateFloatAsState(if (focus.episodes) 0.35f else 1f, tween(320, easing = CinemaEase), label = "similarDim")
+                        Column(
+                            Modifier
+                                .padding(top = if (d.series && d.seasons.isNotEmpty()) 44.dp else 18.dp)
+                                .graphicsLayer { alpha = dimmed }
+                                .onFocusChanged { if (it.hasFocus) focus.hero = false },
+                        ) {
                             SectionTitle("More Like This")
-                            LazyRow(
-                                contentPadding = PaddingValues(horizontal = 58.dp, vertical = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                            ) {
-                                items(d.similar, key = { it.key }) { s ->
-                                    CinemaCard(
-                                        s,
-                                        onFocused = {},
-                                        onClick = {
-                                            DetailsPreview.put(it)
-                                            onOpen(it.detailsId, it.detailsKind)
-                                        },
-                                    )
+                            CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 58.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                ) {
+                                    items(d.similar, key = { it.key }) { s ->
+                                        CinemaCard(
+                                            s,
+                                            onFocused = {},
+                                            onClick = {
+                                                DetailsPreview.put(it)
+                                                onOpen(it.detailsId, it.detailsKind)
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -302,13 +382,37 @@ private fun Hero(
     onEpisodes: () -> Unit,
 ) {
     val item = d.item
-    KindTag(item.kind)
-    Spacer(Modifier.height(6.dp))
-    Box(Modifier.height(120.dp).widthIn(max = 460.dp), contentAlignment = Alignment.BottomStart) {
-        if (logo != null) {
-            AsyncImage(model = logo, contentDescription = item.title, contentScale = ContentScale.Fit, alignment = Alignment.BottomStart, modifier = Modifier.fillMaxSize())
-        } else {
-            Text(item.title, color = Ink, fontSize = 44.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, lineHeight = 46.sp, overflow = TextOverflow.Ellipsis)
+    // The tag sits right on top of the logo, whatever its shape: in a fixed box a wide, short
+    // logo (WALL·E) sank to the bottom and left a big gap under the tag. The block keeps one
+    // height, so the text below never moves; the tag shows with the logo, so it doesn't jump.
+    var logoShown by remember(logo) { mutableStateOf(logo == null) }
+    // The logo's shape once it's loaded: it then fills 460 x 120 dp as far as its shape allows
+    // (before, the full box, so it loads at that size)
+    var logoRatio by remember(logo) { mutableStateOf<Float?>(null) }
+    Box(Modifier.height(146.dp).widthIn(max = 460.dp), contentAlignment = Alignment.BottomStart) {
+        Column {
+            KindTag(item.kind, Modifier.graphicsLayer { alpha = if (logoShown) 1f else 0f })
+            Spacer(Modifier.height(8.dp))
+            if (logo != null) {
+                AsyncImage(
+                    model = logo,
+                    contentDescription = item.title,
+                    contentScale = ContentScale.Fit,
+                    alignment = Alignment.BottomStart,
+                    onState = { state ->
+                        logoShown = state !is coil3.compose.AsyncImagePainter.State.Loading && state !is coil3.compose.AsyncImagePainter.State.Empty
+                        if (state is coil3.compose.AsyncImagePainter.State.Success) {
+                            val image = state.result.image
+                            if (image.width > 0 && image.height > 0) logoRatio = image.width.toFloat() / image.height
+                        }
+                    },
+                    modifier =
+                        logoRatio?.let { Modifier.widthIn(max = 460.dp).heightIn(max = 120.dp).aspectRatio(it) }
+                            ?: Modifier.width(460.dp).height(120.dp),
+                )
+            } else {
+                Text(item.title, color = Ink, fontSize = 44.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, lineHeight = 46.sp, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
     Spacer(Modifier.height(18.dp))
@@ -316,6 +420,8 @@ private fun Hero(
     // Always takes its line, so the overview doesn't jump when the genres arrive
     Spacer(Modifier.height(6.dp))
     Text(d.genres.joinToString("  •  ").ifEmpty { " " }, color = InkDim, fontSize = 13.sp, maxLines = 1)
+    // Review scores (Settings → Orca+ → Ratings); takes no room when there are none
+    Box(Modifier.padding(top = 10.dp)) { TitleRatings(item) }
     Spacer(Modifier.height(14.dp))
     Text(
         item.overview.trim().replace(Regex("\\s+"), " "),
@@ -390,15 +496,20 @@ private fun Episodes(
     d: CinemaDetailsData,
     repo: CinemaRepository,
     episodesFocus: FocusRequester,
+    currentEp: FocusRequester,
     onPlay: (UUID, Long) -> Unit,
 ) {
+    // The episode you're up to (what Play resumes or starts): its season opens scrolled to it
+    val upTo = d.play?.id
     val start = d.seasons.indexOfFirst { it.number == d.startSeason }.coerceAtLeast(0)
-    var selected by remember(d) { mutableStateOf(start) }
-    var focusedTab by remember(d) { mutableStateOf(start) }
+    // Keyed on the seasons, not the whole page: More Like This arriving later must not reset
+    // the season you picked
+    var selected by remember(d.seasons, start) { mutableStateOf(start) }
+    var focusedTab by remember(d.seasons, start) { mutableStateOf(start) }
     val loaded = remember(seriesId) { mutableStateMapOf<UUID, List<CinemaEpisode>>() }
 
     // A season loads once you rest on its tab, so sweeping across tabs doesn't fire requests
-    LaunchedEffect(d) {
+    LaunchedEffect(d.seasons, start) {
         snapshotFlow { focusedTab }.collectLatest { i ->
             if (i != selected) delay(260)
             selected = i
@@ -441,16 +552,25 @@ private fun Episodes(
             label = "season",
         ) { id ->
             val eps = loaded[id]
+            val current = eps?.indexOfFirst { it.id == upTo }?.takeIf { it >= 0 }
+            val row = rememberLazyListState()
+            // Opens at your episode instead of episode 1
+            LaunchedEffect(current) { if (current != null) row.scrollToItem(current) }
             LazyRow(
+                state = row,
                 contentPadding = PaddingValues(horizontal = 58.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
-                modifier = Modifier.height(268.dp),
+                // Down from the season tabs lands on your episode
+                modifier = Modifier.height(300.dp).focusRestorer(if (current != null) currentEp else FocusRequester.Default),
             ) {
                 if (eps != null) {
-                    items(eps, key = { it.id }) { e ->
+                    itemsIndexed(eps, key = { _, e -> e.id }) { i, e ->
                         EpisodeCard(
                             e,
-                            modifier = if (d.seasons.size == 1 && e === eps.first()) Modifier.focusRequester(episodesFocus) else Modifier,
+                            modifier =
+                                Modifier
+                                    .then(if (i == current) Modifier.focusRequester(currentEp) else Modifier)
+                                    .then(if (d.seasons.size == 1 && i == (current ?: 0)) Modifier.focusRequester(episodesFocus) else Modifier),
                             onClick = { onPlay(e.id, e.resumeMs) },
                         )
                     }
@@ -493,7 +613,7 @@ private fun EpisodeCard(
 ) {
     val context = LocalContext.current
     val shape = RoundedCornerShape(6.dp)
-    Column(Modifier.width(300.dp)) {
+    Column(Modifier.width(340.dp)) {
         Card(
             onClick = onClick,
             shape = CardDefaults.shape(shape),
@@ -522,6 +642,17 @@ private fun EpisodeCard(
         Spacer(Modifier.height(4.dp))
         Text(e.overview, color = InkDim, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
+}
+
+/**
+ * How much further down [list] can scroll, in px (its last item is in view, so the end is
+ * known); unlimited while the end is still off screen.
+ */
+private fun scrollLeft(list: androidx.compose.foundation.lazy.LazyListState): Float {
+    val info = list.layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return Float.MAX_VALUE
+    if (last.index != info.totalItemsCount - 1) return Float.MAX_VALUE
+    return (last.offset + last.size + info.afterContentPadding - info.viewportEndOffset).coerceAtLeast(0).toFloat()
 }
 
 /** Recently opened titles, so Back from the player (or a re-open) draws instantly. */

@@ -1,19 +1,26 @@
-// Contains code adapted from a third-party project under the Apache License 2.0 and modified
-// for Orca+. See NOTICE and LICENSES/Apache-2.0.txt.
 package com.wholphinplus.sources.core
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.text.Normalizer
+import java.time.LocalDate
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.cancellation.CancellationException
 
-enum class TmdbType { MOVIE, TV }
+private const val IMAGES = "https://image.tmdb.org/t/p/w"
+
+enum class TmdbType {
+    MOVIE,
+    TV,
+}
 
 data class TmdbItem(
     val id: Int,
@@ -29,9 +36,9 @@ data class TmdbItem(
 ) {
     val key: String get() = "${type.name}:$id"
 
-    fun posterUrl(width: Int = 342): String? = posterPath?.let { "https://image.tmdb.org/t/p/w$width$it" }
+    fun posterUrl(width: Int = 342): String? = posterPath?.let { "$IMAGES$width$it" }
 
-    fun backdropUrl(width: Int = 1280): String? = backdropPath?.let { "https://image.tmdb.org/t/p/w$width$it" }
+    fun backdropUrl(width: Int = 1280): String? = backdropPath?.let { "$IMAGES$width$it" }
 }
 
 data class TmdbPerson(
@@ -40,10 +47,10 @@ data class TmdbPerson(
     val knownFor: List<TmdbItem>,
 )
 
+/** [interpretation] is set for smart queries and shown as the row title. */
 data class TmdbSearch(
     val items: List<TmdbItem>,
     val people: List<TmdbPerson>,
-    /** Set for smart queries ("Best Horror Movies", "Similar to …"): the row title. */
     val interpretation: String? = null,
 )
 
@@ -61,15 +68,23 @@ data class TmdbEpisode(
     val stillPath: String?,
 )
 
-@kotlinx.serialization.Serializable
+/** Artwork and facts for one title. Cached as JSON on the device, so keep the field names. */
+@Serializable
 data class TitleArt(
     val logo: String? = null,
     val titledBackdrop: String? = null,
     val cleanBackdrop: String? = null,
+    val services: List<String> = emptyList(),
+    val tmdbScore: Double? = null,
+    val released: String? = null,
 ) {
-    fun logoUrl(): String? = logo?.let { "https://image.tmdb.org/t/p/w500$it" }
+    fun logoUrl(): String? = logo?.let { "${IMAGES}500$it" }
 
-    fun cardUrl(): String? = titledBackdrop?.let { "https://image.tmdb.org/t/p/w780$it" }
+    fun cardUrl(): String? = titledBackdrop?.let { "${IMAGES}780$it" }
+
+    fun cleanCardUrl(): String? = cleanBackdrop?.let { "${IMAGES}780$it" }
+
+    fun serviceUrls(): List<String> = services.map { "${IMAGES}154$it" }
 }
 
 data class TmdbIds(
@@ -77,232 +92,413 @@ data class TmdbIds(
     val tvdb: Int?,
 )
 
+/**
+ * TMDB v3. With the user's own key it calls TMDB directly; without one it goes through
+ * [proxy], which adds a key on the server side. [apiKey] is read on every request.
+ */
 class TmdbClient(
     private val http: OkHttpClient,
     private val apiKey: () -> String,
     private val language: String = "en-US",
+    private val proxy: String? = null,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val networkLogos = ConcurrentHashMap<Int, String>()
 
     val hasKey: Boolean get() = apiKey().isNotBlank()
 
-    /** Smart browse queries, else multi search ranked by title match. */
+    val available: Boolean get() = hasKey || proxy != null
+
     suspend fun search(query: String): TmdbSearch {
         val q = query.trim()
         if (q.isEmpty()) return TmdbSearch(emptyList(), emptyList())
-        SmartQuery.parse(q)?.let { return smart(it) }
-        val response = get("search/multi", "query" to q, "include_adult" to "false")
-        val results = response.objects("results")
+        SmartQuery.parse(q)?.let { return runSmart(it) }
+
+        // Titles like WALL·E use a middle dot where people type a dash: search both, dotted first
+        val results =
+            coroutineScope {
+                val dotted =
+                    if ('-' in q) {
+                        async {
+                            try {
+                                multiSearch(q.replace('-', '·'))
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
+                    } else {
+                        null
+                    }
+                val plain = async { multiSearch(q) }
+                dotted?.await().orEmpty() + plain.await()
+            }.distinctBy { it.string("media_type") to it.string("id") }
+
         val items =
             results
-                .filter { it.string("media_type") in setOf("movie", "tv") }
-                .mapNotNull { it.toItem(if (it.string("media_type") == "tv") TmdbType.TV else TmdbType.MOVIE) }
-        val people =
+                .filter { it.string("media_type") == "movie" || it.string("media_type") == "tv" }
+                .mapNotNull { toItem(it, mixedType(it)) }
+
+        val topPeople =
             results
                 .filter { it.string("media_type") == "person" && it.string("name").isNotBlank() }
-                .sortedByDescending { it.string("popularity").toDoubleOrNull() ?: 0.0 }
+                .sortedByDescending { it.double("popularity") }
                 .take(3)
-                .map { p ->
-                    val known =
-                        p
-                            .objects("known_for")
-                            .filter { it.string("poster_path").isNotBlank() }
-                            .mapNotNull { it.toItem(if (it.string("media_type") == "tv") TmdbType.TV else TmdbType.MOVIE) }
-                    val credits = if (known.size >= 3) known else runCatching { personCredits(p.int("id") ?: 0) }.getOrDefault(known)
-                    TmdbPerson(p.int("id") ?: 0, p.string("name"), credits)
-                }.filter { it.knownFor.isNotEmpty() }
+        val people =
+            coroutineScope {
+                topPeople
+                    .map { p ->
+                        async {
+                            val knownFor =
+                                p
+                                    .objects("known_for")
+                                    .filter { it.string("poster_path").isNotBlank() }
+                                    .mapNotNull { toItem(it, mixedType(it)) }
+                            val titles =
+                                if (knownFor.size < 3) {
+                                    try {
+                                        credits(p.int("id"))
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        knownFor
+                                    }
+                                } else {
+                                    knownFor
+                                }
+                            TmdbPerson(p.int("id") ?: 0, p.string("name"), titles)
+                        }
+                    }.awaitAll()
+            }.filter { it.knownFor.isNotEmpty() }
+
         return TmdbSearch(rank(q, items), people)
     }
 
-    private fun personCredits(personId: Int): List<TmdbItem> =
+    private fun multiSearch(text: String): List<JsonObject> = get("search/multi", "query" to text, "include_adult" to "false").objects("results")
+
+    private fun credits(personId: Int?): List<TmdbItem> =
         get("person/$personId/combined_credits")
             .objects("cast")
             .filter { it.string("poster_path").isNotBlank() }
-            .mapNotNull { it.toItem(if (it.string("media_type") == "tv") TmdbType.TV else TmdbType.MOVIE) }
+            .mapNotNull { toItem(it, mixedType(it)) }
             .distinctBy { it.key }
             .sortedWith(compareByDescending<TmdbItem> { it.voteCount }.thenByDescending { it.popularity })
             .take(20)
 
-    private suspend fun smart(sq: SmartQuery): TmdbSearch {
-        val items =
-            if (sq.similarTo != null) {
-                val first = get("search/multi", "query" to sq.similarTo).objects("results").firstOrNull { it.string("media_type") in setOf("movie", "tv") }
-                if (first == null) {
-                    emptyList()
-                } else {
-                    val type = if (first.string("media_type") == "tv") "tv" else "movie"
-                    get("$type/${first.int("id")}/recommendations").objects("results").mapNotNull {
-                        it.toItem(if (type == "tv") TmdbType.TV else TmdbType.MOVIE)
-                    }
-                }
-            } else {
-                coroutineScope {
-                    val movies = if (sq.movies) async { discover(TmdbType.MOVIE, sq) } else null
-                    val tv = if (sq.tv) async { discover(TmdbType.TV, sq) } else null
-                    interleave(movies?.await().orEmpty(), tv?.await().orEmpty())
-                }
-            }
-        return TmdbSearch(sq.limit?.let { items.take(it) } ?: items, emptyList(), sq.interpretation)
-    }
-
-    private fun discover(
-        type: TmdbType,
-        sq: SmartQuery,
-    ): List<TmdbItem> {
-        val path = if (type == TmdbType.TV) "discover/tv" else "discover/movie"
-        val genre = if (type == TmdbType.TV) sq.genreId?.let(SmartQuery::tvGenre) else sq.genreId
-        val sort =
-            if (type == TmdbType.TV) {
-                sq.sort.replace("primary_release_date", "first_air_date")
-            } else {
-                sq.sort
-            }
-        val params =
-            buildList {
-                add("sort_by" to sort)
-                genre?.let { add("with_genres" to it) }
-                if (sq.anime) add("with_keywords" to "210024")
-                sq.minVotes?.let { add("vote_count.gte" to it.toString()) }
-                if (sort.contains("date")) add((if (type == TmdbType.TV) "first_air_date.lte" else "primary_release_date.lte") to java.time.LocalDate.now().toString())
-            }
-        return get(path, *params.toTypedArray()).objects("results").mapNotNull { it.toItem(type) }
-    }
-
     fun externalIds(item: TmdbItem): TmdbIds {
-        val o = get("${if (item.type == TmdbType.TV) "tv" else "movie"}/${item.id}/external_ids")
-        return TmdbIds(o.string("imdb_id").ifBlank { null }, o.int("tvdb_id"))
+        val o = get("${segment(item.type)}/${item.id}/external_ids")
+        return TmdbIds(imdb = o.string("imdb_id").ifBlank { null }, tvdb = o.int("tvdb_id"))
     }
 
-    /**
-     * Title art for streaming-style cards: the best English (or language-free) title logo, and a
-     * backdrop with the title baked in (TMDB tags those with a language). Paths, not URLs.
-     */
+    /** Recommendations, topped up with "similar" titles when TMDB has few. */
+    fun recommendations(
+        type: TmdbType,
+        id: Int,
+    ): List<TmdbItem> {
+        val base = "${segment(type)}/$id"
+        val recommended = get("$base/recommendations").objects("results").mapNotNull { toItem(it, type) }
+        if (recommended.size >= 12) return recommended
+        val similar =
+            try {
+                get("$base/similar").objects("results").mapNotNull { toItem(it, type) }
+            } catch (e: Exception) {
+                emptyList()
+            }
+        return (recommended + similar).distinctBy { it.key }
+    }
+
+    /** Logo, backdrops, streaming services, score and release date in one request. */
     fun titleArt(
         tv: Boolean,
         id: Int,
     ): TitleArt {
-        val o = get("${if (tv) "tv" else "movie"}/$id/images", "include_image_language" to "en,null")
-        fun best(list: List<JsonObject>) = list.sortedByDescending { it.string("vote_average").toDoubleOrNull() ?: 0.0 }.firstOrNull()?.string("file_path")
-        val logos = o.objects("logos")
-        val backdrops = o.objects("backdrops")
+        // en for artwork with the title on it, null for artwork without text
+        val o =
+            get(
+                "${if (tv) "tv" else "movie"}/$id",
+                "append_to_response" to "images,watch/providers",
+                "include_image_language" to "en,null",
+            )
+        val images = o.obj("images") ?: JsonObject(emptyMap())
+        val logos = images.objects("logos")
+        val backdrops = images.objects("backdrops")
+        val english = { it: JsonObject -> it.string("iso_639_1") == "en" }
+
+        val services =
+            try {
+                serviceLogos(o)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        val votes = o.int("vote_count") ?: 0
         return TitleArt(
-            logo = best(logos.filter { it.string("iso_639_1") == "en" }) ?: best(logos),
-            titledBackdrop = best(backdrops.filter { it.string("iso_639_1") == "en" }),
-            cleanBackdrop = best(backdrops.filter { it.string("iso_639_1").isBlank() }),
+            logo = bestImage(logos.filter(english)) ?: bestImage(logos),
+            titledBackdrop = bestImage(backdrops.filter(english)),
+            cleanBackdrop = bestImage(backdrops.filter { it.string("iso_639_1").isBlank() }),
+            services = services,
+            tmdbScore = o.string("vote_average").toDoubleOrNull()?.takeIf { it > 0 && votes >= 10 },
+            released = o.string(if (tv) "first_air_date" else "release_date").ifBlank { null },
         )
+    }
+
+    /** Highest voted; the first one wins a tie. */
+    private fun bestImage(list: List<JsonObject>): String? = list.maxByOrNull { it.double("vote_average") }?.string("file_path")
+
+    /**
+     * Up to two wordmarks: the show's own networks first, then the streaming services that carry
+     * it here. Provider logos are square app icons, so each provider is shown as its TMDB network.
+     */
+    private fun serviceLogos(o: JsonObject): List<String> {
+        val own =
+            o
+                .objects("networks")
+                .filter { it.string("logo_path").isNotBlank() }
+                .map { it.int("id") to it.string("logo_path") }
+
+        val results = o.obj("watch/providers")?.obj("results")
+        val country = Locale.getDefault().country.uppercase(Locale.ROOT).ifBlank { "US" }
+        val region = results?.obj(country) ?: results?.obj("US")
+        val streaming =
+            region
+                ?.objects("flatrate")
+                .orEmpty()
+                .sortedBy { it.int("display_priority") ?: Int.MAX_VALUE }
+                .mapNotNull { p -> p.int("provider_id")?.let { PROVIDER_NETWORKS[it] } }
+                .distinct()
+                .mapNotNull { network -> networkLogo(network)?.let { network to it } }
+
+        return (own + streaming).distinctBy { it.first }.map { it.second }.take(2)
+    }
+
+    private fun networkLogo(network: Int): String? {
+        networkLogos[network]?.let { return it }
+        val logo =
+            try {
+                get("network/$network").string("logo_path").ifBlank { null }
+            } catch (e: Exception) {
+                null
+            } ?: return null
+        networkLogos[network] = logo
+        return logo
     }
 
     fun seasons(tvId: Int): List<TmdbSeason> =
         get("tv/$tvId")
             .objects("seasons")
             .mapNotNull { s ->
-                val n = s.int("season_number") ?: return@mapNotNull null
-                TmdbSeason(n, s.string("name").ifBlank { "Season $n" }, s.int("episode_count") ?: 0)
-            }.sortedBy { if (it.number == 0) Int.MAX_VALUE else it.number } // specials last
+                val number = s.int("season_number") ?: return@mapNotNull null
+                TmdbSeason(number, s.string("name").ifBlank { "Season $number" }, s.int("episode_count") ?: 0)
+            }
+            // Specials last
+            .sortedWith(compareBy<TmdbSeason> { it.number == 0 }.thenBy { it.number })
 
     fun episodes(
         tvId: Int,
         season: Int,
     ): List<TmdbEpisode> =
-        get("tv/$tvId/season/$season").objects("episodes").mapNotNull { e ->
-            TmdbEpisode(
-                season = season,
-                number = e.int("episode_number") ?: return@mapNotNull null,
-                name = e.string("name"),
-                overview = e.string("overview"),
-                stillPath = e.string("still_path").ifBlank { null },
-            )
-        }
+        get("tv/$tvId/season/$season")
+            .objects("episodes")
+            .mapNotNull { e ->
+                val number = e.int("episode_number") ?: return@mapNotNull null
+                TmdbEpisode(
+                    season = season,
+                    number = number,
+                    name = e.string("name"),
+                    overview = e.string("overview"),
+                    stillPath = e.string("still_path").ifBlank { null },
+                )
+            }
 
-    private fun JsonObject.toItem(type: TmdbType): TmdbItem? {
-        val id = int("id") ?: return null
-        val title = (if (type == TmdbType.TV) string("name") else string("title")).ifBlank { return null }
-        val date = if (type == TmdbType.TV) string("first_air_date") else string("release_date")
+    // ---- Smart queries ----
+
+    private suspend fun runSmart(query: SmartQuery): TmdbSearch {
+        val found =
+            if (query.similarTo != null) {
+                similarTo(query.similarTo)
+            } else {
+                coroutineScope {
+                    val movies = if (query.movies) async { discover(query, TmdbType.MOVIE) } else null
+                    val shows = if (query.tv) async { discover(query, TmdbType.TV) } else null
+                    alternate(movies?.await().orEmpty(), shows?.await().orEmpty())
+                }
+            }
+        val items = query.limit?.let { found.take(it) } ?: found
+        return TmdbSearch(items, emptyList(), query.interpretation)
+    }
+
+    /** The first title hit decides between movie and show, not the word in the query. */
+    private fun similarTo(title: String): List<TmdbItem> {
+        val hit =
+            get("search/multi", "query" to title)
+                .objects("results")
+                .firstOrNull { it.string("media_type") == "movie" || it.string("media_type") == "tv" }
+                ?: return emptyList()
+        val type = mixedType(hit)
+        val id = hit.int("id") ?: return emptyList()
+        return get("${segment(type)}/$id/recommendations").objects("results").mapNotNull { toItem(it, type) }
+    }
+
+    private fun discover(
+        query: SmartQuery,
+        type: TmdbType,
+    ): List<TmdbItem> {
+        val tv = type == TmdbType.TV
+        val sort = if (tv) query.sort.replace("primary_release_date", "first_air_date") else query.sort
+        // Date sorts leave out titles that aren't out yet
+        val today = if ("date" in sort) LocalDate.now().toString() else null
+        return get(
+            "discover/${segment(type)}",
+            "sort_by" to sort,
+            "with_genres" to query.genreId?.let { if (tv) SmartQuery.tvGenre(it) else it },
+            // TMDB's anime keyword, so Western cartoons stay out
+            "with_keywords" to if (query.anime) "210024" else null,
+            "vote_count.gte" to query.minVotes?.toString(),
+            (if (tv) "first_air_date.lte" else "primary_release_date.lte") to today,
+        ).objects("results").mapNotNull { toItem(it, type) }
+    }
+
+    private fun alternate(
+        first: List<TmdbItem>,
+        second: List<TmdbItem>,
+    ): List<TmdbItem> {
+        val out = ArrayList<TmdbItem>(first.size + second.size)
+        for (i in 0 until maxOf(first.size, second.size)) {
+            first.getOrNull(i)?.let(out::add)
+            second.getOrNull(i)?.let(out::add)
+        }
+        return out
+    }
+
+    // ---- Plumbing ----
+
+    private fun get(
+        path: String,
+        vararg params: Pair<String, String?>,
+    ): JsonObject {
+        val key = apiKey()
+        val base =
+            when {
+                key.isNotBlank() -> "https://api.themoviedb.org/3"
+                proxy != null -> proxy
+                else -> throw IllegalStateException("No TMDB API key")
+            }
+        val url =
+            "$base/$path".toHttpUrl().newBuilder().apply {
+                if (key.isNotBlank()) addQueryParameter("api_key", key)
+                addQueryParameter("language", language)
+                for ((name, value) in params) if (value != null) addQueryParameter(name, value)
+            }
+        val request =
+            Request
+                .Builder()
+                .url(url.build())
+                .header("Accept", "application/json")
+                .get()
+                .build()
+        val body =
+            http.newCall(request).execute().use { r ->
+                if (!r.isSuccessful) throw ServerRequestException(r.code, "TMDB answered HTTP ${r.code}")
+                r.body.string()
+            }
+        return json.parseToJsonElement(body) as? JsonObject ?: throw IllegalStateException("TMDB answer is not an object")
+    }
+
+    private fun segment(type: TmdbType): String = if (type == TmdbType.TV) "tv" else "movie"
+
+    private fun mixedType(o: JsonObject): TmdbType = if (o.string("media_type") == "tv") TmdbType.TV else TmdbType.MOVIE
+
+    private fun JsonObject.double(name: String): Double = string(name).toDoubleOrNull() ?: 0.0
+
+    private fun toItem(
+        o: JsonObject,
+        type: TmdbType,
+    ): TmdbItem? {
+        val id = o.int("id") ?: return null
+        val tv = type == TmdbType.TV
+        val title = o.string(if (tv) "name" else "title").ifBlank { return null }
         return TmdbItem(
             id = id,
             type = type,
             title = title,
-            year = date.take(4).toIntOrNull(),
-            overview = string("overview"),
-            posterPath = string("poster_path").ifBlank { null },
-            backdropPath = string("backdrop_path").ifBlank { null },
-            rating = string("vote_average").toDoubleOrNull() ?: 0.0,
-            popularity = string("popularity").toDoubleOrNull() ?: 0.0,
-            voteCount = int("vote_count") ?: 0,
+            year = o.string(if (tv) "first_air_date" else "release_date").take(4).toIntOrNull(),
+            overview = o.string("overview"),
+            posterPath = o.string("poster_path").ifBlank { null },
+            backdropPath = o.string("backdrop_path").ifBlank { null },
+            rating = o.double("vote_average"),
+            popularity = o.double("popularity"),
+            voteCount = o.int("vote_count") ?: 0,
         )
     }
 
-    private fun get(
-        path: String,
-        vararg params: Pair<String, String>,
-    ): JsonObject {
-        val key = apiKey().ifBlank { error("No TMDB API key") }
-        val url =
-            "https://api.themoviedb.org/3/$path"
-                .toHttpUrl()
-                .newBuilder()
-                .addQueryParameter("api_key", key)
-                .addQueryParameter("language", language)
-                .apply { params.forEach { (k, v) -> addQueryParameter(k, v) } }
-                .build()
-        http.newCall(Request.Builder().url(url).header("Accept", "application/json").build()).execute().use { r ->
-            if (!r.isSuccessful) throw ServerRequestException(r.code, "TMDB answered HTTP ${r.code}")
-            return json.parseToJsonElement(r.body.string()) as JsonObject
-        }
-    }
-
     companion object {
-        private val accents = Regex("\\p{M}+")
-        private val punctuation = Regex("[^\\p{L}\\p{N}]+")
-        private val leadingArticle = Regex("^(the|an|a) ")
+        // TMDB watch provider id -> the TMDB network whose wordmark stands for it
+        private val PROVIDER_NETWORKS: Map<Int, Int> =
+            buildMap {
+                fun map(
+                    network: Int,
+                    vararg providers: Int,
+                ) = providers.forEach { put(it, network) }
+                map(213, 8, 175, 1796)
+                map(1024, 9, 119, 613, 2100)
+                map(2552, 350, 2243)
+                map(2739, 337, 508)
+                map(3186, 1899, 384, 1825)
+                map(453, 15)
+                map(4330, 531, 2303, 2616, 582, 633, 1853)
+                map(3353, 386, 387, 2553)
+                map(1112, 283, 1968)
+                map(174, 526, 528, 635, 1854, 80)
+                map(318, 43, 1794, 1855, 634)
+                map(359, 289, 2061)
+            }
 
-        private fun normalize(value: String): String =
+        private val marks = Regex("\\p{M}+")
+        private val apostrophes = Regex("['’]")
+        private val separators = Regex("[^\\p{L}\\p{N}]+")
+
+        /** Keeps non-Latin letters and leading articles, unlike the server matcher's key. */
+        private fun rankKey(text: String): String =
             Normalizer
-                .normalize(value, Normalizer.Form.NFD)
-                .replace(accents, "")
+                .normalize(text, Normalizer.Form.NFD)
+                .replace(marks, "")
                 .lowercase(Locale.ROOT)
                 .replace("&", " and ")
-                .replace("'", "")
-                .replace("’", "")
-                .replace(punctuation, " ")
+                .replace(apostrophes, "")
+                .replace(separators, " ")
                 .trim()
 
-        /** Title-match tiers, keeping TMDB's relevance order within a tier. */
+        private fun dropArticle(text: String): String {
+            val article = listOf("the ", "an ", "a ").firstOrNull { text.startsWith(it) } ?: return text
+            return text.removePrefix(article)
+        }
+
+        /** Exact title matches first, then looser ones; TMDB's own order inside each tier. */
         fun rank(
             query: String,
             items: List<TmdbItem>,
         ): List<TmdbItem> {
-            val q = normalize(query)
+            val q = rankKey(query)
             val words = q.split(' ').filter { it.isNotEmpty() }
-            return items.distinctBy { it.key }.sortedBy { item ->
-                val t = normalize(item.title)
-                when {
+            fun tier(item: TmdbItem): Int {
+                val t = rankKey(item.title)
+                return when {
                     t == q -> 0
-                    t.replace(leadingArticle, "") == q.replace(leadingArticle, "") -> 1
+                    dropArticle(t) == dropArticle(q) -> 1
                     t.startsWith("$q ") -> 2
                     " $t ".contains(" $q ") -> 3
-                    words.isNotEmpty() && words.all { it in t.split(' ') } -> 4
+                    words.isNotEmpty() && t.split(' ').toSet().containsAll(words) -> 4
                     t.startsWith(q) -> 5
                     t.contains(q) -> 6
                     else -> 7
                 }
             }
+            return items.distinctBy { it.key }.sortedBy(::tier)
         }
-
-        private fun interleave(
-            a: List<TmdbItem>,
-            b: List<TmdbItem>,
-        ): List<TmdbItem> =
-            buildList {
-                for (i in 0 until maxOf(a.size, b.size)) {
-                    a.getOrNull(i)?.let(::add)
-                    b.getOrNull(i)?.let(::add)
-                }
-            }
     }
 }
 
-/** Smart browse queries: "top 10 horror movies", "new anime", "shows like Severance". */
+/** A browse request such as "top 10 horror movies" or "shows like Severance". */
 internal data class SmartQuery(
     val interpretation: String,
     val movies: Boolean,
@@ -315,62 +511,82 @@ internal data class SmartQuery(
     val similarTo: String?,
 ) {
     companion object {
-        private val similar = Regex("(?:movies?|shows?|series|films?)\\s+like\\s+(.+)", RegexOption.IGNORE_CASE)
-        private val smart =
+        private const val BY_VOTES = "vote_average.desc"
+        private const val BY_DATE = "primary_release_date.desc"
+        private const val BY_POPULARITY = "popularity.desc"
+
+        // In lookup order: the first name found in the query wins
+        private val GENRES =
+            listOf(
+                "horror" to "27",
+                "comedy" to "35",
+                "action" to "28",
+                "drama" to "18",
+                "thriller" to "53",
+                "sci-fi" to "878",
+                "science fiction" to "878",
+                "romance" to "10749",
+                "animation" to "16",
+                "documentary" to "99",
+                "crime" to "80",
+                "fantasy" to "14",
+                "adventure" to "12",
+                "mystery" to "9648",
+                "war" to "10752",
+                "western" to "37",
+                "family" to "10751",
+                "history" to "36",
+            )
+
+        private val similar = Regex("(?:movies|movie|shows|show|series|films|film)\\s+like\\s+(.+)")
+        private val browse =
             Regex(
                 "(?:top(?:\\s+\\d+)?(?:\\s+rated)?|best|popular|trending|new|latest)" +
-                    "(?:\\s+(?:horror|comedy|action|drama|thriller|sci-fi|science fiction|romance|animation|" +
-                    "documentary|crime|fantasy|adventure|mystery|war|western|family|history))?" +
-                    "\\s+(?:movies?|tv shows?|shows|series|films?|anime)",
-                RegexOption.IGNORE_CASE,
+                    "(?:\\s+(?:" + GENRES.joinToString("|") { Regex.escape(it.first) } + "))?" +
+                    "\\s+(?:movies|movie|tv shows|tv show|shows|series|films|film|anime)",
             )
-        private val limitRegex = Regex("top\\s+(\\d+)")
-        private val genres =
-            linkedMapOf(
-                "horror" to "27", "comedy" to "35", "action" to "28", "drama" to "18", "thriller" to "53",
-                "sci-fi" to "878", "science fiction" to "878", "romance" to "10749", "animation" to "16",
-                "documentary" to "99", "crime" to "80", "fantasy" to "14", "adventure" to "12",
-                "mystery" to "9648", "war" to "10752", "western" to "37", "family" to "10751", "history" to "36",
-            )
+        private val topCount = Regex("top\\s+(\\d+)")
 
-        /** Movie genre ids that differ on TMDB's TV side. */
-        fun tvGenre(movieGenre: String): String =
-            when (movieGenre) {
-                "28", "12" -> "10759" // Action & Adventure
-                "878", "14" -> "10765" // Sci-Fi & Fantasy
-                "10752" -> "10768" // War & Politics
-                "53", "27" -> "9648" // closest TV equivalent: Mystery
-                else -> movieGenre
-            }
+        /** The whole query must match, so a title that merely contains "best" stays a normal search. */
+        fun parse(query: String): SmartQuery? {
+            val q = query.lowercase(Locale.ROOT).trim()
 
-        fun parse(raw: String): SmartQuery? {
-            val q = raw.lowercase(Locale.ROOT).trim()
             similar.matchEntire(q)?.let { m ->
                 val title = m.groupValues[1].trim()
                 val tv = q.startsWith("show") || q.startsWith("series")
-                return SmartQuery("Similar to \"${title.replaceFirstChar { it.uppercase() }}\"", !tv, tv, false, null, "popularity.desc", null, null, title)
+                return SmartQuery(
+                    interpretation = "Similar to \"${title.capitalized()}\"",
+                    movies = !tv,
+                    tv = tv,
+                    anime = false,
+                    genreId = null,
+                    sort = BY_POPULARITY,
+                    minVotes = null,
+                    limit = null,
+                    similarTo = title,
+                )
             }
-            if (!smart.matches(q)) return null
-            val genre = genres.entries.firstOrNull { q.contains(it.key) }
-            val anime = q.contains("anime")
-            val isTv = q.contains("show") || q.contains("series")
-            val isMovie = q.contains("movie") || q.contains("film")
-            val limit = limitRegex.find(q)?.groupValues?.get(1)?.toIntOrNull()
+
+            if (!browse.matches(q)) return null
+            val genre = GENRES.firstOrNull { it.first in q }
+            val anime = "anime" in q
+            val isTv = "show" in q || "series" in q
+            val isMovie = "movie" in q || "film" in q
+            val limit = topCount.find(q)?.groupValues?.get(1)?.toIntOrNull()
             val sort =
                 when {
-                    q.contains("best") || q.contains("top rated") || limit != null -> "vote_average.desc"
-                    q.contains("new") || q.contains("latest") -> "primary_release_date.desc"
-                    else -> "popularity.desc"
+                    "best" in q || "top rated" in q || limit != null -> BY_VOTES
+                    "new" in q || "latest" in q -> BY_DATE
+                    else -> BY_POPULARITY
                 }
-            val parts = mutableListOf<String>()
-            when {
-                limit != null -> parts += "Top $limit"
-                sort == "vote_average.desc" -> parts += "Best"
-                sort.contains("date") -> parts += "Newest"
-                else -> parts += "Popular"
-            }
-            genre?.let { parts += it.key.replaceFirstChar { c -> c.uppercase() } }
-            parts +=
+            val lead =
+                when {
+                    limit != null -> "Top $limit"
+                    sort == BY_VOTES -> "Best"
+                    sort == BY_DATE -> "Newest"
+                    else -> "Popular"
+                }
+            val what =
                 when {
                     anime -> "Anime"
                     isTv && !isMovie -> "Series"
@@ -378,16 +594,28 @@ internal data class SmartQuery(
                     else -> "Movies & Series"
                 }
             return SmartQuery(
-                interpretation = parts.joinToString(" "),
+                interpretation = listOfNotNull(lead, genre?.first?.capitalized(), what).joinToString(" "),
                 movies = !anime && (isMovie || !isTv),
                 tv = anime || isTv || !isMovie,
                 anime = anime,
-                genreId = genre?.value,
+                genreId = genre?.second,
                 sort = sort,
-                minVotes = if (sort == "vote_average.desc") 500 else null,
+                minVotes = if (sort == BY_VOTES) 500 else null,
                 limit = limit,
                 similarTo = null,
             )
         }
+
+        /** TMDB's TV genres use other ids for some movie genres. */
+        fun tvGenre(movieGenre: String): String =
+            when (movieGenre) {
+                "28", "12" -> "10759"
+                "878", "14" -> "10765"
+                "10752" -> "10768"
+                "53", "27" -> "9648"
+                else -> movieGenre
+            }
+
+        private fun String.capitalized(): String = replaceFirstChar { it.uppercaseChar() }
     }
 }

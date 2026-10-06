@@ -9,8 +9,4 @@ It is built from:
   no version number, so (GPL section 9) any published version may be used; Orca+ uses
   version 3. hooks.patch modifies Wholphin source files; changes are marked "Orca+".
 
-* Third-party code under the Apache License 2.0 (LICENSES/Apache-2.0.txt, which carries its
-  copyright notice). Files containing adapted code say so in their header; all of them were
-  modified for Orca+.
-
 Not affiliated with or endorsed by the Wholphin project.

@@ -47,9 +47,10 @@ class SearchService
             TmdbClient(
                 http = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).build(),
                 apiKey = { hook.store.tmdbKey.value },
+                proxy = com.wholphinplus.sources.sync.ProfileSync.ENDPOINT + "/v1/tmdb",
             )
 
-        val enabled: Boolean get() = tmdb.hasKey
+        val enabled: Boolean get() = tmdb.available
 
         private val libraryCache = ConcurrentHashMap<String, Availability>()
 
@@ -60,22 +61,26 @@ class SearchService
 
         suspend fun availability(item: TmdbItem): Availability {
             libraryCache[item.key]?.let { return it }
+            // Only a real answer is remembered: after a failed lookup (network blip) the title
+            // is asked about again next time instead of staying "elsewhere" until a restart
+            var answered = false
             val result =
                 lookups.withPermit {
-                withContext(Dispatchers.IO) {
-                    val main = hook.mainConnection() ?: return@withContext Availability.Elsewhere
-                    val request = PlayRequest(item.title, item.year, null, item.id, null)
-                    val ids =
-                        runCatching {
-                            if (item.type == TmdbType.TV) hook.client.matchSeriesIds(main, request) else hook.client.matchItemIds(main, request)
-                        }.onFailure { Timber.w(it, "Library lookup failed for %s", item.title) }
-                            .getOrDefault(emptyList())
-                    ids.firstOrNull()?.let { id -> runCatching { UUID.fromString(dashed(id)) }.getOrNull() }
-                        ?.let { Availability.Library(it, item.type == TmdbType.TV) }
-                        ?: Availability.Elsewhere
+                    withContext(Dispatchers.IO) {
+                        val main = hook.mainConnection() ?: return@withContext Availability.Elsewhere
+                        val request = PlayRequest(item.title, item.year, null, item.id, null)
+                        val ids =
+                            runCatching {
+                                if (item.type == TmdbType.TV) hook.client.matchSeriesIds(main, request) else hook.client.matchItemIds(main, request)
+                            }.onSuccess { answered = true }
+                                .onFailure { Timber.w(it, "Library lookup failed for %s", item.title) }
+                                .getOrDefault(emptyList())
+                        ids.firstOrNull()?.let { id -> runCatching { UUID.fromString(dashed(id)) }.getOrNull() }
+                            ?.let { Availability.Library(it, item.type == TmdbType.TV) }
+                            ?: Availability.Elsewhere
+                    }
                 }
-                }
-            libraryCache[item.key] = result
+            if (answered) libraryCache[item.key] = result
             return result
         }
 

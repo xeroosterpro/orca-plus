@@ -8,6 +8,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.layout
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -20,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
+import coil3.request.transformations
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
@@ -52,14 +64,47 @@ data class PosterOverlays(
     val hdr: Boolean = false,
     val audio: Boolean = false,
     val rating: Boolean = false,
-    val top10: Boolean = false,
-    val watched: Boolean = false,
+    val top10: Boolean = true,
+    val watched: Boolean = true,
     val newLabels: Boolean = true,
+    /** Where a title streams, as small service logos on its card. */
+    val services: Boolean = true,
+    /** How many service logos a card shows (a show's own network first). */
+    val maxServices: Int = 2,
+    /** The title's logo over a clean picture; off, the old art with the name baked in. */
+    val titleLogos: Boolean = true,
+    /** The title, release date and length under each card. */
+    val captions: Boolean = true,
+    /** The red watched-so-far line along the bottom. */
+    val progress: Boolean = true,
     val corner: OverlayCorner = OverlayCorner.TOP_RIGHT,
     val style: OverlayStyle = OverlayStyle.MINIMAL,
 ) {
     /** These need each title's streams, which make the server's answers bigger. */
     val needsStreams: Boolean get() = resolution || hdr || audio
+
+    companion object {
+        /** Just the picture, its title logo, the title under it and how far you got. */
+        val CLEAN = PosterOverlays(top10 = false, watched = false, newLabels = false, services = false)
+
+        /**
+         * The everyday set, and what a TV starts with: Top 10, watched, what's new, where it
+         * streams, the title under the card. No quality tags, no scores on cards (owner's choice).
+         */
+        val STANDARD = PosterOverlays()
+
+        /** Every tag there is. */
+        val EVERYTHING = PosterOverlays(resolution = true, hdr = true, audio = true, rating = true)
+
+        /** Defaults before 2026-10-05: tags saved then (which left defaults out) keep these. */
+        private val SAVED_BEFORE = mapOf("top10" to false, "watched" to false, "captions" to false)
+
+        /** Saved tags, read the way they were saved (see [SAVED_BEFORE]). */
+        fun fromSaved(
+            json: kotlinx.serialization.json.Json,
+            raw: String,
+        ): PosterOverlays = json.decodeFromJsonElement(serializer(), withOld(json, raw, SAVED_BEFORE))
+    }
 }
 
 internal val LocalOverlays = staticCompositionLocalOf { PosterOverlays() }
@@ -310,53 +355,226 @@ private fun Top10Badge(modifier: Modifier) {
     }
 }
 
-/** Settings preview: a wide card and a poster wearing every badge that's switched on. */
+/**
+ * The Poster tags preview: a real card and Top 10 poster from your home, drawn by the rows' own
+ * code, wearing every tag that's on. Tags the title doesn't have (Top 10, watched, a New label)
+ * are shown as if it did, so each switch visibly does something. Redrawn as switches flip.
+ */
 @Composable
-internal fun OverlayPreview(overlays: PosterOverlays) {
-    val sample =
-        CinemaItem(
-            id = java.util.UUID(0, 1),
-            kind = org.jellyfin.sdk.model.api.BaseItemKind.MOVIE,
-            detailsId = java.util.UUID(0, 1),
-            detailsKind = org.jellyfin.sdk.model.api.BaseItemKind.MOVIE,
-            title = "Preview",
-            subtitle = null,
-            meta = emptyList(),
-            rating = "PG-13",
-            overview = "",
-            backdropUrl = null,
-            cardUrl = null,
-            cardHasTitleArt = false,
-            logoUrl = null,
-            badge = "Recently Added",
-            resumeMs = 0,
-            progress = null,
-            rank = 1,
-            resolution = "4K",
-            hdr = "DV",
-            audio = "ATMOS",
+internal fun PosterTagsPreview(
+    overlays: PosterOverlays,
+    ratingPrefs: RatingPrefs,
+    art: CinemaArt?,
+    ratings: RatingsRepository?,
+    /** Changes when Home has loaded meanwhile, so a real title replaces the stand-in. */
+    sampleKey: Any? = null,
+) {
+    val sample = androidx.compose.runtime.remember(art, sampleKey) { previewTitle(art) ?: PREVIEW_SAMPLE }
+    val shown =
+        sample.copy(
+            rank = sample.rank ?: 1,
             played = true,
+            badge = sample.badge ?: "Recently Added",
+            progress = sample.progress ?: 0.35f,
+            resolution = sample.resolution ?: "4K",
+            hdr = sample.hdr ?: "DV",
+            audio = sample.audio ?: "ATMOS",
+            rating = sample.rating ?: "PG-13",
         )
-    val art = androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color(0xFF3B4A6B), Color(0xFF1B1F2A), Color(0xFF6B3B3B)))
-    androidx.compose.runtime.CompositionLocalProvider(LocalOverlays provides overlays) {
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Bottom) {
-            Box(Modifier.size(width = 224.dp, height = 126.dp).background(art, RoundedCornerShape(6.dp))) {
-                Text("Wide card", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp, modifier = Modifier.align(Alignment.Center))
-                if (overlays.newLabels) {
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalArt provides art,
+        LocalOverlays provides overlays,
+        LocalRatingPrefs provides ratingPrefs,
+        LocalRatings provides ratings,
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            Scaled(208.dp, 1.6f) {
+                Column {
+                    Box(Modifier.size(208.dp, 117.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFF1F1F1F))) { CinemaCardFace(shown, 208.dp) }
+                    if (overlays.captions) CardCaption(shown)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.Bottom) {
+                Scaled(PosterWidth, 1.15f) {
+                    Box(Modifier.size(PosterWidth, PosterHeight).clip(RoundedCornerShape(4.dp)).background(Color(0xFF1F1F1F))) { PosterFace(shown) }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 4.dp)) {
+                    Text("Wide card and Top 10 poster", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                     Text(
-                        sample.badge!!,
-                        color = Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.align(Alignment.BottomCenter).background(Label, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)).padding(horizontal = 7.dp, vertical = 2.dp),
+                        if (sample === PREVIEW_SAMPLE) "Open Home once to preview your own titles." else "${sample.title} from your home, wearing every tag that's on.",
+                        color = InkDim,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.width(260.dp),
                     )
                 }
-                PosterBadges(sample)
-            }
-            Box(Modifier.size(width = 84.dp, height = 126.dp).background(art, RoundedCornerShape(4.dp))) {
-                Text("Poster", color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp, modifier = Modifier.align(Alignment.Center))
-                PosterBadges(sample, tall = true)
             }
         }
     }
+}
+
+/**
+ * [content] laid out at [width] (its own height) and drawn [scale] times larger, taking up the
+ * scaled size. Crisp: a canvas scale, not a bitmap.
+ */
+@Composable
+private fun Scaled(
+    width: androidx.compose.ui.unit.Dp,
+    scale: Float,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        Modifier.layout { measurable, _ ->
+            val p = measurable.measure(androidx.compose.ui.unit.Constraints.fixedWidth(width.roundToPx()))
+            val w = (p.width * scale).toInt()
+            val h = (p.height * scale).toInt()
+            layout(w, h) {
+                // Scaled about its centre: shifted so its top-left sits at ours
+                p.placeWithLayer((w - p.width) / 2, (h - p.height) / 2) {
+                    scaleX = scale
+                    scaleY = scale
+                }
+            }
+        },
+    ) { content() }
+}
+
+/** Stands in until Home has loaded once. */
+private val PREVIEW_SAMPLE =
+    CinemaItem(
+        id = java.util.UUID(0, 1),
+        kind = org.jellyfin.sdk.model.api.BaseItemKind.MOVIE,
+        detailsId = java.util.UUID(0, 1),
+        detailsKind = org.jellyfin.sdk.model.api.BaseItemKind.MOVIE,
+        title = "Your title",
+        subtitle = null,
+        meta = emptyList(),
+        rating = "PG-13",
+        overview = "",
+        backdropUrl = null,
+        cardUrl = null,
+        cardHasTitleArt = false,
+        logoUrl = null,
+        badge = "Recently Added",
+        resumeMs = 0,
+        progress = 0.35f,
+    )
+
+/**
+ * Where a title streams: its services' wordmarks, small and white straight on the picture
+ * (see [WhiteWordmark]), in the top corner opposite the quality badges. Nothing behind them:
+ * a shade there showed as a grey band across the picture.
+ */
+@Composable
+internal fun BoxScope.ServiceLogos(
+    item: CinemaItem,
+    services: List<String>,
+) {
+    val o = LocalOverlays.current
+    if (!o.services || services.isEmpty()) return
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val right = o.corner == OverlayCorner.TOP_LEFT
+    // The Top 10 corner badge shares that corner: the logos sit beside it
+    val beside = if (o.top10 && item.rank != null) 28.dp else 0.dp
+    Row(
+        Modifier.align(if (right) Alignment.TopEnd else Alignment.TopStart).padding(top = 8.dp, start = if (right) 8.dp else 8.dp + beside, end = if (right) 8.dp + beside else 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        services.forEach { url ->
+            val model = androidx.compose.runtime.remember(url) { coil3.request.ImageRequest.Builder(context).data(url).transformations(WhiteWordmark).build() }
+            FittedLogo(model, height = 9.dp, maxWidth = 40.dp, evenOut = true)
+        }
+    }
+}
+
+/**
+ * Turns a service's wordmark into a white one for any picture. Wordmarks are made for white
+ * pages: coloured or dark ink on transparent, and some (a dark box with light letters) have
+ * light parts. Ink (dark or coloured) becomes white, light parts become see-through, so a boxed
+ * logo reads as a white badge with its letters cut out. A wordmark that is already all light
+ * just turns white.
+ */
+internal object WhiteWordmark : coil3.transform.Transformation() {
+    override val cacheKey: String = "white-wordmark-v1"
+
+    override suspend fun transform(
+        input: android.graphics.Bitmap,
+        size: coil3.size.Size,
+    ): android.graphics.Bitmap {
+        val w = input.width
+        val h = input.height
+        val px = IntArray(w * h)
+        input.getPixels(px, 0, w, 0, 0, w, h)
+        val inked = IntArray(px.size)
+        var ink = 0.0
+        var opaque = 0.0
+        for (i in px.indices) {
+            val c = px[i]
+            val a = c ushr 24
+            if (a == 0) continue
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            val max = maxOf(r, g, b)
+            val light = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+            val saturation = if (max == 0) 0.0 else (max - minOf(r, g, b)).toDouble() / max
+            val k = maxOf(1.0 - light, saturation).coerceIn(0.0, 1.0)
+            inked[i] = ((a * k).toInt() shl 24) or 0xFFFFFF
+            ink += a * k
+            opaque += a
+        }
+        // Barely any ink: an all-light wordmark, shown whole in white instead of vanishing
+        val keep = opaque > 0 && ink / opaque < 0.15
+        val out = if (keep) IntArray(px.size) { i -> (px[i] and 0xFF000000.toInt()) or 0xFFFFFF } else inked
+        return android.graphics.Bitmap.createBitmap(out, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+    }
+}
+
+/**
+ * A logo drawn as large as fits [height] x [maxWidth] for its shape. Sized from the image once
+ * it's loaded (a wrapping image stays at its pixel size, small on a TV).
+ */
+@Composable
+internal fun FittedLogo(
+    model: Any,
+    height: androidx.compose.ui.unit.Dp,
+    maxWidth: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+    alignment: Alignment = Alignment.CenterStart,
+    /** Squarer logos (a short word over a swoosh) drawn taller, so all read about as large. */
+    evenOut: Boolean = false,
+) {
+    var ratio by androidx.compose.runtime.remember(model) { androidx.compose.runtime.mutableStateOf<Float?>(null) }
+    coil3.compose.AsyncImage(
+        model = model,
+        contentDescription = null,
+        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+        alignment = alignment,
+        onState = { state ->
+            if (state is coil3.compose.AsyncImagePainter.State.Success) {
+                val image = state.result.image
+                if (image.width > 0 && image.height > 0) ratio = image.width.toFloat() / image.height
+            }
+        },
+        modifier =
+            modifier.then(
+                ratio?.let { r -> Modifier.heightIn(max = if (evenOut && r < 2.6f) height * 1.5f else height).widthIn(max = maxWidth).aspectRatio(r) }
+                    ?: Modifier.size(width = maxWidth, height = height),
+            ),
+    )
+}
+
+/**
+ * A saved settings object with [old] filled in for the keys it lacks. Settings were once saved
+ * without the values that equalled the defaults of the day; now every value is saved, so a
+ * later change of default only reaches TVs that never saved the setting.
+ */
+internal fun withOld(
+    json: kotlinx.serialization.json.Json,
+    raw: String,
+    old: Map<String, Boolean>,
+): kotlinx.serialization.json.JsonObject {
+    val saved = json.parseToJsonElement(raw) as kotlinx.serialization.json.JsonObject
+    return kotlinx.serialization.json.JsonObject(old.mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) } + saved)
 }

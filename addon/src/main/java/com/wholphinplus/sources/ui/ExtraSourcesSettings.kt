@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,18 +20,23 @@ import androidx.compose.foundation.text.BasicSecureTextField
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
@@ -67,9 +74,11 @@ interface SourcesEntryPoint {
     fun searchService(): com.wholphinplus.sources.SearchService
 
     fun cinemaArt(): com.wholphinplus.sources.cinema.CinemaArt
+
+    fun ratings(): com.wholphinplus.sources.cinema.RatingsRepository
 }
 
-private fun Context.sourceHook(): SourceHook = EntryPointAccessors.fromApplication(applicationContext, SourcesEntryPoint::class.java).sourceHook()
+internal fun Context.sourceHook(): SourceHook = EntryPointAccessors.fromApplication(applicationContext, SourcesEntryPoint::class.java).sourceHook()
 
 /** The one row Wholphin's settings screen shows for the addon. */
 @Composable
@@ -87,8 +96,8 @@ fun ExtraSourcesEntry(modifier: Modifier = Modifier) {
             Text(
                 listOf(
                     "${connections.count { it.enabled }} extra servers",
-                    if (tmdb.isBlank()) "search off" else "smart search",
-                    "${lists.count { it.showOnHome }} home collections",
+                    "smart search",
+                    "${lists.count { it.showOnHome }} lists on home",
                 ).joinToString("  ·  "),
             )
         },
@@ -111,6 +120,137 @@ fun ExtraSourcesEntry(modifier: Modifier = Modifier) {
     }
 }
 
+/** Settings topics that start with Orca+ items (names of Wholphin's OrcaSection). */
+object OrcaTopics {
+    fun has(topic: String): Boolean = topic in setOf("APPEARANCE", "SOURCES", "PROFILE", "ABOUT")
+}
+
+/**
+ * The Orca+ items at the top of a Settings topic: Home & Look (home style, rows, poster tags,
+ * lists), Servers & Search (extra sources, search), Profile & Cloud (cloud sync), About
+ * (credits). Each opens its Orca+ page full screen; Back comes back here.
+ */
+@Composable
+fun OrcaTopicItems(
+    topic: String,
+    firstModifier: Modifier = Modifier,
+) {
+    val hook = LocalContext.current.sourceHook()
+    var open by remember { mutableStateOf<Screen?>(null) }
+    val cinema by hook.store.cinemaMode.collectAsState()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 12.dp)) {
+        when (topic) {
+            "APPEARANCE" -> {
+                PlusListItem(
+                    onClick = { hook.store.setCinemaMode(!cinema) },
+                    headlineContent = { Text("Cinema home", style = MaterialTheme.typography.titleMedium) },
+                    supportingContent = {
+                        Text(if (cinema) "On: big-screen home with a featured billboard and wide rows" else "Off: the classic home with a side menu")
+                    },
+                    trailingContent = { androidx.tv.material3.Switch(checked = cinema, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
+                    modifier = firstModifier.width(720.dp),
+                )
+                if (cinema) {
+                    MenuItem("Rows", "Pick, order and rename the rows on Home, Shows, Movies and New & Popular") { open = Screen.HomeRows() }
+                    val overlays by hook.store.overlays.collectAsState()
+                    val ratings by hook.store.ratingPrefs.collectAsState()
+                    val on =
+                        listOf(
+                            overlays.titleLogos to "Title logos",
+                            overlays.services to "Streaming",
+                            ratings.onCards to "Scores",
+                            (overlays.resolution || overlays.hdr || overlays.audio) to "Quality",
+                            overlays.top10 to "Top 10",
+                            overlays.watched to "Watched",
+                            overlays.newLabels to "New",
+                            overlays.captions to "Titles",
+                        ).filter { it.first }.map { it.second }
+                    MenuItem("Poster tags", if (on.isEmpty()) "Pictures only" else on.joinToString(" · ")) { open = Screen.Overlays }
+                    val rollUp by hook.store.cinemaRollUp.collectAsState()
+                    PlusListItem(
+                        onClick = { hook.store.setCinemaRollUp(!rollUp) },
+                        headlineContent = { Text("Roll up the billboard while browsing", style = MaterialTheme.typography.titleMedium) },
+                        supportingContent = { Text(if (rollUp) "On: the title details shrink when you scroll into the rows" else "Off: the title details stay full size") },
+                        trailingContent = { androidx.tv.material3.Switch(checked = rollUp, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
+                        modifier = Modifier.width(720.dp),
+                    )
+                }
+                // Lists you added (the Orca+ cloud's charts are arranged in Rows, not here)
+                val all by hook.collections.lists.collectAsState()
+                val lists = all.filterNot { hook.collections.isChart(it) || hook.collections.isTopStreaming(it) }
+                MenuItem(
+                    "Your lists",
+                    if (lists.isEmpty()) "Add MDBList, Trakt or Top Streaming lists as rows" else "${lists.size} added  ·  MDBList, Trakt, Top Streaming",
+                ) { open = Screen.Collections }
+            }
+            "SOURCES" -> {
+                val connections by hook.store.connections.collectAsState()
+                val tmdb by hook.store.tmdbKey.collectAsState()
+                MenuItem(
+                    "Extra servers",
+                    if (connections.isEmpty()) "Play from your Plex, Emby and other Jellyfin servers" else "${connections.count { it.enabled }} of ${connections.size} servers on",
+                    firstModifier,
+                ) { open = Screen.List }
+                MenuItem("Search", if (tmdb.isBlank()) "Smart search is on  ·  your own TMDB key is optional" else "Smart search is on, with your TMDB key") { open = Screen.TmdbKey }
+            }
+            "PROFILE" -> {
+                val cloud by hook.profileSync.status.collectAsState()
+                MenuItem(
+                    "Cloud sync",
+                    when {
+                        !cloud.on -> "Off: keep your whole setup in the cloud and bring it to any TV"
+                        cloud.problem != null -> "On  ·  ${cloud.problem}"
+                        else -> "On  ·  synced ${ago(cloud.lastSync)}"
+                    },
+                    firstModifier,
+                ) { open = Screen.Cloud }
+            }
+            "ABOUT" -> {
+                var credits by remember { mutableStateOf(false) }
+                MenuItem("Credits", "Orca+ is built on Wholphin by damontecres (GPL)", firstModifier) { credits = !credits }
+                if (credits) {
+                    Text(
+                        "Orca+ is built on Wholphin by damontecres and contributors, under the GNU GPL. " +
+                            "Not affiliated with or endorsed by the Wholphin project.\n" + TMDB_NOTICE,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(720.dp).padding(horizontal = 16.dp),
+                    )
+                }
+            }
+        }
+    }
+    open?.let { start ->
+        Dialog(
+            onDismissRequest = { open = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp))
+                    .padding(horizontal = 48.dp, vertical = 24.dp),
+            ) {
+                ExtraSourcesScreen(hook, onClose = { open = null }, start = start)
+            }
+        }
+    }
+}
+
+/** Cinema mode's "Customize home": the home rows editor as a page of its own. */
+@Composable
+fun CinemaHomeRowsPage(modifier: Modifier = Modifier) {
+    val hook = LocalContext.current.sourceHook()
+    Box(
+        modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 48.dp, vertical = 24.dp),
+    ) {
+        ExtraSourcesScreen(hook, onClose = null, start = Screen.HomeRows())
+    }
+}
+
 private sealed interface Screen {
     /** Orca+ start page: Extra sources, Search, Home collections. */
     data object Menu : Screen
@@ -120,13 +260,34 @@ private sealed interface Screen {
 
     data object Collections : Screen
 
-    data object AddCollection : Screen
+    /** Add a list link; [back] is the page it was opened from. */
+    data class AddCollection(
+        val back: Screen = Collections,
+    ) : Screen
+
+    /** A Cinema page's rows: show, hide, move, rename. */
+    data class HomeRows(
+        val page: com.wholphinplus.sources.cinema.RowsPage = com.wholphinplus.sources.cinema.RowsPage.HOME,
+    ) : Screen
+
+    data class RenameRow(
+        val page: com.wholphinplus.sources.cinema.RowsPage,
+        val key: String,
+        val title: String,
+        val defaultName: String,
+    ) : Screen
 
     data class Collection(
         val id: String,
     ) : Screen
 
     data object TraktKey : Screen
+
+    /** Top Streaming: the account whose catalogs become rows. */
+    data object TopStreaming : Screen
+
+    /** Cloud sync: this TV's whole setup in an encrypted profile. */
+    data object Cloud : Screen
 
     data class Server(
         val connection: ServerConnection,
@@ -154,25 +315,41 @@ private sealed interface Screen {
 
     /** Cinema mode's poster overlays. */
     data object Overlays : Screen
+
+    /** Review scores: which, where, and the MDBList key. */
+    data object Ratings : Screen
+
+    data object MdblistKey : Screen
 }
 
 @Composable
 private fun ExtraSourcesScreen(
     hook: SourceHook,
-    onClose: () -> Unit,
+    onClose: (() -> Unit)?,
+    start: Screen = Screen.Menu,
 ) {
     val connections by hook.store.connections.collectAsState()
-    var screen by remember { mutableStateOf<Screen>(Screen.Menu) }
-    // Back walks up: server pages → Extra sources → menu → close
-    androidx.activity.compose.BackHandler {
+    var screen by remember { mutableStateOf(start) }
+    // Back walks up: server pages → Extra sources → menu → close. As a page of its own (no
+    // [onClose]), Back on the first screen is the app's own: it leaves the page
+    // (The rows editor counts as the first screen on any page it shows)
+    fun atStart(s: Screen) = s == start || (start is Screen.HomeRows && s is Screen.HomeRows)
+    androidx.activity.compose.BackHandler(enabled = onClose != null || !atStart(screen)) {
         screen =
-            when (screen) {
-                Screen.Menu -> return@BackHandler onClose()
-                Screen.List, Screen.TmdbKey, Screen.Collections, Screen.Overlays -> Screen.Menu
-                Screen.AddCollection, is Screen.Collection, Screen.TraktKey -> Screen.Collections
+            when (val s = screen) {
+                start -> return@BackHandler onClose?.invoke() ?: Unit
+                is Screen.HomeRows -> if (atStart(s)) return@BackHandler onClose?.invoke() ?: Unit else Screen.Menu
+                Screen.List, Screen.TmdbKey, Screen.Collections, Screen.Overlays, Screen.Cloud -> Screen.Menu
+                Screen.Ratings -> Screen.Overlays
+                Screen.MdblistKey -> Screen.Ratings
+                is Screen.RenameRow -> Screen.HomeRows(s.page)
+                is Screen.AddCollection -> s.back
+                is Screen.Collection, Screen.TraktKey, Screen.TopStreaming -> Screen.Collections
                 else -> Screen.List
             }
     }
+    // Opened at one page from a Settings topic: anything that would go back to the menu closes
+    LaunchedEffect(screen) { if (screen == Screen.Menu && start != Screen.Menu) onClose?.invoke() }
     var busy by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -205,14 +382,21 @@ private fun ExtraSourcesScreen(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val (title, about) =
             when (screen) {
-                Screen.Menu -> "Orca+" to "Everything Orca+ adds to Wholphin. Press Back to leave."
-                Screen.TmdbKey -> "Search" to "Smart search."
-                Screen.Overlays -> "Poster overlays" to "Badges on every poster and card in Cinema mode. Quality badges show for movies once the server knows the file."
-                Screen.Collections, Screen.AddCollection, is Screen.Collection, Screen.TraktKey ->
-                    "Home collections" to "Trakt and MDBList lists as rows on your home screen. They follow the list as it changes " +
+                Screen.Menu -> "Orca+" to "Everything Orca+ can do. Press Back to leave."
+                Screen.TmdbKey -> "Search" to "Finds a title on every server you have."
+                Screen.Ratings, Screen.MdblistKey -> "Score sources" to "Review scores on cards and title pages of the Cinema home, in the order you turn them on."
+                Screen.Overlays -> "Poster tags" to "Everything a card on the Cinema home can show. The preview changes as you go."
+                is Screen.HomeRows, is Screen.RenameRow -> "Rows" to "The rows on each page of the Cinema home, in the order they show. Changes show the next time you open the page."
+                Screen.Cloud ->
+                    "Cloud sync" to "Your whole setup on every TV: settings, rows, lists, keys, extra servers and where you left off. " +
+                        "It's encrypted on this TV with your sync PIN before it's sent, so nobody else can read it."
+                Screen.TopStreaming ->
+                    "Top Streaming" to "Today's Top 10 from each streaming service, as rows on your home. Pick countries and services at top-streaming.stream; Orca+ follows your picks."
+                Screen.Collections, is Screen.AddCollection, is Screen.Collection, Screen.TraktKey ->
+                    "Your lists" to "MDBList, Trakt and Top Streaming lists as rows on your home screen. They follow the list as it changes " +
                         "(checked every 6 hours) and show the titles you have on your Jellyfin server."
                 else ->
-                    "Extra sources" to "When you press Play, these servers are searched for the same title and you pick where to " +
+                    "Extra servers" to "When you press Play, these servers are searched for the same title and you pick where to " +
                         "stream from. Watched status and resume stay on your Jellyfin."
             }
         Text(title, style = MaterialTheme.typography.headlineSmall)
@@ -221,17 +405,36 @@ private fun ExtraSourcesScreen(
         message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
         when (val s = screen) {
-            Screen.Menu -> MenuScreen(hook) { screen = it }
+            Screen.Menu -> if (start == Screen.Menu) MenuScreen(hook) { screen = it }
 
             Screen.Collections -> CollectionsScreen(hook) { screen = it }
 
-            Screen.Overlays -> OverlaysScreen(hook)
+            Screen.Overlays -> OverlaysScreen(hook) { screen = it }
 
-            Screen.AddCollection -> AddCollectionScreen(hook, onDone = { screen = Screen.Collections })
+            Screen.Ratings -> RatingsScreen(hook) { screen = it }
+
+            Screen.MdblistKey -> MdblistKeyScreen(hook, onDone = { screen = Screen.Ratings })
+
+            is Screen.AddCollection -> AddCollectionScreen(hook, onDone = { screen = s.back })
+
+            is Screen.HomeRows ->
+                HomeRowsScreen(
+                    hook,
+                    page = s.page,
+                    onPage = { screen = Screen.HomeRows(it) },
+                    onRename = { spec, name -> screen = Screen.RenameRow(s.page, spec.key, spec.title, name) },
+                    onAddList = { screen = Screen.AddCollection(back = s) },
+                )
+
+            is Screen.RenameRow -> RenameRowScreen(hook, s, onDone = { screen = Screen.HomeRows(s.page) })
 
             is Screen.Collection -> CollectionScreen(hook, s.id, onDone = { screen = Screen.Collections })
 
             Screen.TraktKey -> TraktKeyScreen(hook, onDone = { screen = Screen.Collections })
+
+            Screen.TopStreaming -> TopStreamingScreen(hook, onDone = { screen = Screen.Collections })
+
+            Screen.Cloud -> CloudScreen(hook)
 
             Screen.List -> {
                 val first = remember { FocusRequester() }
@@ -392,16 +595,16 @@ private fun ExtraSourcesScreen(
                 val focus = remember { FocusRequester() }
                 LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
                 Text(
-                    "Smart search turns on when you add a TMDB API key: typos, actors, \"best horror movies\", " +
-                        "\"movies like Alien\", and titles from all your servers. Get a free key at themoviedb.org → " +
-                        "Settings → API. Leave empty to use Wholphin's normal search.",
+                    "Smart search understands typos, actors, \"best horror movies\" and \"movies like Alien\" across all " +
+                        "your servers, through Orca+. Optional: add your own free TMDB key (themoviedb.org → Settings → API) " +
+                        "to ask TMDB directly.",
                 )
                 Field("TMDB API key (v3)", key, Modifier.focusRequester(focus))
                 Text(TMDB_NOTICE, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 ActionRow {
                     Button(onClick = {
                         hook.store.setTmdbKey(key.text.toString())
-                        message = if (key.text.isBlank()) "Smart search off" else "TMDB key saved"
+                        message = if (key.text.isBlank()) "Using Orca+ smart search" else "TMDB key saved"
                         screen = Screen.Menu
                     }) { Text("Save") }
                     Button(onClick = { screen = Screen.Menu }) { Text("Cancel") }
@@ -516,7 +719,7 @@ private fun MenuScreen(
             ) { go(Screen.List) }
         }
         item {
-            MenuItem("Search", if (tmdb.isBlank()) "Wholphin's search  ·  add a TMDB key for smart search" else "Smart search is on") {
+            MenuItem("Search", if (tmdb.isBlank()) "Smart search is on  ·  your own TMDB key is optional" else "Smart search is on, with your TMDB key") {
                 go(Screen.TmdbKey)
             }
         }
@@ -526,9 +729,9 @@ private fun MenuScreen(
                 onClick = { hook.store.setCinemaMode(!cinema) },
                 headlineContent = { Text("Cinema mode", style = MaterialTheme.typography.titleMedium) },
                 supportingContent = {
-                    Text(if (cinema) "On: big-screen streaming home with a featured billboard and wide rows" else "Off: Wholphin's classic home")
+                    Text(if (cinema) "On: big-screen streaming home with a featured billboard and wide rows" else "Off: the classic home with a side menu")
                 },
-                trailingContent = { androidx.tv.material3.Switch(checked = cinema, onCheckedChange = null) },
+                trailingContent = { androidx.tv.material3.Switch(checked = cinema, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
                 modifier = Modifier.width(720.dp),
             )
         }
@@ -542,34 +745,51 @@ private fun MenuScreen(
                     supportingContent = {
                         Text(if (rollUp) "On: the title details shrink to a quarter when you scroll into the rows" else "Off: the title details stay full size")
                     },
-                    trailingContent = { androidx.tv.material3.Switch(checked = rollUp, onCheckedChange = null) },
+                    trailingContent = { androidx.tv.material3.Switch(checked = rollUp, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
                     modifier = Modifier.width(720.dp),
                 )
             }
         }
         item {
             val cinema by hook.store.cinemaMode.collectAsState()
+            if (cinema) MenuItem("Rows", "Pick, order and rename the rows on Home, Shows, Movies and New & Popular") { go(Screen.HomeRows()) }
+        }
+        item {
+            val cinema by hook.store.cinemaMode.collectAsState()
             val overlays by hook.store.overlays.collectAsState()
             if (cinema) {
+                val ratings by hook.store.ratingPrefs.collectAsState()
                 val on =
                     listOf(
-                        overlays.resolution to "Resolution",
-                        overlays.hdr to "HDR",
-                        overlays.audio to "Audio",
-                        overlays.rating to "Rating",
+                        overlays.titleLogos to "Title logos",
+                        overlays.services to "Streaming",
+                        ratings.onCards to "Scores",
+                        (overlays.resolution || overlays.hdr || overlays.audio) to "Quality",
                         overlays.top10 to "Top 10",
                         overlays.watched to "Watched",
+                        overlays.newLabels to "New",
                     ).filter { it.first }.map { it.second }
-                MenuItem("Poster overlays", if (on.isEmpty()) "Add quality, HDR, audio, rating, Top 10 and watched badges to posters" else on.joinToString(" · ")) {
+                MenuItem("Poster tags", if (on.isEmpty()) "Pictures only. Add logos, streaming services, scores, quality and more" else on.joinToString(" · ")) {
                     go(Screen.Overlays)
                 }
             }
         }
         item {
             MenuItem(
-                "Home collections",
+                "Your lists",
                 if (lists.isEmpty()) "Add Trakt or MDBList lists as home rows" else "${lists.count { it.showOnHome }} of ${lists.size} on the home screen",
             ) { go(Screen.Collections) }
+        }
+        item {
+            val cloud by hook.profileSync.status.collectAsState()
+            MenuItem(
+                "Cloud sync",
+                when {
+                    !cloud.on -> "Off: keep your whole setup in the cloud and bring it to any TV"
+                    cloud.problem != null -> "On  ·  ${cloud.problem}"
+                    else -> "On  ·  synced ${ago(cloud.lastSync)}"
+                },
+            ) { go(Screen.Cloud) }
         }
         item {
             Text(
@@ -625,13 +845,13 @@ private fun CollectionsScreen(
     LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
         item {
             PlusListItem(
-                onClick = { go(Screen.AddCollection) },
+                onClick = { go(Screen.AddCollection()) },
                 headlineContent = { Text("+ Add a list link") },
                 supportingContent = { Text("mdblist.com/lists/…  or  trakt.tv/users/…/lists/…") },
                 modifier = Modifier.focusRequester(first),
             )
         }
-        items(lists, key = { it.id }) { c ->
+        items(lists.filterNot { hook.collections.isTopStreaming(it) || hook.collections.isChart(it) }, key = { it.id }) { c ->
             PlusListItem(
                 onClick = { go(Screen.Collection(c.id)) },
                 headlineContent = { Text((if (c.showOnHome) "● " else "○ ") + c.name) },
@@ -640,6 +860,23 @@ private fun CollectionsScreen(
                         c.error?.let { "Problem: $it" }
                             ?: "${c.itemIds.size} of ${c.listSize} titles in your library  ·  updated ${ago(c.refreshedAt)}",
                         color = if (c.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
+        item {
+            val account by hook.collections.topStreamingAccount.collectAsState()
+            val charts = lists.filter { hook.collections.isTopStreaming(it) }
+            PlusListItem(
+                onClick = { go(Screen.TopStreaming) },
+                headlineContent = { Text("Top Streaming") },
+                supportingContent = {
+                    Text(
+                        if (account.isBlank()) {
+                            "Not set: today's Top 10 per streaming service, as rows"
+                        } else {
+                            "${charts.size} charts  ·  ${charts.count { it.showOnHome }} on the home  ·  arrange them in Rows"
+                        },
                     )
                 },
             )
@@ -742,40 +979,386 @@ private fun TraktKeyScreen(
     }
 }
 
+@Composable
+private fun CloudScreen(hook: SourceHook) {
+    val sync = hook.profileSync
+    val status by sync.status.collectAsState()
+    val scope = rememberCoroutineScope()
+    var message by remember { mutableStateOf<String?>(null) }
+    var working by remember { mutableStateOf(false) }
+    // Off: whether the cloud already has a profile for this account (null: it couldn't be asked)
+    var exists by remember { mutableStateOf<Boolean?>(null) }
+    var checked by remember { mutableStateOf(false) }
+    var asked by remember { mutableIntStateOf(0) }
+    // The full-screen PIN pad: "on" (set up or bring the setup here) or "pin" (a new PIN)
+    var pad by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(status.on, asked) {
+        if (!status.on) {
+            checked = false
+            exists = sync.cloudHasProfile(hook)
+            checked = true
+        }
+    }
+    LaunchedEffect(status.on, checked, pad) { if (pad == null) runCatching { focus.requestFocus() } }
+
+    fun act(
+        label: String,
+        block: suspend () -> Unit,
+    ) {
+        if (working) return
+        working = true
+        message = label
+        scope.launch {
+            message =
+                try {
+                    block()
+                    null
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    com.wholphinplus.sources.sync.ProfileSync.describe(e)
+                }
+            working = false
+        }
+    }
+    // Why sync went off by itself (the profile was deleted on another TV)
+    if (!status.on) status.problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    when {
+        !status.on && !checked -> Text("Checking the cloud for your profile…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        !status.on && exists == null -> {
+            Text("Can't reach the Orca+ cloud right now.")
+            ActionRow { Button(onClick = { asked++ }, modifier = Modifier.focusRequester(focus)) { Text("Try again") } }
+        }
+        !status.on -> {
+            Text(
+                if (exists == true) {
+                    "Your setup is saved in the cloud for this account. Bring it to this TV with your 6-digit sync PIN; it replaces this TV's settings."
+                } else {
+                    "Keep this TV's whole setup in the cloud with a 6-digit sync PIN, then bring it to any other TV by signing in and entering the PIN."
+                },
+            )
+            ActionRow {
+                Button(onClick = { pad = "on" }, modifier = Modifier.focusRequester(focus)) { Text(if (exists == true) "Bring my setup here" else "Set up cloud sync") }
+            }
+        }
+        else -> {
+            Text(
+                if (status.busy) "Syncing…" else "On. Last synced ${ago(status.lastSync)}. This TV syncs when Home opens and when you leave the app.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            status.problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            ActionRow {
+                Button(onClick = { act("Syncing…") { sync.syncNow(hook) } }, modifier = Modifier.focusRequester(focus)) { Text("Sync now") }
+                Button(onClick = { pad = "pin" }) { Text("Change PIN") }
+                Button(onClick = { sync.turnOff() }) { Text("Turn off on this TV") }
+                Button(onClick = {
+                    if (!confirmDelete) {
+                        confirmDelete = true
+                        message = "Press again to delete the cloud profile for every TV."
+                    } else {
+                        act("Deleting…") { sync.deleteCloud(hook) }
+                    }
+                }) { Text(if (confirmDelete) "Yes, delete it" else "Delete cloud profile") }
+            }
+        }
+    }
+    message?.let { Text(it, color = if (working) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
+
+    when (pad) {
+        "on" -> PadDialog(onClose = { pad = null }) {
+            CloudPinFlow(hook, exists == true, onDone = { pad = null }, onSkip = { pad = null }, skipLabel = "Cancel", modifier = Modifier.fillMaxSize())
+        }
+        "pin" -> PadDialog(onClose = { pad = null }) {
+            var busy by remember { mutableStateOf(false) }
+            var error by remember { mutableStateOf<String?>(null) }
+            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                NewPinPad(
+                    title = "Pick a new sync PIN",
+                    subtitle = "Six digits. Your other TVs will ask for it once.",
+                    error = error,
+                    busy = busy,
+                    busyText = "Changing the PIN…",
+                    onPin = { p ->
+                        busy = true
+                        scope.launch {
+                            try {
+                                sync.changePin(hook, p)
+                                message = "PIN changed. Other TVs will ask for the new one."
+                                pad = null
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                error = com.wholphinplus.sources.sync.ProfileSync.describe(e)
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                )
+                Spacer(Modifier.height(18.dp))
+                SkipButton("Cancel", busy) { pad = null }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TopStreamingScreen(
+    hook: SourceHook,
+    onDone: () -> Unit,
+) {
+    val account = rememberTextFieldState(hook.collections.topStreamingAccount.value)
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val focus = remember { FocusRequester() }
+    val saveButton = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    Text(
+        "Sign in at top-streaming.stream, pick your countries and services under Content and Catalogs, then copy " +
+            "Your Account UUID from the Account tab here (the Copy URL link works too). New charts start switched off.",
+    )
+    Field("Account UUID", account, Modifier.focusRequester(focus).focusProperties { down = saveButton })
+    status?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+    ActionRow {
+        Button(
+            onClick = {
+                if (busy) return@Button
+                busy = true
+                status = "Loading your charts…"
+                scope.launch {
+                    status =
+                        try {
+                            val id = hook.collections.setTopStreamingAccount(account.text.toString())
+                            if (id.isEmpty()) {
+                                "That doesn't contain an account UUID (like 1a2b3c4d-…)."
+                            } else {
+                                val n = withContext(Dispatchers.IO) { hook.collections.syncTopStreaming() }
+                                hook.collections.refreshStale(hook)
+                                "$n charts found. They start on New & Popular; add them to Home, Shows or Movies in Rows. They update every few hours."
+                            }
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            "Top Streaming didn't answer: ${e.message ?: e.javaClass.simpleName}"
+                        }
+                    busy = false
+                }
+            },
+            modifier = Modifier.focusRequester(saveButton),
+        ) { Text("Save and load charts") }
+        Button(onClick = {
+            hook.collections.setTopStreamingAccount("")
+            onDone()
+        }) { Text("Remove") }
+        Button(onClick = onDone) { Text("Back") }
+    }
+}
+
+@Composable
+private fun RenameRowScreen(
+    hook: SourceHook,
+    row: Screen.RenameRow,
+    onDone: () -> Unit,
+) {
+    val name = rememberTextFieldState(row.title.ifBlank { row.defaultName })
+    val focus = remember { FocusRequester() }
+    val saveButton = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    // Renaming reads the saved layout fresh, so a change made meanwhile isn't lost
+    fun save(title: String) {
+        val base = hook.store.pageLayouts.value[row.page] ?: return onDone()
+        hook.store.setPageLayout(row.page, base.renamed(row.key, if (title == row.defaultName) "" else title))
+        com.wholphinplus.sources.cinema.CinemaCaches.homeChanged()
+        onDone()
+    }
+    Text("Its own name is “${row.defaultName}”.")
+    // Down from the name lands on Save, not on the button below the middle of the field
+    Field("Row name", name, Modifier.focusRequester(focus).focusProperties { down = saveButton })
+    ActionRow {
+        Button(onClick = { save(name.text.toString().trim()) }, modifier = Modifier.focusRequester(saveButton)) { Text("Save") }
+        Button(onClick = { save("") }) { Text("Use its own name") }
+        Button(onClick = onDone) { Text("Cancel") }
+    }
+}
+
+// ---------------------------------------------------------------- ratings
+
+@Composable
+private fun RatingsScreen(
+    hook: SourceHook,
+    go: (Screen) -> Unit,
+) {
+    val r by hook.store.ratingPrefs.collectAsState()
+    val key by hook.store.mdblistKey.collectAsState()
+    val first = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
+    val set = { n: com.wholphinplus.sources.cinema.RatingPrefs -> hook.store.setRatingPrefs(n) }
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(vertical = 8.dp), modifier = Modifier.width(720.dp)) {
+        item {
+            MenuItem(
+                "MDBList API key",
+                if (key.isBlank()) "Needed for every score but TMDB's. Free at mdblist.com → Preferences → API" else "Saved  ·  IMDb, Rotten Tomatoes, Metacritic, Letterboxd and Trakt scores on",
+                Modifier.focusRequester(first),
+            ) { go(Screen.MdblistKey) }
+        }
+        com.wholphinplus.sources.cinema.RatingSource.entries.forEach { source ->
+            item {
+                val on = source in r.sources
+                // Its place among the scores that can actually show (the others wait for the key)
+                val usable = r.sources.filter { !it.needsKey || key.isNotBlank() }
+                val place = usable.indexOf(source)
+                val note =
+                    when {
+                        !on -> "Off"
+                        source.needsKey && key.isBlank() -> "On, needs the MDBList key"
+                        place >= 2 -> "On · #${place + 1}: title pages (cards show the first two)"
+                        else -> "On · #${place + 1}"
+                    }
+                Toggle(source.label, note, on) { set(r.with(source, it)) }
+            }
+        }
+        item { Toggle("On cards", "The first two scores in the corner of each card", r.onCards) { set(r.copy(onCards = it)) } }
+        item { Toggle("On title pages", "Every picked score under the genres", r.onTitlePage) { set(r.copy(onTitlePage = it)) } }
+        item {
+            Text(
+                "Scores are kept on the device for a week, so each title is asked about rarely (a free key allows about 1,000 a day).",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MdblistKeyScreen(
+    hook: SourceHook,
+    onDone: () -> Unit,
+) {
+    val key = rememberTextFieldState(hook.store.mdblistKey.value)
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    Text(
+        "IMDb, Rotten Tomatoes, Metacritic, Letterboxd and Trakt scores come from MDBList. Sign in at mdblist.com, " +
+            "open Preferences → API, and copy your API key here. Leave empty to show only TMDB's score.",
+    )
+    Field("MDBList API key", key, Modifier.focusRequester(focus))
+    ActionRow {
+        Button(onClick = {
+            hook.store.setMdblistKey(key.text.toString())
+            onDone()
+        }) { Text("Save") }
+        Button(onClick = onDone) { Text("Cancel") }
+    }
+}
+
 /** Required by TMDB's API terms wherever TMDB data is used. */
 internal const val TMDB_NOTICE = "Search data and images from TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB."
 
 // ---------------------------------------------------------------- poster overlays
 
 @Composable
-private fun OverlaysScreen(hook: SourceHook) {
+private fun OverlaysScreen(
+    hook: SourceHook,
+    go: (Screen) -> Unit,
+) {
     val o by hook.store.overlays.collectAsState()
+    val r by hook.store.ratingPrefs.collectAsState()
+    val mdb by hook.store.mdblistKey.collectAsState()
+    val context = LocalContext.current
+    val entry = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java) }
+    val art = remember { entry.cinemaArt() }
+    val ratings = remember { entry.ratings() }
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
     val set = { n: com.wholphinplus.sources.cinema.PosterOverlays -> hook.store.setOverlays(n) }
-    Row(horizontalArrangement = Arrangement.spacedBy(32.dp)) {
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(vertical = 8.dp), modifier = Modifier.width(480.dp)) {
-            item { Toggle("Resolution", "4K, HD or SD", o.resolution, Modifier.focusRequester(first)) { set(o.copy(resolution = it)) } }
+    // A preset keeps your layout (corner, style) and sets every tag, scores on cards included
+    val preset = { p: com.wholphinplus.sources.cinema.PosterOverlays, scores: Boolean ->
+        set(p.copy(corner = o.corner, style = o.style))
+        hook.store.setRatingPrefs(r.copy(onCards = scores))
+    }
+    val quality = if (o.corner == com.wholphinplus.sources.cinema.OverlayCorner.TOP_RIGHT) "Top right" else "Top left"
+    val services = if (o.corner == com.wholphinplus.sources.cinema.OverlayCorner.TOP_RIGHT) "Top left" else "Top right"
+    Row(horizontalArrangement = Arrangement.spacedBy(36.dp)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(top = 4.dp, bottom = 48.dp), modifier = Modifier.width(470.dp)) {
+            item { Section("Quick start", "Set every tag at once, then fine-tune below") }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(bottom = 6.dp)) {
+                    PresetButton("Clean", Modifier.focusRequester(first)) { preset(com.wholphinplus.sources.cinema.PosterOverlays.CLEAN, false) }
+                    PresetButton("Standard") { preset(com.wholphinplus.sources.cinema.PosterOverlays.STANDARD, false) }
+                    PresetButton("Everything") { preset(com.wholphinplus.sources.cinema.PosterOverlays.EVERYTHING, true) }
+                }
+            }
+            item { Section("Title", "Bottom left") }
+            item { Toggle("Title logos", "The title's logo over a clean picture; off: art with the name in it", o.titleLogos) { set(o.copy(titleLogos = it)) } }
+            item { Toggle("New labels", "Recently Added and New Episodes along the bottom edge", o.newLabels) { set(o.copy(newLabels = it)) } }
+            item { Toggle("Title and date under cards", "The name, release date and length below each card", o.captions) { set(o.copy(captions = it)) } }
+            item { Section("Quality", "$quality, for movies once the server knows the file") }
+            item { Toggle("Resolution", "4K, HD or SD", o.resolution) { set(o.copy(resolution = it)) } }
             item { Toggle("HDR", "Dolby Vision, HDR10+ or HDR", o.hdr) { set(o.copy(hdr = it)) } }
             item { Toggle("Audio", "Atmos, 7.1 or 5.1", o.audio) { set(o.copy(audio = it)) } }
             item { Toggle("Maturity rating", "PG-13, TV-MA…", o.rating) { set(o.copy(rating = it)) } }
+            item { Section("Where it streams", services) }
+            item { Toggle("Streaming services", "A show's own network first, then where it streams", o.services) { set(o.copy(services = it)) } }
+            if (o.services) {
+                item { Choice("Logos per card", if (o.maxServices == 1) "One" else "Up to two") { set(o.copy(maxServices = if (o.maxServices == 1) 2 else 1)) } }
+            }
+            item { Section("Scores", "Bottom right") }
+            item {
+                Toggle(
+                    "Scores on cards",
+                    when {
+                        r.sources.isEmpty() -> "No score sources picked"
+                        r.sources.all { it.needsKey } && mdb.isBlank() -> "Waiting for an MDBList key (see Score sources)"
+                        else -> "The first two of " + r.sources.filter { !it.needsKey || mdb.isNotBlank() }.joinToString(", ") { it.label }
+                    },
+                    r.onCards,
+                ) { hook.store.setRatingPrefs(r.copy(onCards = it)) }
+            }
+            item { MenuItem("Score sources", "IMDb, Rotten Tomatoes, Metacritic and more; the MDBList key; title pages") { go(Screen.Ratings) } }
+            item { Section("Status", null) }
             item { Toggle("Top 10", "A red TOP 10 corner on titles in your Top lists", o.top10) { set(o.copy(top10 = it)) } }
             item { Toggle("Watched", "A check on titles you've finished", o.watched) { set(o.copy(watched = it)) } }
-            item { Toggle("New labels", "Recently Added and New Episodes along the bottom edge", o.newLabels) { set(o.copy(newLabels = it)) } }
+            item { Toggle("Progress bar", "How far you got, along the bottom edge", o.progress) { set(o.copy(progress = it)) } }
+            item { Section("Layout and style", null) }
             item {
-                val next = com.wholphinplus.sources.cinema.OverlayCorner.entries.let { it[(o.corner.ordinal + 1) % it.size] }
-                Choice("Badge corner", o.corner.label) { set(o.copy(corner = next)) }
+                Choice("Quality badges", "$quality (streaming logos take the other corner)") {
+                    set(o.copy(corner = com.wholphinplus.sources.cinema.OverlayCorner.entries.let { it[(o.corner.ordinal + 1) % it.size] }))
+                }
             }
             item {
                 val next = com.wholphinplus.sources.cinema.OverlayStyle.entries.let { it[(o.style.ordinal + 1) % it.size] }
                 Choice("Badge style", if (o.style == com.wholphinplus.sources.cinema.OverlayStyle.MINIMAL) "Minimal: dark glass chips" else "Colour: each badge in its own colour") { set(o.copy(style = next)) }
             }
         }
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 12.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
             Text("Preview", style = MaterialTheme.typography.titleMedium)
-            com.wholphinplus.sources.cinema.OverlayPreview(o)
+            com.wholphinplus.sources.cinema.PosterTagsPreview(o, r, art, ratings)
         }
     }
+}
+
+/** A group heading in Poster tags: its name, and where on the card its tags sit. */
+@Composable
+private fun Section(
+    title: String,
+    where: String?,
+) {
+    Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(top = 18.dp, bottom = 4.dp, start = 4.dp)) {
+        Text(title.uppercase(), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, letterSpacing = 2.sp)
+        where?.let {
+            Text("  ·  $it", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun PresetButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Button(onClick = onClick, modifier = modifier) { Text(label) }
 }
 
 @Composable
@@ -790,7 +1373,7 @@ private fun Toggle(
         onClick = { onChange(!checked) },
         headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
         supportingContent = { Text(summary) },
-        trailingContent = { androidx.tv.material3.Switch(checked = checked, onCheckedChange = null) },
+        trailingContent = { androidx.tv.material3.Switch(checked = checked, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
         modifier = modifier,
     )
 }

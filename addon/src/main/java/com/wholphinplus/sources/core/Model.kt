@@ -1,12 +1,28 @@
-// Contains code adapted from a third-party project under the Apache License 2.0 and modified
-// for Orca+. See NOTICE and LICENSES/Apache-2.0.txt.
 package com.wholphinplus.sources.core
 
 import kotlinx.serialization.Serializable
+import java.time.Instant
+import java.util.Locale
 
+/** Which server product a connection talks to. The names are stored, never rename them. */
 @Serializable
-enum class ServerKind { UNKNOWN, JELLYFIN, EMBY, PLEX }
+enum class ServerKind {
+    UNKNOWN,
+    JELLYFIN,
+    EMBY,
+    PLEX,
+}
 
+val ServerKind.label: String
+    get() =
+        when (this) {
+            ServerKind.PLEX -> "Plex"
+            ServerKind.JELLYFIN -> "Jellyfin"
+            ServerKind.EMBY -> "Emby"
+            ServerKind.UNKNOWN -> ""
+        }
+
+/** One library on a server. Property order is part of the saved format. */
 @Serializable
 data class ServerCollection(
     val id: String = "",
@@ -15,6 +31,7 @@ data class ServerCollection(
     val enabled: Boolean = true,
 )
 
+/** A saved sign-in to one server for one user. Property order is part of the saved format. */
 @Serializable
 data class ServerConnection(
     val enabled: Boolean = true,
@@ -31,43 +48,40 @@ data class ServerConnection(
     val collections: List<ServerCollection> = emptyList(),
     val lastConnectedAt: Long = 0L,
 ) {
+    // Plex sign-ins carry no real user id, so only the token counts there
     val isUsable: Boolean
         get() =
-            enabled && serverUrl.isNotBlank() && accessToken.isNotBlank() &&
+            enabled &&
+                serverUrl.isNotBlank() &&
+                accessToken.isNotBlank() &&
                 (serverKind == ServerKind.PLEX || userId.isNotBlank())
 
     val label: String
         get() {
-            val name = displayName.ifBlank { serverName }.ifBlank { hostLabel(serverUrl) }.ifBlank { "Server" }
+            val name =
+                displayName.ifBlank { null }
+                    ?: serverName.ifBlank { null }
+                    ?: hostLabel(serverUrl).ifBlank { null }
+                    ?: "Server"
             val kind = serverKind.label
-            return if (kind.isBlank() || name.contains(kind, ignoreCase = true)) name else "$kind $name"
+            return if (kind.isEmpty() || name.contains(kind, ignoreCase = true)) name else "$kind $name"
         }
 }
 
-val ServerKind.label: String
-    get() =
-        when (this) {
-            ServerKind.PLEX -> "Plex"
-            ServerKind.JELLYFIN -> "Jellyfin"
-            ServerKind.EMBY -> "Emby"
-            ServerKind.UNKNOWN -> ""
-        }
-
-/** What the user pressed Play on, reduced to what matching needs. */
+/** What to look for. For an episode, title, year and ids describe the series. */
 data class PlayRequest(
     val title: String,
     val year: Int?,
     val imdbId: String?,
     val tmdbId: Int?,
     val tvdbId: Int?,
-    /** Non-null for episodes; [title]/ids then describe the series. */
     val season: Int? = null,
     val episode: Int? = null,
 ) {
     val isEpisode: Boolean get() = season != null && episode != null
 }
 
-/** One playable copy of the title on another server. */
+/** One playable copy of a title on some server. */
 data class ExternalSource(
     val connectionId: String,
     val serverLabel: String,
@@ -81,9 +95,8 @@ data class ExternalSource(
     val container: String,
     val sizeBytes: Long,
     val fileName: String,
-    /** Plex server-side HLS transcode, offered for files ExoPlayer struggles with. */
+    // A server-side HLS conversion (Plex) instead of the file itself
     val compatible: Boolean = false,
-    /** The item and version on its own server, for reporting playback back to it. */
     val itemId: String = "",
     val mediaSourceId: String = "",
     val runTimeTicks: Long = 0L,
@@ -91,14 +104,11 @@ data class ExternalSource(
     val size: String get() = formatBytes(sizeBytes)
 }
 
-/** Login in progress via a code (Plex PIN or Jellyfin Quick Connect). */
-/** An Emby Connect account signed in by PIN. */
 data class EmbyConnectAccount(
     val userId: String,
     val token: String,
 )
 
-/** A server linked to an Emby Connect account. */
 data class EmbyConnectServer(
     val name: String,
     val remoteUrl: String,
@@ -107,6 +117,7 @@ data class EmbyConnectServer(
     val accessKey: String,
 )
 
+/** A sign-in waiting for the user to enter [code] somewhere else. */
 data class CodeLogin(
     val id: String,
     val secret: String,
@@ -124,30 +135,36 @@ data class ServerInfo(
     val serverKind: ServerKind = ServerKind.UNKNOWN,
 )
 
+/** Binary units with the familiar GB / MB names. */
 fun formatBytes(bytes: Long): String {
-    if (bytes <= 0L) return ""
-    val gb = bytes / (1024.0 * 1024.0 * 1024.0)
-    return if (gb >= 1.0) {
-        String.format(java.util.Locale.US, "%.1f GB", gb)
+    if (bytes <= 0) return ""
+    val mb = 1024.0 * 1024.0
+    val gb = mb * 1024.0
+    return if (bytes >= gb) {
+        String.format(Locale.US, "%.1f GB", bytes / gb)
     } else {
-        String.format(java.util.Locale.US, "%.0f MB", bytes / (1024.0 * 1024.0))
+        String.format(Locale.US, "%.0f MB", bytes / mb)
     }
 }
 
-/** Something watched (finished or started) on a server, for syncing into the main server. */
+/** Something started or finished on another server. */
 data class WatchEntry(
     val itemId: String,
     val request: PlayRequest,
     val positionTicks: Long,
     val played: Boolean,
-    val lastPlayed: java.time.Instant,
+    val lastPlayed: Instant,
 )
 
 data class UserItemData(
     val positionTicks: Long,
     val played: Boolean,
-    val lastPlayed: java.time.Instant?,
+    val lastPlayed: Instant?,
     val seriesId: String?,
 )
 
-enum class PlayEvent { START, PROGRESS, STOP }
+enum class PlayEvent {
+    START,
+    PROGRESS,
+    STOP,
+}

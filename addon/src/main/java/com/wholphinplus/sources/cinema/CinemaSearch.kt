@@ -103,11 +103,14 @@ fun CinemaSearch(
     modifier: Modifier = Modifier,
     fallback: @Composable () -> Unit,
 ) {
+    @Suppress("NAME_SHADOWING") val onOpen = guarded(onOpen)
     val context = LocalContext.current
     val entry = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java) }
     val service = remember { entry.searchService() }
     val art = remember { entry.cinemaArt() }
     val overlays by entry.sourceHook().store.overlays.collectAsState()
+    val ratingPrefs by entry.sourceHook().store.ratingPrefs.collectAsState()
+    val ratings = remember { entry.ratings() }
     if (!service.enabled) return fallback()
     DisposableEffect(Unit) { onDispose { art.save() } }
 
@@ -165,15 +168,24 @@ fun CinemaSearch(
         }
     }
 
+    // A second OK while the first is still looking the title up opens nothing more
+    var opening by remember { mutableStateOf(false) }
+
     fun open(item: TmdbItem) {
+        if (opening) return
+        opening = true
         scope.launch {
-            when (val a = runCatching { service.availability(item) }.getOrNull()) {
-                is Availability.Library -> {
-                    val kind = if (a.series) BaseItemKind.SERIES else BaseItemKind.MOVIE
-                    DetailsPreview.put(item.toCinemaItem().copy(id = a.itemId, detailsId = a.itemId, kind = kind, detailsKind = kind))
-                    onOpen(a.itemId, kind)
+            try {
+                when (val a = runCatching { service.availability(item) }.getOrNull()) {
+                    is Availability.Library -> {
+                        val kind = if (a.series) BaseItemKind.SERIES else BaseItemKind.MOVIE
+                        DetailsPreview.put(item.toCinemaItem().copy(id = a.itemId, detailsId = a.itemId, kind = kind, detailsKind = kind))
+                        onOpen(a.itemId, kind)
+                    }
+                    else -> sheet = item
                 }
-                else -> sheet = item
+            } finally {
+                opening = false
             }
         }
     }
@@ -295,7 +307,7 @@ fun CinemaSearch(
                     val density = LocalDensity.current
                     // Room above the focused row for its group's label (Movies, TV Shows)
                     val spec = remember(density) { pivot(with(density) { 52.dp.toPx() }) }
-                    CompositionLocalProvider(LocalBringIntoViewSpec provides spec, LocalArt provides art, LocalOverlays provides overlays) {
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides spec, LocalArt provides art, LocalOverlays provides overlays, LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) {
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(3),
                             contentPadding = PaddingValues(top = 10.dp, end = 48.dp, bottom = 80.dp),

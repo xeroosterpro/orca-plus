@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.itemsApi
@@ -44,6 +45,8 @@ data class CinemaItem(
     val rating: String?,
     val overview: String,
     val backdropUrl: String?,
+    /** The backdrop at card size: the clean picture a title logo is laid over. */
+    val cleanCardUrl: String? = null,
     val cardUrl: String?,
     val cardHasTitleArt: Boolean,
     val logoUrl: String?,
@@ -58,6 +61,10 @@ data class CinemaItem(
     /** Place in a Top 10 list, and how the billboard names it ("#2 in Movies This Week"). */
     val rank: Int? = null,
     val rankLabel: String? = null,
+    /** The caption under a card (Poster tags → Title and date): "Apr 24, 2019" or "S2:E18". */
+    val captionDate: String? = null,
+    /** The caption's right side: "2h 23m" or "2 Seasons". */
+    val captionLength: String? = null,
     /** Poster overlay facts: "4K"/"HD", "DV"/"HDR", "ATMOS"/"5.1", and watched. */
     val resolution: String? = null,
     val hdr: String? = null,
@@ -73,7 +80,22 @@ data class CinemaRow(
     val items: List<CinemaItem>,
     /** A Top 10 row: big numbers beside portrait posters. */
     val ranked: Boolean = false,
+    /** A row of Services or Genres tiles instead of titles. */
+    val tiles: List<PageTile> = emptyList(),
 )
+
+/** A service's, genre's or decade's tile; it opens that page (with its Movies or Shows side first). */
+@androidx.compose.runtime.Immutable
+data class PageTile(
+    val id: String,
+    val name: String,
+    /** "service", "genre" or "decade". */
+    val kind: String,
+    val logoUrl: String?,
+    val pictureUrl: String?,
+) {
+    val service: Boolean get() = kind == "service"
+}
 
 data class CinemaLibrary(
     val id: UUID,
@@ -88,7 +110,11 @@ data class CinemaHomeData(
     val rows: List<CinemaRow>,
     val shows: CinemaLibrary?,
     val movies: CinemaLibrary?,
-)
+) {
+    /** More rows, or more titles in them, than [other] (null = nothing shown yet). */
+    fun richerThan(other: CinemaHomeData?): Boolean =
+        other == null || rows.size > other.rows.size || rows.sumOf { it.items.size + it.tiles.size } > other.rows.sumOf { it.items.size + it.tiles.size }
+}
 
 /** Loads Cinema mode's home from the main Jellyfin server (through Wholphin's own connection). */
 internal class CinemaRepository(
@@ -108,243 +134,363 @@ internal class CinemaRepository(
     private val images = listOf(ImageType.PRIMARY, ImageType.BACKDROP, ImageType.THUMB, ImageType.LOGO)
 
     /**
-     * The home page. [onFirst] gets it without the genre rows as soon as the quick rows are in:
-     * the genre rows come from one random 500-title pool, the slowest request by far (~1.4 s of
-     * the ~1.75 s on Silo, which shuffles the whole library for it), so they're added after.
+     * A page (Home, Shows, Movies, New & Popular), built from its rows as arranged. [onFirst]
+     * gets it without the genre rows as soon as the quick rows are in: the genre rows come from
+     * one random 500-title pool, the slowest request by far (~1.4 s of the ~1.75 s on Silo,
+     * which shuffles the whole library for it), so they're added after.
      */
-    suspend fun load(onFirst: (CinemaHomeData) -> Unit = {}): CinemaHomeData = timed("home", onFirst) { first -> loadHome(first) }
+    suspend fun load(
+        page: RowsPage = RowsPage.HOME,
+        onFirst: (CinemaHomeData) -> Unit = {},
+    ): CinemaHomeData = timed(page.name.lowercase(), onFirst) { first -> loadPage(page, first) }
 
-    private suspend fun loadHome(onFirst: (CinemaHomeData) -> Unit): CinemaHomeData =
+    /** The lists as [page] sees them: Top Streaming charts know whether they're shows or movies. */
+    fun pageLists(): List<PageList> = collections.lists.value.filterNot { it.hidden }.map { PageList(it.id, it.name, collections.chartSeries(it), it.pages, it.order) }
+
+    /** A Services or Genres page by id (null when the cloud no longer offers it). */
+    fun cloudPage(id: String): com.wholphinplus.sources.core.CloudPage? = collections.cloudPages.value.pages.firstOrNull { it.id == id }
+
+    /** Where the cloud places the Services and Genres tiles on [page] (their lineup positions). */
+    fun tiles(page: RowsPage): Map<HomeRowType, Int> =
+        collections.cloudPages.value.tiles[page.name].orEmpty().mapNotNull { (k, at) ->
+            when (k) {
+                "SERVICES" -> HomeRowType.SERVICES to at
+                "GENRES" -> HomeRowType.GENRES to at
+                "DECADES" -> HomeRowType.DECADES to at
+                else -> null
+            }
+        }.toMap()
+
+    /** The tiles of a Services or Genres row on [page]: only pages with something on its side. */
+    private fun tileRow(
+        type: HomeRowType,
+        page: RowsPage,
+    ): List<PageTile> =
+        collections.cloudPages.value.pages
+            .filter {
+                it.kind ==
+                    when (type) {
+                        HomeRowType.SERVICES -> "service"
+                        HomeRowType.DECADES -> "decade"
+                        else -> "genre"
+                    }
+            }
+            // Only pages with a row to show on this tab's side (a small library may have none yet)
+            .filter { p ->
+                when (page.series) {
+                    true -> p.shows.any(::rowShows)
+                    false -> p.movies.any(::rowShows)
+                    null -> (p.shows + p.movies).any(::rowShows)
+                }
+            }.map { PageTile(it.id, it.name, it.kind, it.logo, it.picture) }
+
+    /**
+     * A service's or genre's page: its Movies rows ([series] false) or Shows rows, each one of its
+     * charts as matched to the library, under the page's names for them.
+     */
+    suspend fun loadCloudPage(
+        id: String,
+        series: Boolean,
+    ): CinemaHomeData =
+        withContext(Dispatchers.IO) {
+            val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() } ?: error("Not signed in")
+            val p = collections.cloudPages.value.pages.firstOrNull { it.id == id } ?: error("This page is no longer offered")
+            val side = if (series) RowsPage.SHOWS else RowsPage.MOVIES
+            val rows =
+                coroutineScope {
+                    (if (series) p.shows else p.movies).mapNotNull { r -> collections.forChart(r.chart)?.let { c -> r.name to c } }.map { (name, c) ->
+                        async { Triple(name, c, safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items }) }
+                    }.awaitAll()
+                }.map { (name, c, items) -> listRow(name, items.filter { fits(side, it) }, c) }
+                    .filter { it.items.size >= minFor(it.title) }
+            val featured = rows.flatMap { it.items.take(4) }.filter { it.backdropUrl != null && it.overview.isNotBlank() }.distinctBy { it.detailsId }.take(6)
+            ranked(CinemaHomeData(featured, rows, null, null))
+        }
+
+    /**
+     * Whether a list row on [page] has anything to load: on Home, only your lists shown on the
+     * home (an Orca+ chart's place is the page layout's alone).
+     */
+    private fun listLoads(
+        page: RowsPage,
+        c: com.wholphinplus.sources.HomeCollection,
+    ) = collections.enough(c) && (page != RowsPage.HOME || c.showOnHome || collections.isChart(c))
+
+    private fun minFor(name: String) = collections.minFor(name)
+
+    /** Whether a Services / Genres page has a row to show on its Shows ([series]) or Movies side. */
+    fun hasRows(
+        p: com.wholphinplus.sources.core.CloudPage,
+        series: Boolean,
+    ) = (if (series) p.shows else p.movies).any(::rowShows)
+
+    /** Whether a page's chart has enough titles in the library to show. */
+    private fun rowShows(r: com.wholphinplus.sources.core.CloudPageRow) = (collections.forChart(r.chart)?.itemIds?.size ?: 0) >= minFor(r.name)
+
+    /** Whether a title belongs on [page] (Shows: shows and their episodes; Movies: movies). */
+    private fun fits(
+        page: RowsPage,
+        d: BaseItemDto,
+    ): Boolean =
+        when (page.series) {
+            null -> true
+            true -> d.type == BaseItemKind.SERIES || d.type == BaseItemKind.EPISODE || d.type == BaseItemKind.SEASON
+            false -> d.type == BaseItemKind.MOVIE
+        }
+
+    private fun kinds(page: RowsPage) =
+        when (page.series) {
+            null -> listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES)
+            true -> listOf(BaseItemKind.SERIES)
+            false -> listOf(BaseItemKind.MOVIE)
+        }
+
+    private suspend fun loadPage(
+        page: RowsPage,
+        onFirst: (CinemaHomeData) -> Unit,
+    ): CinemaHomeData =
         withContext(Dispatchers.IO) {
             val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() }
                 ?: error("Not signed in")
-            // Everything that doesn't need the library list starts at once; only "latest" waits
-            // for it. The slow genre pool is sent last so the quick rows aren't queued behind it
-            // (the app's HTTP client runs a few requests per server at a time).
+            val saved = hook.store.pageLayouts.value[page]
+            val allLists = pageLists()
+            // Everything that doesn't need the library list starts at once. The slow genre pool
+            // is sent last so the quick rows aren't queued behind it (the app's HTTP client runs
+            // a few requests per server at a time).
             coroutineScope {
                 val views = async { runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList()) }
-                val resume = async { safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items } }
-                val nextUp = async { safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
-                val greeting = async { continueTitle(userId) }
+                val resume =
+                    async {
+                        if (!page.hasContinueWatching) emptyList() else safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items }
+                    }
+                val nextUp =
+                    async {
+                        if (!page.hasContinueWatching || page.series == false) emptyList() else safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items }
+                    }
+                val greeting = async { if (page.hasContinueWatching) continueTitle(userId) else "" }
+                // The lists this page shows (before the libraries are known, from the saved
+                // layout, or the page's defaults for lists)
+                val wanted =
+                    collections.lists.value.filter { c ->
+                        // Page-only charts (Services, Genres) aren't a tab's rows
+                        val pl = allLists.firstOrNull { it.id == c.id } ?: return@filter false
+                        listLoads(page, c) && page.offers(pl) &&
+                            (saved?.rows?.any { it.type == HomeRowType.COLLECTION && it.ref == c.id && it.on } ?: page.listStartsOn(pl))
+                    }
                 val lists =
-                    collections.lists.value.filter { it.showOnHome && it.itemIds.isNotEmpty() }.map { c ->
-                        async {
-                            // Same route as Wholphin's own collection rows: the tag is answered by
-                            // ProgressOverlay with the list's titles, in list order
-                            c.name to safe {
-                                api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items
-                            }
-                        }
+                    wanted.associate { c ->
+                        // Same route as Wholphin's own collection rows: the tag is answered by
+                        // ProgressOverlay with the list's titles, in list order
+                        c.id to async { c.name to safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
+                    }
+                // Rows that don't depend on which libraries there are start now, before the
+                // library list is back (the defaults include them; a saved page if it has them on)
+                // (Home's defaults depend on the libraries, so before its first save all start)
+                val guess = saved ?: HomeLayout.defaults(page, emptyList(), allLists, tiles(page)).takeIf { page != RowsPage.HOME }
+                val early =
+                    LIBRARY_FREE.filter { t -> page.offers(t) && (guess?.rows?.any { it.type == t && it.on } ?: true) }.associateWith { t ->
+                        async { rowItems(HomeRowSpec(t), page, userId, emptyList(), emptyMap()) }
                     }
                 val libs = views.await().map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
                 val movieLibs = libs.filter { it.collectionType == CollectionType.MOVIES }
                 val showLibs = libs.filter { it.collectionType == CollectionType.TVSHOWS }
-                val latest =
-                    (movieLibs + showLibs).map { lib ->
-                        async {
-                            lib to safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, parentId = lib.id, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
-                        }
+                // Your arrangement, brought up to date with the server; a page never arranged
+                // starts with its defaults (one Recently Added row for all movies, not one per library)
+                val layout = layoutFor(page, libs, saved)
+                val on = withFallback(page, layout.rows.filter { it.on }, lists.keys)
+                val genres = on.filter { it.type == HomeRowType.GENRE }
+                // Every other row's items, in one request each, all at once
+                val rows =
+                    on.filter { it.type != HomeRowType.GENRE }.map { spec ->
+                        spec to (early[spec.type] ?: async { rowItems(spec, page, userId, libs, lists) })
                     }
-                // Some servers ignore the genre filter, so rows are sorted out of one random pool
+                // Sent last, so the quick rows aren't queued behind it. Some servers ignore the
+                // genre filter, so genre rows are sorted out of one random pool
                 val pool =
-                    async {
-                        safe {
-                            api.itemsApi.getItems(
-                                GetItemsRequest(userId = userId, includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES), recursive = true, sortBy = listOf(ItemSortBy.RANDOM), limit = POOL, fields = fields, enableImageTypes = images, imageTypeLimit = 1),
-                            ).content.items
+                    if (genres.isEmpty()) {
+                        null
+                    } else {
+                        async {
+                            safe {
+                                api.itemsApi.getItems(
+                                    GetItemsRequest(userId = userId, includeItemTypes = kinds(page), recursive = true, sortBy = listOf(ItemSortBy.RANDOM), limit = POOL, fields = fields, enableImageTypes = images, imageTypeLimit = 1),
+                                ).content.items
+                            }
                         }
                     }
-
-                val cw = (resume.await() + nextUp.await()).distinctBy { it.seriesId ?: it.id }
+                val cw = (resume.await() + nextUp.await()).filter { fits(page, it) }.distinctBy { it.seriesId ?: it.id }
                 // Episodes borrow their series' TMDB id for title art. Only art, so the page
                 // doesn't wait for it: the first rows use what's known, the full page has it all
                 val seriesArt = async { fillSeriesTmdb(cw, userId) }
-                val latestRows =
-                    latest.awaitAll().map { (lib, items) ->
-                        CinemaRow(
-                            if (lib.collectionType == CollectionType.TVSHOWS) "New Episodes in ${lib.name}" else "Recently Added in ${lib.name}",
-                            items.map(::toItem),
-                        )
-                    }
-                val listRows = lists.awaitAll().map { (name, items) -> listRow(name, items) }
                 val title = greeting.await()
+                // The screen shows once Continue Watching and the next rows (what's on screen) are
+                // in; rows further down join as they arrive, like the genre rows
+                rows.filter { it.first.type != HomeRowType.CONTINUE_WATCHING }.take(ON_SCREEN_ROWS).forEach { it.second.await() }
+                var got = rows.filter { it.second.isCompleted }.map { (spec, items) -> spec to items.await() }
 
-                fun rowsWith(continueWatching: List<CinemaItem>) =
-                    buildList {
-                        add(CinemaRow(title, continueWatching))
-                        addAll(listRows)
-                        addAll(latestRows)
-                    }.filter { it.items.isNotEmpty() }
-                val quickRows = rowsWith(cw.map(::toItem))
+                fun build(genreRows: Map<String, CinemaRow>) =
+                    on.mapNotNull { spec ->
+                        when (spec.type) {
+                            HomeRowType.CONTINUE_WATCHING -> CinemaRow(spec.title.ifBlank { title }, cw.map(::toItem))
+                            HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES -> CinemaRow(spec.title.ifBlank { spec.defaultName(emptyList(), emptyMap()) }, emptyList(), tiles = tileRow(spec.type, page))
+                            HomeRowType.GENRE -> genreRows[spec.ref]?.let { r -> spec.title.takeIf { it.isNotBlank() }?.let { r.copy(title = it) } ?: r }
+                            else ->
+                                got.firstOrNull { it.first == spec }?.second?.let { (name, items) ->
+                                    val shown = spec.title.ifBlank { name }
+                                    if (spec.type == HomeRowType.COLLECTION) listRow(shown, items, collections.lists.value.firstOrNull { it.id == spec.ref }) else CinemaRow(shown, items.map(::toItem))
+                                }
+                        }
+                    }.filter { it.items.isNotEmpty() || it.tiles.isNotEmpty() }
+                val quickRows = build(emptyMap())
 
-                // The billboard: recent titles that have both a backdrop and title art
-                val featured =
-                    latestRows
-                        .flatMap { it.items }
-                        .filter { it.backdropUrl != null && it.overview.isNotBlank() && it.kind != BaseItemKind.EPISODE }
+                // The billboard: the charts' leaders, then recent titles with a backdrop and an overview
+                val fresh = setOf(HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES, HomeRowType.LIBRARY, HomeRowType.NEW_RELEASE_MOVIES, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS)
+                fun pick(shownRows: List<CinemaRow>): List<CinemaItem> {
+                    val leaders = if (page == RowsPage.NEW_POPULAR) shownRows.filter { it.ranked }.flatMap { it.items.take(3) } else emptyList()
+                    return (
+                        leaders +
+                            got.filter { it.first.type in fresh }
+                                .flatMap { it.second.second.map(::toItem) }
+                                .shuffled()
+                    ).filter { it.backdropUrl != null && it.overview.isNotBlank() && it.kind != BaseItemKind.EPISODE }
                         .distinctBy { it.detailsId }
-                        .shuffled()
                         .take(6)
-                        .ifEmpty { quickRows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
+                        .ifEmpty { shownRows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
+                        // No backdrops on the server: titles TMDB has a picture for (the billboard draws it)
+                        .ifEmpty { shownRows.flatMap { it.items }.filter { it.kind != BaseItemKind.EPISODE && it.tmdbId != null }.distinctBy { it.detailsId }.take(6) }
+                }
+                val featured = pick(quickRows)
 
-                // Show the page now; the genre rows join at the bottom (same billboard, no jump)
+                // Show the page now; the genre rows join in their places (same billboard)
                 onFirst(ranked(CinemaHomeData(featured, quickRows, showLibs.firstOrNull(), movieLibs.firstOrNull())))
                 // What Wholphin's own home does on load: refresh stale Trakt/MDBList rows and pull
                 // progress from the extra servers. In the background; it shows on the next refresh
-                hook.syncWatchStateLater()
+                if (page == RowsPage.HOME) hook.syncWatchStateLater()
+                got = rows.map { (spec, items) -> spec to items.await() }
                 seriesArt.await()
-                val rows = rowsWith(cw.map(::toItem)) + genreRows(pool.await(), GENRE_ROWS, 5)
-                ranked(CinemaHomeData(featured, rows, showLibs.firstOrNull(), movieLibs.firstOrNull()))
-            }
-        }
-
-    // ------------------------------------------------------------ Shows / Movies / My List tabs
-
-    /** A Shows or Movies page: the home's layout, every row narrowed to one kind of title. */
-    /** A Shows or Movies page; like [load], [onFirst] gets it before the genre rows. */
-    suspend fun loadKind(
-        series: Boolean,
-        onFirst: (CinemaHomeData) -> Unit = {},
-    ): CinemaHomeData = timed(if (series) "shows" else "movies", onFirst) { first -> loadKindNow(series, first) }
-
-    private suspend fun loadKindNow(
-        series: Boolean,
-        onFirst: (CinemaHomeData) -> Unit,
-    ): CinemaHomeData =
-        withContext(Dispatchers.IO) {
-            val userId = userId()
-            val kind = if (series) BaseItemKind.SERIES else BaseItemKind.MOVIE
-            val views = runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList())
-            val libs = views.map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
-            val mine = libs.filter { it.collectionType == if (series) CollectionType.TVSHOWS else CollectionType.MOVIES }
-
-            fun query(sort: ItemSortBy) =
-                GetItemsRequest(
-                userId = userId,
-                includeItemTypes = listOf(kind),
-                recursive = true,
-                sortBy = listOf(sort),
-                sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING),
-                limit = 24,
-                fields = fields,
-                enableImageTypes = images,
-                imageTypeLimit = 1,
-            )
-
-            coroutineScope {
-                val resume =
-                    async {
-                        safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items }
-                            .filter { if (series) it.type == BaseItemKind.EPISODE else it.type == BaseItemKind.MOVIE }
-                    }
-                val nextUp =
-                    async {
-                        if (series) safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } else emptyList()
-                    }
-                val latest =
-                    mine.map { lib ->
-                        async {
-                            lib to safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, parentId = lib.id, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
-                        }
-                    }
-                val newReleases = async { safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE)).content.items } }
-                val pool = async { safe { api.itemsApi.getItems(query(ItemSortBy.RANDOM).copy(limit = POOL)).content.items } }
-
-                val cw = (resume.await() + nextUp.await()).distinctBy { it.seriesId ?: it.id }
-                fillSeriesTmdb(cw, userId)
-                val latestRows =
-                    latest.awaitAll().map { (lib, items) ->
-                        CinemaRow(if (series) "New Episodes in ${lib.name}" else "Recently Added in ${lib.name}", items.map(::toItem))
-                    }
-                val fresh = CinemaRow("New Releases", newReleases.await().map(::toItem))
-                val quickRows =
-                    buildList {
-                        add(CinemaRow(continueTitle(userId), cw.map(::toItem)))
-                        add(fresh)
-                        addAll(latestRows)
-                    }.filter { it.items.isNotEmpty() }.distinctBy { it.title }
-
-                val featured =
-                    (fresh.items + latestRows.flatMap { it.items })
-                        .filter { it.backdropUrl != null && it.overview.isNotBlank() && it.kind == kind }
-                        .distinctBy { it.detailsId }
-                        .shuffled()
-                        .take(6)
-                        .ifEmpty { quickRows.flatMap { it.items }.filter { it.backdropUrl != null }.take(6) }
-                val showLib = libs.firstOrNull { it.collectionType == CollectionType.TVSHOWS }
-                val movieLib = libs.firstOrNull { it.collectionType == CollectionType.MOVIES }
-                onFirst(ranked(CinemaHomeData(featured, quickRows, showLib, movieLib)))
-                val rows = (quickRows + genreRows(pool.await(), if (series) SHOW_GENRES else MOVIE_GENRES, 8)).distinctBy { it.title }
-                ranked(CinemaHomeData(featured, rows, showLib, movieLib))
+                val picked = genres.mapNotNull { g -> page.genres.firstOrNull { it.second == g.ref } }
+                val genreRows = pool?.await()?.let { genreRows(it, picked, picked.size) }.orEmpty().associateBy { it.title }
+                val all = build(genreRows)
+                // Nothing for the billboard in the first rows (they weren't in yet): pick from the whole page
+                ranked(CinemaHomeData(featured.ifEmpty { pick(all) }, all, showLibs.firstOrNull(), movieLibs.firstOrNull()))
             }
         }
 
     /**
-     * New & Popular: Top 10 lists first, then what just arrived and what just premiered, movies
-     * and shows together.
+     * [on] plus the server's newest titles when it would show less than two rows of titles (the
+     * cloud couldn't be reached, or its charts barely meet a small library). Only for this load:
+     * the arrangement isn't changed, and the extra rows leave once the page has its own.
      */
-    suspend fun loadNewPopular(): CinemaHomeData =
-        withContext(Dispatchers.IO) {
-            val userId = userId()
+    private fun withFallback(
+        page: RowsPage,
+        on: List<HomeRowSpec>,
+        loadingLists: Set<String>,
+    ): List<HomeRowSpec> {
+        // List rows with nothing to load (too few titles in the library yet) leave the page, so the
+        // first screen waits for rows that will show
+        val on = on.filter { it.type != HomeRowType.COLLECTION || it.ref in loadingLists }
+        val titled =
+            on.count {
+                when (it.type) {
+                    HomeRowType.CONTINUE_WATCHING, HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES -> false
+                    HomeRowType.COLLECTION -> it.ref in loadingLists
+                    else -> true
+                }
+            }
+        if (titled >= 2) return on
+        val fallback = if (page == RowsPage.NEW_POPULAR) listOf(HomeRowType.NEW_ARRIVALS, HomeRowType.JUST_AIRED) else listOf(HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES)
+        val extra = fallback.filter { t -> page.offers(t) && on.none { it.type == t } }.map { HomeRowSpec(it) }
+        return on + extra
+    }
 
-            fun query(
-                sort: ItemSortBy,
-                kinds: List<BaseItemKind>,
-            ) = GetItemsRequest(
-                userId = userId,
-                includeItemTypes = kinds,
-                recursive = true,
-                sortBy = listOf(sort),
-                sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING),
-                limit = 24,
-                fields = fields,
-                enableImageTypes = images,
-                imageTypeLimit = 1,
-            )
-            val both = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES)
-            coroutineScope {
-                val lists =
-                    collections.lists.value.filter { it.itemIds.isNotEmpty() && isTopList(it.name) }.map { c ->
-                        async { c.name to safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 10, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
-                    }
-                val arrived = async { safe { api.itemsApi.getItems(query(ItemSortBy.DATE_CREATED, both)).content.items } }
-                val movies = async { safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE, listOf(BaseItemKind.MOVIE))).content.items } }
-                val shows = async { safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE, listOf(BaseItemKind.SERIES))).content.items } }
-                val episodes =
-                    async {
-                        safe { api.itemsApi.getItems(query(ItemSortBy.PREMIERE_DATE, listOf(BaseItemKind.EPISODE)).copy(limit = 60)).content.items }
+    /** The server's libraries, for the row editor's names and choices. */
+    suspend fun libraries(): List<CinemaLibrary> =
+        withContext(Dispatchers.IO) {
+            val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() } ?: return@withContext emptyList()
+            runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList())
+                .map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
+        }
+
+    /**
+     * [page]'s rows as arranged, brought up to date with the server and your lists. A page
+     * never arranged starts with its defaults.
+     */
+    fun layoutFor(
+        page: RowsPage,
+        libs: List<CinemaLibrary>,
+        saved: HomeLayout? = hook.store.pageLayouts.value[page],
+    ): HomeLayout {
+        val lists = pageLists()
+        return saved?.reconciled(page, libs, lists, tiles(page)) ?: HomeLayout.defaults(page, libs, lists, tiles(page))
+    }
+
+    /** One row's name and titles (everything but Continue Watching and genres), fitted to [page]. */
+    private suspend fun rowItems(
+        spec: HomeRowSpec,
+        page: RowsPage,
+        userId: UUID,
+        libs: List<CinemaLibrary>,
+        lists: Map<String, kotlinx.coroutines.Deferred<Pair<String, List<BaseItemDto>>>>,
+    ): Pair<String, List<BaseItemDto>> {
+        fun newest(
+            kinds: List<BaseItemKind>,
+            sort: ItemSortBy,
+            limit: Int = 24,
+        ) = GetItemsRequest(userId = userId, includeItemTypes = kinds, recursive = true, sortBy = listOf(sort), sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING), limit = limit, fields = fields, enableImageTypes = images, imageTypeLimit = 1)
+        val name = spec.defaultName(libs, emptyMap())
+        val (shown, items) =
+            when (spec.type) {
+                HomeRowType.COLLECTION -> lists[spec.ref]?.await() ?: ("" to emptyList())
+                // Every movie library at once; a title in both the HD and 4K library shows once
+                HomeRowType.RECENT_MOVIES ->
+                    name to
+                        safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, includeItemTypes = listOf(BaseItemKind.MOVIE), limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
+                            .distinctBy { tmdbOf(it)?.toString() ?: (it.name.orEmpty().lowercase() + it.productionYear) }
+                            .take(24)
+                // Shows by when they last got something new: one request for every TV library
+                // (Silo answers no episodes to a library-wide episode query)
+                HomeRowType.NEW_EPISODES ->
+                    name to safe { api.itemsApi.getItems(newest(listOf(BaseItemKind.SERIES), ItemSortBy.DATE_LAST_CONTENT_ADDED, 40)).content.items }
+                        .distinctBy { tmdbOf(it)?.toString() ?: it.name.orEmpty().lowercase() }
+                        .take(24)
+                HomeRowType.NEW_RELEASE_MOVIES -> name to safe { api.itemsApi.getItems(newest(listOf(BaseItemKind.MOVIE), ItemSortBy.PREMIERE_DATE)).content.items }
+                HomeRowType.NEW_RELEASE_SHOWS -> name to safe { api.itemsApi.getItems(newest(listOf(BaseItemKind.SERIES), ItemSortBy.PREMIERE_DATE)).content.items }
+                HomeRowType.NEW_ARRIVALS -> name to safe { api.itemsApi.getItems(newest(kinds(page), ItemSortBy.DATE_CREATED)).content.items }
+                HomeRowType.JUST_AIRED ->
+                    name to
+                        safe { api.itemsApi.getItems(newest(listOf(BaseItemKind.EPISODE), ItemSortBy.PREMIERE_DATE, 60)).content.items }
                             .distinctBy { it.seriesId ?: it.id }
                             .take(24)
-                    }
-                val eps = episodes.await()
-                fillSeriesTmdb(eps, userId)
-                val rows =
-                    buildList {
-                        lists.awaitAll().forEach { (name, items) -> add(listRow(name, items)) }
-                        add(CinemaRow("New on Orca+", arrived.await().map(::toItem)))
-                        add(CinemaRow("New Episodes", eps.map(::toItem)))
-                        add(CinemaRow("New Release Movies", movies.await().map(::toItem)))
-                        add(CinemaRow("New Release Shows", shows.await().map(::toItem)))
-                    }.filter { it.items.isNotEmpty() }
-                val featured =
-                    (rows.filter { it.ranked }.flatMap { it.items.take(3) } + rows.flatMap { it.items }.take(12))
-                        .filter { it.backdropUrl != null && it.overview.isNotBlank() && it.kind != BaseItemKind.EPISODE }
-                        .distinctBy { it.detailsId }
-                        .take(6)
-                ranked(CinemaHomeData(featured, rows, null, null))
+                            .also { fillSeriesTmdb(it, userId) }
+                HomeRowType.MY_LIST ->
+                    name to
+                        safe {
+                            api.itemsApi.getItems(
+                                GetItemsRequest(userId = userId, isFavorite = true, includeItemTypes = kinds(page), recursive = true, sortBy = listOf(ItemSortBy.DATE_CREATED), sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING), limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1),
+                            ).content.items
+                        }.filter { it.userData?.isFavorite != false }
+                HomeRowType.LIBRARY -> {
+                    val lib = libs.firstOrNull { it.id.toString() == spec.ref } ?: return "" to emptyList()
+                    name to safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, parentId = lib.id, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
+                }
+                HomeRowType.CONTINUE_WATCHING, HomeRowType.GENRE, HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES -> "" to emptyList()
             }
-        }
+        return shown to items.filter { fits(page, it) }
+    }
 
     /** A Trakt/MDBList row; lists named like a chart ("Top …") become Top 10 rows. */
     private fun listRow(
         name: String,
         items: List<BaseItemDto>,
-    ): CinemaRow =
-        if (isTopList(name) && items.size >= 3) {
-            CinemaRow(name, items.take(10).map(::toItem), ranked = true)
-        } else {
-            CinemaRow(name, items.map(::toItem))
-        }
+        list: com.wholphinplus.sources.HomeCollection? = null,
+    ): CinemaRow {
+        if (!isTopList(name) || items.size < 3) return CinemaRow(name, items.map(::toItem))
+        // A Top 10 keeps the chart's own numbers: a title not in the library leaves its number
+        // out rather than moving the rest up (rows matched before ranks were kept count 1, 2, 3)
+        val ranks = list?.rankById().orEmpty()
+        val top = items.map { it to ranks[it.id.toString().replace("-", "").lowercase()] }.filter { (_, r) -> r == null || r <= 10 }.take(10)
+        return CinemaRow(name, top.map { (d, r) -> toItem(d).copy(rank = r) }, ranked = true)
+    }
 
     /**
      * Gives every card of a Top 10 title its place, wherever it shows up on the page, so the
@@ -354,7 +500,7 @@ internal class CinemaRepository(
         val data = unique(raw)
         val ranks = HashMap<UUID, Pair<Int, String>>()
         data.rows.filter { it.ranked }.forEach { row ->
-            row.items.forEachIndexed { i, item -> ranks.putIfAbsent(item.detailsId, (i + 1) to rankLabel(row)) }
+            row.items.forEachIndexed { i, item -> ranks.putIfAbsent(item.detailsId, (item.rank ?: (i + 1)) to rankLabel(row)) }
         }
         if (ranks.isEmpty()) return data
 
@@ -372,7 +518,7 @@ internal class CinemaRepository(
                 data.rows
                     .distinctBy { it.title }
                     .map { r -> if (r.items.distinctBy { it.key }.size == r.items.size) r else r.copy(items = r.items.distinctBy { it.key }) }
-                    .filter { it.items.isNotEmpty() },
+                    .filter { it.items.isNotEmpty() || it.tiles.isNotEmpty() },
         )
 
     private fun rankLabel(row: CinemaRow): String {
@@ -496,12 +642,6 @@ internal class CinemaRepository(
             val d = api.userLibraryApi.getItem(id, userId).content
             val series = d.type == BaseItemKind.SERIES
             coroutineScope {
-                val similar =
-                    async {
-                        safe {
-                            api.libraryApi.getSimilarItems(itemId = id, userId = userId, limit = 16, fields = fields).content.items
-                        }.map(::toItem)
-                    }
                 val seasons =
                     async {
                         if (!series) {
@@ -571,11 +711,82 @@ internal class CinemaRepository(
                     series = series,
                     seasons = seasons.await(),
                     play = play,
-                    similar = similar.await().filter { it.backdropUrl != null || it.cardUrl != null }.distinctBy { it.key },
+                    // Filled by moreLikeThis() once the page is up
+                    similar = emptyList(),
                     startSeason = nextEp?.parentIndexNumber,
                 )
             }
         }
+
+    /**
+     * More Like This: TMDB's recommendations for the title, as they're found in the library,
+     * best first. The server's own Similar list is only a fallback: some servers (Silo) answer
+     * it with random titles of the same genre. Silo ignores provider-id filters, so each title
+     * is one name search confirmed by its TMDB id (or exact name and year); found titles and
+     * misses are remembered for the session.
+     */
+    suspend fun moreLikeThis(
+        item: CinemaItem,
+        tmdb: com.wholphinplus.sources.core.TmdbClient?,
+    ): List<CinemaItem> =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+            val recommended =
+                item.tmdbId?.takeIf { tmdb?.available == true }?.let { id ->
+                    val type = if (item.tmdbTv) com.wholphinplus.sources.core.TmdbType.TV else com.wholphinplus.sources.core.TmdbType.MOVIE
+                    runCatching { tmdb!!.recommendations(type, id) }
+                        .onFailure { Timber.w(it, "TMDB recommendations failed for %s", item.title) }
+                        .getOrDefault(emptyList())
+                        .take(RECOMMENDATIONS)
+                }.orEmpty()
+            val gate = kotlinx.coroutines.sync.Semaphore(4)
+            val found =
+                coroutineScope {
+                    recommended.map { r -> async { gate.withPermit { inLibrary(r, userId) } } }.awaitAll()
+                }.filterNotNull().filter { it.detailsId != item.detailsId }.distinctBy { it.key }
+            Timber.i("More Like This for %s: %d of %d recommendations in the library", item.title, found.size, recommended.size)
+            if (found.size >= 3) {
+                found
+            } else {
+                safe { api.libraryApi.getSimilarItems(itemId = item.detailsId, userId = userId, limit = 16, fields = fields).content.items }
+                    .map(::toItem)
+                    .filter { it.backdropUrl != null || it.cardUrl != null }
+                    .distinctBy { it.key }
+            }
+        }
+
+    /** One TMDB title in the library, or null. Remembered (misses too) for the session. */
+    private suspend fun inLibrary(
+        r: com.wholphinplus.sources.core.TmdbItem,
+        userId: UUID,
+    ): CinemaItem? {
+        libraryMatches[r.key]?.let { return it.item }
+        val tv = r.type == com.wholphinplus.sources.core.TmdbType.TV
+        val hits =
+            try {
+                api.itemsApi.getItems(
+                    GetItemsRequest(
+                        userId = userId,
+                        searchTerm = r.title,
+                        includeItemTypes = listOf(if (tv) BaseItemKind.SERIES else BaseItemKind.MOVIE),
+                        recursive = true,
+                        limit = 10,
+                        fields = fields,
+                        enableImageTypes = images,
+                        imageTypeLimit = 1,
+                    ),
+                ).content.items
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                return null // not remembered: the server didn't answer
+            }
+        val match =
+            hits.firstOrNull { tmdbOf(it) == r.id }
+                ?: hits.firstOrNull { tmdbOf(it) == null && it.name.equals(r.title, true) && (r.year == null || it.productionYear == r.year) }
+        val card = match?.let(::toItem)?.takeIf { it.backdropUrl != null || it.cardUrl != null }
+        libraryMatches[r.key] = LibraryMatch(card)
+        return card
+    }
 
     suspend fun episodes(
         seriesId: UUID,
@@ -694,6 +905,13 @@ internal class CinemaRepository(
                     image(d.parentBackdropItemId!!, "Backdrop/0", d.parentBackdropImageTags!!.first(), 1280)
                 else -> null
             }
+        val cleanCard =
+            when {
+                !d.backdropImageTags.isNullOrEmpty() -> image(d.id, "Backdrop/0", d.backdropImageTags!!.first(), 480)
+                d.parentBackdropItemId != null && !d.parentBackdropImageTags.isNullOrEmpty() ->
+                    image(d.parentBackdropItemId!!, "Backdrop/0", d.parentBackdropImageTags!!.first(), 480)
+                else -> null
+            }
         val logo =
             when {
                 tags[ImageType.LOGO] != null -> image(d.id, "Logo", tags[ImageType.LOGO]!!, 600)
@@ -744,6 +962,7 @@ internal class CinemaRepository(
             rating = d.officialRating,
             overview = d.overview.orEmpty(),
             backdropUrl = backdrop,
+            cleanCardUrl = cleanCard,
             cardUrl = thumb ?: backdrop,
             cardHasTitleArt = thumb != null,
             logoUrl = logo,
@@ -753,6 +972,13 @@ internal class CinemaRepository(
             tmdbId = if (episode) d.seriesId?.let { seriesTmdb[it] } else tmdbOf(d),
             tmdbTv = episode || d.type == BaseItemKind.SERIES,
             posterUrl = poster,
+            captionDate =
+                if (episode) {
+                    "S${d.parentIndexNumber ?: 0}:E${d.indexNumber ?: 0}"
+                } else {
+                    d.premiereDate?.let { CAPTION_DATE.format(it) } ?: year
+                },
+            captionLength = if (d.type == BaseItemKind.SERIES) seasons else runtime,
             resolution = tags2.resolution,
             hdr = tags2.hdr,
             audio = tags2.audio,
@@ -774,10 +1000,27 @@ internal class CinemaRepository(
     private fun dash(id: String): String = com.wholphinplus.sources.ProgressOverlay.dashed(id)
 
     companion object {
+        /** TMDB titles looked up in the library for More Like This (empty = not there). */
+        private val libraryMatches = java.util.concurrent.ConcurrentHashMap<String, LibraryMatch>()
+
+        /** How many TMDB recommendations are looked for in the library. */
+        private const val RECOMMENDATIONS = 20
+
         /** Lists named like a chart: "Top 10 …", "Top Watched Movies Of The Week". */
         fun isTopList(name: String): Boolean = TOP_LIST.containsMatchIn(name)
 
-        private val TOP_LIST = Regex("""\btop\b""", RegexOption.IGNORE_CASE)
+        // Charts get the numbered Top 10 row: "Top 10 …", "Top … of the Week". "Top 250", "Top
+        // Rated … of All Time" and "Top Movies" are long lists, shown as normal rows
+        private val TOP_LIST = Regex("""\btop\s*(10|ten)\b|\btop\b.*\bweek\b""", RegexOption.IGNORE_CASE)
+
+        /** "Apr 24, 2019", in the device's language. */
+        private val CAPTION_DATE = java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy")
+
+        /** Home rows below Continue Watching that are on screen when the page opens. */
+        private const val ON_SCREEN_ROWS = 2
+
+        /** Home rows whose request doesn't depend on the library list. */
+        private val LIBRARY_FREE = listOf(HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES, HomeRowType.NEW_RELEASE_MOVIES, HomeRowType.MY_LIST, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS, HomeRowType.JUST_AIRED)
 
         /** How many random titles a page sorts into genre rows. */
         const val POOL = 500
@@ -826,6 +1069,11 @@ internal class CinemaRepository(
             )
     }
 }
+
+/** A TMDB title's library card, or null when it isn't in the library. */
+private class LibraryMatch(
+    val item: CinemaItem?,
+)
 
 @androidx.compose.runtime.Immutable
 data class CinemaSeason(

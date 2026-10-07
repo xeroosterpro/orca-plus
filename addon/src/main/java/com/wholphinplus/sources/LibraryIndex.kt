@@ -219,6 +219,34 @@ internal class LibraryIndex(
                     },
             ).content
 
+    /**
+     * [page] for a full read, asked up to three times: one failed request used to throw away the
+     * whole read (minutes on a big library). A page that comes back empty though the library
+     * goes on past it counts as failed: taken, its 1,000 titles would look gone from the
+     * library, and rows matched against it would lose them until the next full read.
+     */
+    private suspend fun steadyPage(
+        hook: SourceHook,
+        userId: UUID,
+        kind: String,
+        start: Int,
+        total: Int,
+    ): IndexPage {
+        var tries = 0
+        while (true) {
+            try {
+                val p = page(hook, userId, kind, start)
+                // (Empty with a total past it, or with none at all: a library doesn't shrink to nothing mid-read)
+                if (p.items.isEmpty() && (p.total == 0 || p.total > start)) error("Library index: an empty page at $start of $total")
+                return p
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException || ++tries >= 3) throw e
+                Timber.i("Library index: page at %d failed (%s), trying again", start, e.message)
+                kotlinx.coroutines.delay(3_000L * tries)
+            }
+        }
+    }
+
     private suspend fun readAll(
         hook: SourceHook,
         owner: String,
@@ -241,7 +269,7 @@ internal class LibraryIndex(
                 (PAGE until head.total step PAGE).chunked(AT_ONCE).forEach { starts ->
                     // Never while the remote is in use: browsing gets the CPU and the network
                     Conductor.whenQuiet()
-                    val pages = coroutineScope { starts.map { s -> async { page(hook, userId, kind, s) } }.awaitAll() }
+                    val pages = coroutineScope { starts.map { s -> async { steadyPage(hook, userId, kind, s, head.total) } }.awaitAll() }
                     pages.forEach { p ->
                         p.titles().forEach(b::add)
                         done += p.items.size

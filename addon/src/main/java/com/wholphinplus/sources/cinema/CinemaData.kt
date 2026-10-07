@@ -9,8 +9,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.UseSerializers
 import org.jellyfin.sdk.api.client.extensions.get
@@ -93,6 +96,16 @@ data class CinemaRow(
     val source: RowSource? = null,
     /** How many titles the whole row has, when known (a list: its titles in the library). */
     val total: Int? = null,
+    /**
+     * Still on its way: shown as its name and placeholder cards of the real size while the page's
+     * first rows are up, so it fills in where it stands instead of pushing the rows below down.
+     */
+    val loading: Boolean = false,
+    /**
+     * Its request failed this load (after a second try): stands for the row until the copy shown
+     * before takes its place ([withPreviousRows]); never drawn.
+     */
+    val failed: Boolean = false,
 )
 
 /**
@@ -147,10 +160,58 @@ data class CinemaHomeData(
     val rows: List<CinemaRow>,
     val shows: CinemaLibrary?,
     val movies: CinemaLibrary?,
+    /**
+     * Rows whose request failed in this load (shown as they were before, or left out): such a
+     * page isn't saved on the device or counted as fresh, so the next visit asks again.
+     */
+    val failed: Int = 0,
 ) {
-    /** More rows, or more titles in them, than [other] (null = nothing shown yet). */
+    /** More rows, or more titles in them, than [other] (null = nothing shown yet). Placeholders don't count. */
     fun richerThan(other: CinemaHomeData?): Boolean =
-        other == null || rows.size > other.rows.size || rows.sumOf { it.items.size + it.tiles.size } > other.rows.sumOf { it.items.size + it.tiles.size }
+        other == null || rows.count { !it.loading } > other.rows.count { !it.loading } || rows.sumOf { it.items.size + it.tiles.size } > other.rows.sumOf { it.items.size + it.tiles.size }
+}
+
+/**
+ * [rows] with each row whose request failed put back as it was on [previous] pages (the one on
+ * screen, the last load), so a server blip doesn't take a row away (and move the rows below it)
+ * until the next load. A failed row never shown before leaves this load.
+ */
+internal fun withPreviousRows(
+    rows: List<CinemaRow>,
+    previous: List<CinemaHomeData>,
+): List<CinemaRow> =
+    rows.mapNotNull { row ->
+        if (!row.failed) {
+            row
+        } else {
+            previous.firstNotNullOfOrNull { p -> p.rows.firstOrNull { it.title == row.title && !it.loading && !it.failed && (it.items.isNotEmpty() || it.tiles.isNotEmpty()) } }
+        }
+    }
+
+/**
+ * The fresh [page][this] in place of [shown] (a page saved on the device, or one the background
+ * refresh gave more rows): it keeps the shown billboard and the titles of rows that are random
+ * each load (genre rows, shuffled rows), so nothing on screen jumps under the remote; Continue
+ * Watching, lists and new arrivals take the fresh titles.
+ */
+internal fun CinemaHomeData.over(shown: CinemaHomeData): CinemaHomeData {
+    val before = shown.rows.associateBy { it.title }
+    return copy(
+        featured = shown.featured.ifEmpty { featured },
+        rows =
+            rows.map { row ->
+                val old = before[row.title]
+                val random = row.source?.seed != null || row.source?.spec?.type == HomeRowType.GENRE
+                if (old != null && random && old.items.isNotEmpty()) row.copy(items = old.items, source = old.source) else row
+            },
+    )
+}
+
+/** Marks a row's requests: [CinemaRepository.safe] notes here when one gave up, so "failed" isn't taken for "empty". */
+private class RowTrack : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    @Volatile var failed = false
+
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<RowTrack>
 }
 
 /** Loads Cinema mode's home from the main Jellyfin server (through Wholphin's own connection). */
@@ -181,7 +242,12 @@ internal class CinemaRepository(
     suspend fun load(
         page: RowsPage = RowsPage.HOME,
         onFirst: (CinemaHomeData) -> Unit = {},
-    ): CinemaHomeData = timed(page.name.lowercase(), onFirst) { first -> loadPage(page, first) }
+        /** Pages shown before (on screen, the last load): a row whose request fails keeps its copy from there. */
+        previous: List<CinemaHomeData> = emptyList(),
+    ): CinemaHomeData = timed(page.name.lowercase(), onFirst) { first -> loadPage(page, first, previous) }
+
+    /** [HomeCollections.changed] now: which lists a page loaded now is built from. */
+    val listsGeneration: Int get() = collections.changed.value
 
     /** The lists as [page] sees them: Top Streaming charts know whether they're shows or movies. */
     fun pageLists(): List<PageList> = collections.lists.value.filterNot { it.hidden }.map { PageList(it.id, it.name, collections.chartSeries(it), it.pages, it.order) }
@@ -312,6 +378,7 @@ internal class CinemaRepository(
     private suspend fun loadPage(
         page: RowsPage,
         onFirst: (CinemaHomeData) -> Unit,
+        previous: List<CinemaHomeData>,
     ): CinemaHomeData =
         withContext(Dispatchers.IO) {
             val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() }
@@ -321,17 +388,26 @@ internal class CinemaRepository(
             // Everything that doesn't need the library list starts at once. The slow genre pool
             // is sent last so the quick rows aren't queued behind it (the app's HTTP client runs
             // a few requests per server at a time).
+            // Rows whose request failed (after its second try), by what started them: a row's spec,
+            // a row type (rows started before the libraries were known), "list:<id>", or [POOL_KEY]
+            val failed = java.util.concurrent.ConcurrentHashMap.newKeySet<Any>()
             coroutineScope {
-                val views = async { runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList()) }
+                // Without the library list the page can't be built as arranged (library rows and
+                // Home's defaults depend on it): no answer fails the load, which is tried again,
+                // instead of a page missing rows replacing the one on screen
+                val views = async { retried { api.userViewsApi.getUserViews(userId = userId).content.items } }
                 val resume =
                     async {
-                        if (!page.hasContinueWatching) emptyList() else safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items }
+                        if (!page.hasContinueWatching) emptyList() else tracked(failed, HomeRowType.CONTINUE_WATCHING) { safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items } }
                     }
                 val nextUp =
                     async {
-                        if (!page.hasContinueWatching || page.series == false) emptyList() else safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items }
+                        if (!page.hasContinueWatching || page.series == false) emptyList() else tracked(failed, HomeRowType.CONTINUE_WATCHING) { safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
                     }
-                val greeting = async { if (page.hasContinueWatching) continueTitle(userId) else "" }
+                // Continue Watching's name as shown before: the greeting's request can fail or be
+                // late, and a row that changes its name is a different row (it can't keep its copy)
+                val greetedBefore = previous.firstNotNullOfOrNull { p -> p.rows.firstOrNull { it.title.startsWith(CONTINUE) }?.title }
+                val greeting = async { if (page.hasContinueWatching) continueTitle(userId) ?: greetedBefore ?: CONTINUE else "" }
                 // The lists this page shows (before the libraries are known, from the saved
                 // layout, or the page's defaults for lists)
                 val wanted =
@@ -345,7 +421,7 @@ internal class CinemaRepository(
                     wanted.associate { c ->
                         // Same route as Wholphin's own collection rows: the tag is answered by
                         // ProgressOverlay with the list's titles, in list order
-                        c.id to async { c.name to safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
+                        c.id to async { c.name to tracked(failed, "list:" + c.id) { safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } } }
                     }
                 // Rows that don't depend on which libraries there are start now, before the
                 // library list is back (the defaults include them; a saved page if it has them on)
@@ -356,7 +432,7 @@ internal class CinemaRepository(
                 fun locked(spec: HomeRowSpec) = spec.type in SHUFFLED_ON_LOAD && RowSource(page, spec).lockKey in locks
                 val early =
                     LIBRARY_FREE.filter { t -> page.offers(t) && !locked(HomeRowSpec(t)) && (guess?.rows?.any { it.type == t && it.on } ?: true) }.associateWith { t ->
-                        async { rowItems(HomeRowSpec(t), page, userId, emptyList(), emptyMap()) }
+                        async { tracked(failed, t) { rowItems(HomeRowSpec(t), page, userId, emptyList(), emptyMap()) } }
                     }
                 val libs = views.await().map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
                 val movieLibs = libs.filter { it.collectionType == CollectionType.MOVIES }
@@ -380,7 +456,7 @@ internal class CinemaRepository(
                         }
                     }
                 var becauseRow: Pair<String, List<CinemaItem>>? = null
-                val because = if (on.any { it.type == HomeRowType.BECAUSE_YOU_WATCHED }) async { becauseRow = because(watched.await(), page, userId) } else null
+                val because = if (on.any { it.type == HomeRowType.BECAUSE_YOU_WATCHED }) async { becauseRow = tracked(failed, HomeRowType.BECAUSE_YOU_WATCHED) { because(watched.await(), page, userId) } } else null
                 val seeds = on.filter(::locked).associateWith { kotlin.random.Random.nextLong() }
                 val rows =
                     on.filter { it.type != HomeRowType.GENRE && it.type != HomeRowType.BECAUSE_YOU_WATCHED }.map { spec ->
@@ -389,10 +465,10 @@ internal class CinemaRepository(
                             if (seed != null) {
                                 async {
                                     val name = if (spec.type == HomeRowType.COLLECTION) collections.lists.value.firstOrNull { it.id == spec.ref }?.name.orEmpty() else spec.defaultName(libs, emptyMap())
-                                    name to fetch(spec, page, userId, 0, seed).first.filter { fits(page, it) }
+                                    name to tracked(failed, spec) { fetch(spec, page, userId, 0, seed).first.filter { fits(page, it) } }
                                 }
                             } else {
-                                early[spec.type] ?: async { rowItems(spec, page, userId, libs, lists) }
+                                early[spec.type] ?: async { tracked(failed, spec) { rowItems(spec, page, userId, libs, lists) } }
                             }
                         )
                     }
@@ -403,40 +479,76 @@ internal class CinemaRepository(
                         null
                     } else {
                         async {
-                            safe {
-                                api.itemsApi.getItems(
-                                    GetItemsRequest(userId = userId, includeItemTypes = kinds(page), recursive = true, sortBy = listOf(ItemSortBy.RANDOM), limit = POOL, fields = fields, enableImageTypes = images, imageTypeLimit = 1),
-                                ).content.items
+                            tracked(failed, POOL_KEY) {
+                                safe {
+                                    api.itemsApi.getItems(
+                                        GetItemsRequest(userId = userId, includeItemTypes = kinds(page), recursive = true, sortBy = listOf(ItemSortBy.RANDOM), limit = POOL, fields = fields, enableImageTypes = images, imageTypeLimit = 1),
+                                    ).content.items
+                                }
                             }
                         }
                     }
-                val cw = watched.await()
                 // Episodes borrow their series' TMDB id for title art. Only art, so the page
                 // doesn't wait for it: the first rows use what's known, the full page has it all
-                val seriesArt = async { fillSeriesTmdb(cw, userId) }
-                val title = greeting.await()
+                val seriesArt = async { fillSeriesTmdb(watched.await(), userId) }
                 // The screen shows once Continue Watching and the next rows (what's on screen) are
-                // in; rows further down join as they arrive, like the genre rows
-                rows.filter { it.first.type != HomeRowType.CONTINUE_WATCHING }.take(ON_SCREEN_ROWS).forEach { it.second.await() }
+                // in; rows further down join as they arrive, like the genre rows. But not for long:
+                // on a slow link (pictures share the server's one connection) a request can take the
+                // SDK's full 30 s, and a first visit stayed blank that long. What isn't in by then
+                // shows as a placeholder and fills in
+                withTimeoutOrNull(FIRST_ROWS_WAIT_MS) {
+                    watched.await()
+                    greeting.await()
+                    rows.filter { it.first.type != HomeRowType.CONTINUE_WATCHING }.take(ON_SCREEN_ROWS).forEach { it.second.await() }
+                }
+                // Null until in (the first screen may show without them)
+                var cw = if (watched.isCompleted) watched.await() else null
+                var title = if (greeting.isCompleted) greeting.await() else greetedBefore ?: CONTINUE
                 var got = rows.filter { it.second.isCompleted }.map { (spec, items) -> spec to items.await() }
 
-                fun build(genreRows: Map<String, CinemaRow>) =
-                    on.mapNotNull { spec ->
+                fun failedRow(spec: HomeRowSpec) =
+                    when (spec.type) {
+                        HomeRowType.COLLECTION -> spec in failed || "list:" + spec.ref in failed
+                        HomeRowType.GENRE -> POOL_KEY in failed
+                        else -> spec in failed || spec.type in failed
+                    }
+
+                // [pending]: the page shown before every row is in; rows still coming hold their place.
+                // A row whose request failed stands in for the copy shown before ([withPreviousRows])
+                fun placeholder(
+                    spec: HomeRowSpec,
+                    name: String,
+                ) = CinemaRow(spec.title.ifBlank { name }, emptyList(), ranked = spec.type == HomeRowType.COLLECTION && isTopList(name), loading = !failedRow(spec), failed = failedRow(spec))
+
+                fun build(
+                    genreRows: Map<String, CinemaRow>,
+                    pending: Boolean = false,
+                ) = on.mapNotNull { spec ->
                         when (spec.type) {
-                            HomeRowType.CONTINUE_WATCHING -> CinemaRow(spec.title.ifBlank { title }, cw.map(::toItem))
+                            HomeRowType.CONTINUE_WATCHING ->
+                                if (failedRow(spec) || cw == null) placeholder(spec, title).takeIf { pending || it.failed } else CinemaRow(spec.title.ifBlank { title }, cw.orEmpty().map(::toItem))
                             HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES -> CinemaRow(spec.title.ifBlank { spec.defaultName(emptyList(), emptyMap()) }, emptyList(), tiles = tileRow(spec.type, page))
-                            HomeRowType.GENRE -> genreRows[spec.ref]?.let { r -> (spec.title.takeIf { it.isNotBlank() }?.let { r.copy(title = it) } ?: r).copy(source = RowSource(page, spec)) }
+                            HomeRowType.GENRE ->
+                                genreRows[spec.ref]?.let { r -> (spec.title.takeIf { it.isNotBlank() }?.let { r.copy(title = it) } ?: r).copy(source = RowSource(page, spec)) }
+                                    ?: if (pending || failedRow(spec)) placeholder(spec, spec.ref.orEmpty()) else null
                             // Joins once found (it waits on TMDB and a search per title), like the genre rows
-                            HomeRowType.BECAUSE_YOU_WATCHED -> becauseRow?.let { (name, items) -> CinemaRow(spec.title.ifBlank { name }, items) }
+                            HomeRowType.BECAUSE_YOU_WATCHED ->
+                                becauseRow?.takeUnless { failedRow(spec) }?.let { (name, items) -> CinemaRow(spec.title.ifBlank { name }, items) }
+                                    ?: cw?.firstOrNull()?.takeIf { (pending || failedRow(spec)) && because != null && tmdb?.available == true }?.let { placeholder(spec, "Because You Watched ${toItem(it).title}") }
                             else ->
-                                got.firstOrNull { it.first == spec }?.second?.let { (name, items) ->
+                                got.firstOrNull { it.first == spec && !failedRow(spec) }?.second?.let { (name, items) ->
                                     val shown = spec.title.ifBlank { name }
                                     val row = if (spec.type == HomeRowType.COLLECTION) listRow(shown, items, collections.lists.value.firstOrNull { it.id == spec.ref }) else CinemaRow(shown, items.map(::toItem))
                                     if (row.ranked || spec.type !in PAGED) row else row.copy(source = RowSource(page, spec, seeds[spec], firstPage(spec, seeds[spec] != null)), total = listTotal(spec))
+                                } ?: if (pending || failedRow(spec)) {
+                                    val name = if (spec.type == HomeRowType.COLLECTION) collections.lists.value.firstOrNull { it.id == spec.ref }?.name.orEmpty() else spec.defaultName(libs, emptyMap())
+                                    placeholder(spec, name).takeIf { it.title.isNotBlank() }
+                                } else {
+                                    null
                                 }
                         }
-                    }.filter { it.items.isNotEmpty() || it.tiles.isNotEmpty() }
-                val quickRows = build(emptyMap())
+                    }.filter { it.items.isNotEmpty() || it.tiles.isNotEmpty() || it.loading || it.failed }
+                val quickRows = withPreviousRows(build(emptyMap(), pending = true), previous)
 
                 // The billboard: the charts' leaders, then recent titles with a backdrop and an overview
                 val fresh = setOf(HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES, HomeRowType.LIBRARY, HomeRowType.NEW_RELEASE_MOVIES, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS)
@@ -463,6 +575,8 @@ internal class CinemaRepository(
                 if (page == RowsPage.HOME) hook.syncWatchStateLater()
                 // What the rest of the page waits on, for performance checks
                 val t0 = System.currentTimeMillis()
+                cw = watched.await()
+                title = greeting.await()
                 got = rows.map { (spec, items) -> spec to items.await() }
                 val tRows = System.currentTimeMillis()
                 because?.await()
@@ -473,9 +587,18 @@ internal class CinemaRepository(
                 val genreRows = pool?.await()?.let { genreRows(it, picked, picked.size) }.orEmpty().associateBy { it.title }
                 val tPool = System.currentTimeMillis()
                 Timber.i("Cinema load %s: after first rows, rows +%d ms, because +%d, series art +%d, genre pool +%d", page.name.lowercase(), tRows - t0, tBecause - tRows, tArt - tBecause, tPool - tArt)
-                val all = build(genreRows)
+                val built = build(genreRows)
+                val failures = built.count { it.failed }
+                // Not one row came back (the server down, or its connection dead after the TV slept):
+                // a failed load, tried again, rather than a page of old copies or nothing saved as fresh
+                if (failures > 0 && built.all { it.failed || it.tiles.isNotEmpty() }) throw java.io.IOException("Your server didn't answer")
+                val all = withPreviousRows(built, previous)
+                if (failures > 0) {
+                    val lost = built.filter { it.failed }.map { it.title } - all.map { it.title }.toSet()
+                    Timber.w("Cinema load %s: %d rows failed, %d shown as before, left out: %s", page.name.lowercase(), failures, failures - lost.size, lost)
+                }
                 // Nothing for the billboard in the first rows (they weren't in yet): pick from the whole page
-                ranked(CinemaHomeData(featured.ifEmpty { pick(all) }, all, showLibs.firstOrNull(), movieLibs.firstOrNull()))
+                ranked(CinemaHomeData(featured.ifEmpty { pick(all) }, all, showLibs.firstOrNull(), movieLibs.firstOrNull(), failed = failures))
             }
         }
 
@@ -754,7 +877,7 @@ internal class CinemaRepository(
                 data.rows
                     .distinctBy { it.title }
                     .map { r -> if (r.items.distinctBy { it.key }.size == r.items.size) r else r.copy(items = r.items.distinctBy { it.key }) }
-                    .filter { it.items.isNotEmpty() || it.tiles.isNotEmpty() },
+                    .filter { it.items.isNotEmpty() || it.tiles.isNotEmpty() || it.loading },
         )
 
     private fun rankLabel(row: CinemaRow): String {
@@ -773,12 +896,13 @@ internal class CinemaRepository(
     }
 
     /** "Continue Watching for <name>", as a streaming app greets its profile. */
-    private suspend fun continueTitle(userId: UUID): String {
+    /** Null when the server didn't say who's signed in. */
+    private suspend fun continueTitle(userId: UUID): String? {
         val name =
-            userName ?: runCatching { api.userApi.getCurrentUser().content.name }.getOrNull()?.also { userName = it }
+            userName ?: runCatching { api.userApi.getCurrentUser().content.name }.getOrNull()?.also { userName = it } ?: return null
         // Account names like "abc123#Name": greet the part people read as the name
-        val shown = name?.substringAfterLast('#')?.trim()
-        return if (shown.isNullOrBlank()) "Continue Watching" else "Continue Watching for $shown"
+        val shown = name.substringAfterLast('#').trim()
+        return if (shown.isBlank()) CONTINUE else "$CONTINUE for $shown"
     }
 
     private var userName: String? = null
@@ -1030,11 +1154,16 @@ internal class CinemaRepository(
     ): List<CinemaItem> =
         coroutineScope {
             val started = System.currentTimeMillis()
+            val track = coroutineContext[RowTrack]
             val recommended =
                 item.tmdbId?.takeIf { tmdb?.available == true }?.let { id ->
                     val type = if (item.tmdbTv) com.wholphinplus.sources.core.TmdbType.TV else com.wholphinplus.sources.core.TmdbType.MOVIE
                     runCatching { tmdb!!.recommendations(type, id) }
-                        .onFailure { Timber.w(it, "TMDB recommendations failed for %s", item.title) }
+                        .onFailure {
+                            if (it is CancellationException) throw it
+                            track?.failed = true
+                            Timber.w(it, "TMDB recommendations failed for %s", item.title)
+                        }
                         .getOrDefault(emptyList())
                         .take(RECOMMENDATIONS)
                 }.orEmpty()
@@ -1208,14 +1337,47 @@ internal class CinemaRepository(
         return if (min >= 60) "${min / 60}h ${min % 60}m left" else "${min}m left"
     }
 
+    /**
+     * A row's titles, or none when the server didn't answer. A quick failure (a reset stream, a
+     * busy server's 5xx, the connection still waking with the TV) is tried once more a moment
+     * later; a row that still fails is noted on its [RowTrack], so the load shows its copy from
+     * before instead of losing it.
+     */
     private suspend fun <T> safe(block: suspend () -> List<T>): List<T> =
         try {
-            block()
+            retried(block)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Timber.w(e, "Cinema row failed")
+            currentCoroutineContext()[RowTrack]?.failed = true
             emptyList()
         }
+
+    /** [block], tried once more after [RETRY_MS] when it failed in a way a retry can fix. */
+    private suspend fun <T> retried(block: suspend () -> T): T {
+        try {
+            return block()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            // A timeout already waited long (another wait would hold the page twice as long), and
+            // a refusal (4xx) won't change
+            if (e is org.jellyfin.sdk.api.client.exception.TimeoutException) throw e
+            if (e is org.jellyfin.sdk.api.client.exception.InvalidStatusException && e.status in 400..499) throw e
+            Timber.i("Cinema request failed (%s: %s), trying again", e.javaClass.simpleName, e.message)
+        }
+        delay(RETRY_MS)
+        return block()
+    }
+
+    /** [block] with its requests' failures noted: [key] joins [failed] when one gave up. */
+    private suspend fun <T> tracked(
+        failed: MutableSet<Any>,
+        key: Any,
+        block: suspend () -> T,
+    ): T {
+        val track = RowTrack()
+        return withContext(track) { block() }.also { if (track.failed) failed += key }
+    }
 
     private val seriesTmdb = java.util.concurrent.ConcurrentHashMap<UUID, Int>()
 
@@ -1352,6 +1514,17 @@ internal class CinemaRepository(
 
         /** Home rows below Continue Watching that are on screen when the page opens. */
         private const val ON_SCREEN_ROWS = 2
+
+        /** Longest the first screen waits for its rows; any still out then show as placeholders. */
+        private const val FIRST_ROWS_WAIT_MS = 6_000L
+
+        private const val CONTINUE = "Continue Watching"
+
+        /** Wait before a failed request's second try. */
+        private const val RETRY_MS = 1_200L
+
+        /** [CinemaRepository.loadPage]'s failure key for the genre rows' shared pool. */
+        private const val POOL_KEY = "pool"
 
         /** Home rows whose request doesn't depend on the library list. */
         private val LIBRARY_FREE = listOf(HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES, HomeRowType.NEW_RELEASE_MOVIES, HomeRowType.MY_LIST, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS, HomeRowType.JUST_AIRED)

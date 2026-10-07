@@ -32,6 +32,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -202,96 +205,143 @@ fun CinemaHome(
     val overlays by hook.store.overlays.collectAsState()
     val ratingPrefs by hook.store.ratingPrefs.collectAsState()
     val ratings = remember { entry.ratings() }
-    // Lists and charts that were just matched (first start, the 6-hourly refresh) show at once
-    val listsChanged by hook.collections.changed.collectAsState()
-    // Per tab: the [listsChanged] its page was loaded under; a newer one may bring rows it lacks
+    // Per tab: the [HomeCollections.changed] its page was loaded under; a newer one may bring rows it lacks
     val loadedUnder = remember { mutableMapOf<CinemaTab, Int>() }
     // Tabs showing a page saved on the device: the fresh load replaces it when it lands
     val fromDevice = remember { mutableSetOf<CinemaTab>() }
-    LaunchedEffect(tab, attempt, listsChanged) {
-        if (tab != CinemaTab.MY_LIST && pages[tab] != null && System.currentTimeMillis() - (TabCache.at[tab] ?: 0L) < 2 * 60_000) return@LaunchedEffect
-        // Warm the title art and badge facts for what's on screen first (badges: a few requests
-        // per row, batched by the server, not one per card)
-        // The first two rows (on screen) at once; rows further down once the remote is still
-        fun warm(d: CinemaHomeData) {
-            d.rows.forEachIndexed { i, row ->
+    // Lists and charts that were just matched (first start, the 6-hourly refresh) show once the
+    // load in progress is done, never by cancelling it: the refresh announces its groups seconds
+    // apart, and each used to restart the tab's whole load from its first request (slow pages
+    // after nearly every start). A busy collector gets only the latest change: several, one reload
+    LaunchedEffect(tab, attempt) {
+        hook.collections.changed.collect { listsChanged ->
+            if (tab != CinemaTab.MY_LIST && pages[tab] != null && TabCache.fresh(tab, listsChanged)) return@collect
+            // Warm the title art and badge facts for what's on screen first (badges: a few requests
+            // per row, batched by the server, not one per card)
+            // The first two rows (on screen) at once; rows further down once the remote is still
+            fun warm(d: CinemaHomeData) {
+                d.rows.forEachIndexed { i, row ->
+                    launch {
+                        if (i >= ON_SCREEN_ROWS) Conductor.whenQuiet()
+                        row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } }
+                        if (overlays.needsStreams) {
+                            val ids = row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }
+                            if (i < ON_SCREEN_ROWS) StreamCache.prefetch(ids, repo::streamTagsBatch) else Conductor.later { StreamCache.prefetch(ids, repo::streamTagsBatch) }
+                        }
+                    }
+                }
+            }
+            // A first visit shows the quick rows at once; the genre rows join when they arrive
+            var partial = false
+            val onFirst = { first: CinemaHomeData ->
                 launch {
-                    if (i >= ON_SCREEN_ROWS) Conductor.whenQuiet()
-                    row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } }
-                    if (overlays.needsStreams) {
-                        val ids = row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }
-                        if (i < ON_SCREEN_ROWS) StreamCache.prefetch(ids, repo::streamTagsBatch) else Conductor.later { StreamCache.prefetch(ids, repo::streamTagsBatch) }
+                    if (pages[tab] == null) {
+                        pages[tab] = first
+                        partial = true
+                    }
+                    warm(first)
+                }
+                Unit
+            }
+            errors.remove(tab)
+            if (pages[tab] == null && tab != CinemaTab.MY_LIST) {
+                PageSnapshots.read(tab, repo::owner)?.let { saved ->
+                    if (pages[tab] == null) {
+                        pages[tab] = saved
+                        fromDevice += tab
+                        warm(saved)
                     }
                 }
             }
-        }
-        // A first visit shows the quick rows at once; the genre rows join when they arrive
-        var partial = false
-        val onFirst = { first: CinemaHomeData ->
-            launch {
-                if (pages[tab] == null) {
-                    pages[tab] = first
-                    partial = true
-                }
-                warm(first)
-            }
-            Unit
-        }
-        suspend fun loadTab(): CinemaHomeData =
-            when (tab) {
-                CinemaTab.HOME -> repo.load(RowsPage.HOME, onFirst)
-                CinemaTab.SHOWS -> repo.load(RowsPage.SHOWS, onFirst)
-                CinemaTab.MOVIES -> repo.load(RowsPage.MOVIES, onFirst)
-                CinemaTab.NEW_POPULAR -> repo.load(RowsPage.NEW_POPULAR, onFirst)
-                CinemaTab.KIDS -> repo.load(RowsPage.KIDS, onFirst)
-                CinemaTab.MY_LIST -> CinemaHomeData(emptyList(), listOf(CinemaRow("My List", repo.myList())), null, null)
-            }
-        errors.remove(tab)
-        if (pages[tab] == null && tab != CinemaTab.MY_LIST) {
-            PageSnapshots.read(tab, repo::owner)?.let { saved ->
-                if (pages[tab] == null) {
-                    pages[tab] = saved
-                    fromDevice += tab
-                    warm(saved)
+            suspend fun loadTab(): CinemaHomeData {
+                // A row whose request fails keeps its copy from what's on screen, else the last load
+                val previous = listOfNotNull(pages[tab], TabCache.data[tab])
+                return when (tab) {
+                    CinemaTab.HOME -> repo.load(RowsPage.HOME, onFirst, previous)
+                    CinemaTab.SHOWS -> repo.load(RowsPage.SHOWS, onFirst, previous)
+                    CinemaTab.MOVIES -> repo.load(RowsPage.MOVIES, onFirst, previous)
+                    CinemaTab.NEW_POPULAR -> repo.load(RowsPage.NEW_POPULAR, onFirst, previous)
+                    CinemaTab.KIDS -> repo.load(RowsPage.KIDS, onFirst, previous)
+                    CinemaTab.MY_LIST -> CinemaHomeData(emptyList(), listOf(CinemaRow("My List", repo.myList())), null, null)
                 }
             }
-        }
-        // Nothing to show yet (the TV woke before its network): try again quietly a few times
-        // before showing an error. Leaving the tab cancels the load; that's not a failure.
-        var tries = 0
-        while (true) {
-            val failure =
-                try {
-                    val page = loadTab()
-                    TabCache.data[tab] = page
-                    TabCache.at[tab] = System.currentTimeMillis()
-                    launch { PageSnapshots.save(tab, repo::owner, page) }
-                    // A page already showing keeps its rows (no shuffle under the remote) unless
-                    // rows just matched in the background gave it more to show (a first start)
-                    val gained = loadedUnder[tab] != listsChanged && page.richerThan(pages[tab])
-                    val shown = pages[tab]
-                    if (tab in fromDevice && shown != null) {
-                        fromDevice -= tab
-                        pages[tab] = page.over(shown)
-                        loadedUnder[tab] = listsChanged
-                    } else if (shown == null || partial || tab == CinemaTab.MY_LIST || gained) {
-                        pages[tab] = page
-                        loadedUnder[tab] = listsChanged
+            // Nothing to show yet (the TV woke before its network): try again quietly a few times
+            // before showing an error. Leaving the tab cancels the load; that's not a failure.
+            var tries = 0
+            var rowRetries = 0
+            while (true) {
+                var rowsFailed = false
+                val failure =
+                    try {
+                        val page = loadTab()
+                        rowsFailed = page.failed > 0
+                        val shown = pages[tab]
+                        // A page already showing keeps its rows (no shuffle under the remote) unless
+                        // rows just matched in the background gave it more to show (a first start).
+                        // Placeholders on screen (a first visit's first rows) always give way
+                        val gained = loadedUnder[tab] != listsChanged && page.richerThan(shown)
+                        val next =
+                            when {
+                                tab in fromDevice && shown != null -> page.over(shown)
+                                shown == null || partial || shown.rows.any { it.loading } || tab == CinemaTab.MY_LIST -> page
+                                // In their places, keeping the billboard and the random rows on screen
+                                // (a reload for rows that failed brings them back the same way)
+                                gained || rowRetries > 0 -> page.over(shown)
+                                else -> null
+                            }
+                        if (next != null) {
+                            fromDevice -= tab
+                            pages[tab] = next
+                            loadedUnder[tab] = listsChanged
+                            // The first rows have given way; a later reload mustn't swap the page whole
+                            partial = false
+                        }
+                        // Back from a title page the tab is rebuilt from here: the fresh Continue
+                        // Watching and lists, but the billboard and random rows that were on screen
+                        TabCache.data[tab] = next ?: shown?.let(page::over) ?: page
+                        // A page with rows that failed (shown as before, or left out) isn't saved
+                        // or counted as fresh: the next visit asks again
+                        if (page.failed == 0) {
+                            TabCache.stamp(tab, listsChanged)
+                            launch { PageSnapshots.save(tab, repo::owner, page) }
+                        } else {
+                            TabCache.at.remove(tab)
+                        }
+                        warm(page)
+                        null
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        timber.log.Timber.w(e, "Cinema %s load failed", tab.name)
+                        e
                     }
-                    warm(page)
-                    null
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    timber.log.Timber.w(e, "Cinema %s load failed", tab.name)
-                    e
+                if (failure == null) {
+                    // Rows failed (shown as before, or left out): loaded again quietly a little
+                    // later while the tab is open, so a blip doesn't cost them until the next visit
+                    if (!rowsFailed || ++rowRetries > ROW_RETRIES) break
+                    delay(20_000L * rowRetries)
+                    continue
                 }
-            if (failure == null || pages[tab] != null) break
-            if (++tries >= LOAD_TRIES) {
-                errors[tab] = failure.message?.takeIf { it.isNotBlank() } ?: "Couldn't load your library"
-                break
+                val shown = pages[tab]
+                if (shown != null && shown.rows.any { it.items.isNotEmpty() }) {
+                    // Titles are on screen (a saved page, the last load, the first rows): they
+                    // stay, and the load is tried again quietly while the tab is open, so the
+                    // rows come back with the server instead of on the next visit
+                    if (++tries > QUIET_TRIES) break
+                    // Rows still spinning after a couple of tries won't come this time
+                    if (tries == 2 && shown.rows.any { it.loading }) pages[tab] = shown.copy(rows = shown.rows.filterNot { it.loading })
+                    delay((5_000L * tries).coerceAtMost(60_000L))
+                    continue
+                }
+                if (++tries >= LOAD_TRIES) {
+                    // Only placeholders were up: the error and its Try again take their place
+                    // (dropped, they left a page saying it had no rows switched on)
+                    pages.remove(tab)
+                    errors[tab] = failure.message?.takeIf { it.isNotBlank() } ?: "Couldn't load your library"
+                    break
+                }
+                delay(1_500L * tries)
             }
-            delay(1_500L * tries)
         }
     }
     // Once Home is up, quietly load Shows and Movies so switching tabs is instant
@@ -302,10 +352,14 @@ fun CinemaHome(
             if (pages[t] == null) {
                 // Off the critical path: only while the remote is still, so browsing stays smooth
                 try {
-                    val page = Conductor.later { repo.load(rowsPage) }
+                    val gen = repo.listsGeneration
+                    val page = Conductor.later { repo.load(rowsPage, previous = listOfNotNull(TabCache.data[t])) }
                     TabCache.data[t] = page
-                    TabCache.at[t] = System.currentTimeMillis()
-                    PageSnapshots.save(t, repo::owner, page)
+                    // Rows failed: opening the tab asks again (and nothing half-loaded is saved)
+                    if (page.failed == 0) {
+                        TabCache.stamp(t, gen)
+                        PageSnapshots.save(t, repo::owner, page)
+                    }
                     if (pages[t] == null) pages[t] = page
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -582,6 +636,12 @@ internal fun LoadError(
 /** Quiet attempts before a page with nothing to show reports an error. */
 internal const val LOAD_TRIES = 3
 
+/** Quiet reloads of a tab whose load failed while a page shows (5 s, 10 s, … then every minute: ~15 min). */
+private const val QUIET_TRIES = 20
+
+/** Quiet reloads of a tab that loaded with failed rows (20 s, then 40 s later). */
+private const val ROW_RETRIES = 2
+
 /** Cinema mode's top-menu pages. They switch in place, like a streaming app's tabs. */
 enum class CinemaTab(
     val label: String,
@@ -822,7 +882,9 @@ internal fun CinemaScreen(
                     },
             ) {
                 itemsIndexed(data.rows, key = { _, r -> r.title }, contentType = { _, r -> if (r.tiles.isNotEmpty()) "tiles" else "row" }) { i, row ->
-                    if (row.tiles.isNotEmpty()) {
+                    if (row.loading) {
+                        LoadingRow(row)
+                    } else if (row.tiles.isNotEmpty()) {
                         val onTileFocused = remember(focus, i) { { focus.onTile(i) } }
                         TileRowView(row, cardSpec, onTileFocused, onTile, if (i == 0) upToBillboard else Modifier)
                     } else {
@@ -1094,6 +1156,65 @@ private fun InfoPanel(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 HeroButton("Play", Icons.Filled.PlayArrow, primary = true, modifier = Modifier.focusRequester(playFocus), onFocused = onButtonsFocused, onClick = onPlay)
                 HeroButton("More Info", Icons.Filled.Info, primary = false, onFocused = onButtonsFocused, onClick = onMoreInfo)
+            }
+        }
+    }
+}
+
+/**
+ * A row still on its way: its name with a small spinner, and cards of the real size gently
+ * pulsing, so it fills in where it stands. Not focusable: the remote passes over it until it's in.
+ * The pulse and the spinner are drawn only (no recomposition per frame).
+ */
+@Composable
+private fun LoadingRow(row: CinemaRow) {
+    val motion = androidx.compose.animation.core.rememberInfiniteTransition(label = "loading")
+    val glow =
+        motion.animateFloat(
+            0.05f,
+            0.11f,
+            androidx.compose.animation.core.infiniteRepeatable(tween(900, easing = CinemaEase), androidx.compose.animation.core.RepeatMode.Reverse),
+            label = "glow",
+        )
+    val turn = motion.animateFloat(0f, 360f, androidx.compose.animation.core.infiniteRepeatable(tween(1000, easing = androidx.compose.animation.core.LinearEasing)), label = "turn")
+    fun Modifier.pulse(corner: Dp) =
+        drawBehind { drawRoundRect(Color.White.copy(alpha = glow.value), cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner.toPx())) }
+    val captions = LocalOverlays.current.captions
+    // Laid out like CinemaRowView: the same name line, gaps and card sizes
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.padding(start = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(row.title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Box(
+                Modifier.size(12.dp).drawBehind {
+                    rotate(turn.value) {
+                        drawArc(Plus, 0f, 270f, false, style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                    }
+                },
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().clipToBounds().wrapContentWidth(Alignment.Start, unbounded = true).padding(start = 48.dp, top = 8.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (row.ranked) 4.dp else 10.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            repeat(6) {
+                if (row.ranked) {
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Spacer(Modifier.width(NumeralWidth).height(PosterHeight))
+                        Box(Modifier.width(PosterWidth).height(PosterHeight).pulse(4.dp))
+                    }
+                } else {
+                    Column(Modifier.width(208.dp)) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).pulse(6.dp))
+                        // The caption's room, so the row is as tall as it will be
+                        if (captions) {
+                            Column(Modifier.fillMaxWidth().padding(top = 9.dp, start = 2.dp, end = 2.dp)) {
+                                Text(" ", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                Row(Modifier.padding(top = 2.dp)) { Text(" ", fontSize = 11.sp, maxLines = 1) }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1455,9 +1576,10 @@ internal suspend fun preloadHome(
     repo: CinemaRepository,
     art: CinemaArt,
 ) {
+    val gen = repo.listsGeneration
     val d = repo.load(RowsPage.HOME)
     TabCache.data[CinemaTab.HOME] = d
-    TabCache.at[CinemaTab.HOME] = System.currentTimeMillis()
+    if (d.failed == 0) TabCache.stamp(CinemaTab.HOME, gen)
     kotlinx.coroutines.coroutineScope {
         d.rows.take(3).flatMap { it.items.take(6) }.filter { it.tmdbId != null && it.kind != BaseItemKind.EPISODE }.forEach { i ->
             launch { runCatching { art.art(i.tmdbTv, i.tmdbId!!) } }
@@ -1469,6 +1591,28 @@ internal suspend fun preloadHome(
 private object TabCache {
     val data = java.util.concurrent.ConcurrentHashMap<CinemaTab, CinemaHomeData>()
     val at = java.util.concurrent.ConcurrentHashMap<CinemaTab, Long>()
+
+    /** The [HomeCollections.changed] each tab's page was loaded under (when it started). */
+    private val under = java.util.concurrent.ConcurrentHashMap<CinemaTab, Int>()
+
+    /** [tab]'s page was loaded just now, from the lists as they were at [changed]. */
+    fun stamp(
+        tab: CinemaTab,
+        changed: Int,
+    ) {
+        at[tab] = System.currentTimeMillis()
+        under[tab] = changed
+    }
+
+    /**
+     * [tab]'s page is recent and from the current lists. A load that began before a refresh
+     * announced new rows (and so finished after the caches were cleared) isn't fresh: the
+     * announcement's reload would otherwise skip it and the new rows wait for the next visit.
+     */
+    fun fresh(
+        tab: CinemaTab,
+        changed: Int,
+    ) = under[tab] == changed && System.currentTimeMillis() - (at[tab] ?: 0L) < 2 * 60_000
 }
 
 /**
@@ -1539,24 +1683,6 @@ internal object PageSnapshots {
     private const val MAX_AGE_MS = 7 * 24 * 60 * 60_000L
 }
 
-/**
- * The fresh [page] in place of one shown from the device: it keeps the shown billboard and the
- * titles of rows that are random each load (genre rows, shuffled rows), so nothing on screen
- * jumps under the remote; Continue Watching, lists and new arrivals take the fresh titles.
- */
-private fun CinemaHomeData.over(shown: CinemaHomeData): CinemaHomeData {
-    val before = shown.rows.associateBy { it.title }
-    return copy(
-        featured = shown.featured.ifEmpty { featured },
-        rows =
-            rows.map { row ->
-                val old = before[row.title]
-                val random = row.source?.seed != null || row.source?.spec?.type == HomeRowType.GENRE
-                if (old != null && random && old.items.isNotEmpty()) row.copy(items = old.items, source = old.source) else row
-            },
-    )
-}
-
 /** How long the billboard waits after a press before it checks the rows have stopped ([RowMotion]). */
 private const val SETTLE_MS = 160L
 
@@ -1578,6 +1704,18 @@ internal object CinemaCaches {
         TabCache.data.clear()
         TabCache.at.clear()
         PageSnapshots.clear()
+    }
+
+    /**
+     * Rows kept their places but gained or lost titles (the 6-hourly match, a new day's charts):
+     * every tab loads afresh, but the pages saved on the device stay. They show at once and the
+     * fresh load fills in over them. Deleting them (as [homeChanged] did for this too) meant the
+     * first open after nearly every refresh built the page row by row, slow rows pushing in
+     * between the ones already shown.
+     */
+    fun rowsRefreshed() {
+        TabCache.data.clear()
+        TabCache.at.clear()
     }
 }
 

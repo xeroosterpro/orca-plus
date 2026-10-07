@@ -162,6 +162,13 @@ class SourceHook
 
         @Volatile private var mainUserId: Pair<String, String>? = null
 
+        // The main user's id for the sign-in in use, kept on the device: asked of the server on
+        // every cold start, it was one more request in front of the first rows, and on a slow or
+        // waking link its timeout failed the whole page as "Not signed in"
+        private val mainUserPrefs by lazy { context.getSharedPreferences("wholphinplus_main_user", Context.MODE_PRIVATE) }
+
+        private fun signInKey(token: String) = java.security.MessageDigest.getInstance("SHA-256").digest(token.toByteArray()).joinToString("") { "%02x".format(it) }
+
         /** Wholphin's current Jellyfin server as a [ServerConnection], for our own lookups. */
         internal fun mainConnection(): ServerConnection? {
             val url = jellyfin.baseUrl?.let(::normalizeServerUrl) ?: return null
@@ -169,10 +176,15 @@ class SourceHook
             val shell = ServerConnection(serverUrl = url, serverKind = ServerKind.JELLYFIN, accessToken = token, serverName = "main")
             val userId =
                 mainUserId?.takeIf { it.first == token }?.second
+                    ?: mainUserPrefs.getString("user_id", null)?.takeIf { mainUserPrefs.getString("sign_in", null) == signInKey(token) }
+                        ?.also { mainUserId = token to it }
                     ?: runCatching { client.currentUserId(shell) }
                         .onFailure { Timber.w(it, "Watch sync: cannot read the main user") }
                         .getOrNull()
-                        ?.also { mainUserId = token to it }
+                        ?.also {
+                            mainUserId = token to it
+                            mainUserPrefs.edit().putString("sign_in", signInKey(token)).putString("user_id", it).apply()
+                        }
                     ?: return null
             return shell.copy(userId = userId)
         }

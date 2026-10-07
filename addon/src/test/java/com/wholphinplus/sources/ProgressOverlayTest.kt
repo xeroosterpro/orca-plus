@@ -97,4 +97,15 @@ class ProgressOverlayTest {
         val body = get(c, "https://silo.test/Items?userId=u&tags=wholphinplus-list-t1&recursive=true&limit=2&startIndex=0")
         assertTrue(body, body.indexOf("\"B\"") < body.indexOf("\"A\"") && body.contains("\"TotalRecordCount\":3"))
     }
+
+    @Test fun `a collection row whose lookup fails fails, rather than answering empty`() {
+        val o = ProgressOverlay(null) { tag -> if (tag == "wholphinplus-list-t1") listOf("aaaa") else null }
+        val down =
+            Interceptor { chain ->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(503).message("").body("".toResponseBody(null)).build()
+            }
+        val c = OkHttpClient.Builder().addInterceptor(o).addInterceptor(down).build()
+        val failed = runCatching { get(c, "https://silo.test/Items?userId=u&tags=wholphinplus-list-t1&limit=40") }.exceptionOrNull()
+        assertTrue("expected an IOException, got $failed", failed is java.io.IOException)
+    }
 }

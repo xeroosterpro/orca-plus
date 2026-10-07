@@ -199,7 +199,9 @@ class HomeCollections
                 charts.filter { it.url !in have }.map { ch ->
                     HomeCollection(UUID.randomUUID().toString().take(8), ch.url, ch.name, showOnHome = "HOME" in ch.pages, kind = ch.kind, pages = ch.pages, order = ch.order, hidden = ch.hidden)
                 }
-            val pages = client.cloudPages()
+            // An answer without the Services / Genres pages (a half-built file) keeps the ones here:
+            // taking it would take every tab's tile rows away until the next sound answer
+            val pages = client.cloudPages().takeIf { it.pages.isNotEmpty() || _cloudPages.value.pages.isEmpty() } ?: _cloudPages.value
             if (pages != _cloudPages.value) {
                 prefs.edit().putString(PAGES_KEY, json.encodeToString(com.wholphinplus.sources.core.CloudPages.serializer(), pages)).apply()
                 _cloudPages.value = pages
@@ -363,7 +365,7 @@ class HomeCollections
                             val after = _lists.value.map { it.itemIds }
                             if (after == before) return
                             before = after
-                            com.wholphinplus.sources.cinema.CinemaCaches.homeChanged()
+                            com.wholphinplus.sources.cinema.CinemaCaches.rowsRefreshed()
                             _changed.value++
                         }
                         // Home's rows first, then the other tabs', then rows that start off and the
@@ -421,6 +423,9 @@ class HomeCollections
                 try {
                     val source = ListSource.parse(c.url) ?: error("Not a Trakt, MDBList, Top Streaming or Orca+ chart link")
                     val all = client.fetch(source)
+                    // The cloud keeps a chart's last good titles, so one sent empty is a fault: taken,
+                    // it would empty the row (and take it off every page) for six hours
+                    if (all.entries.isEmpty() && c.itemIds.isNotEmpty() && source is ListSource.OrcaChart) error("The Orca+ cloud sent no titles for this chart")
                     val main = hook.mainConnection() ?: error("Not signed in")
                     val idx = indexJob?.takeIf { it.isCompleted }?.await()
                     // Without the index a long list would be minutes of searches: its first titles now

@@ -152,7 +152,7 @@ class ProgressOverlay internal constructor(
                                             .forEach { removeAllQueryParameters(it) }
                                     }.addQueryParameter("ids", chunk.joinToString(",") { dashed(it) })
                                     .build()
-                            getItems(chain, request, rewritten)
+                            listItems(chain, request, rewritten)
                         }.associateBy { norm((it["Id"] as? JsonPrimitive)?.content.orEmpty()) }
                     page.mapNotNull { byId[norm(it)] }.map { patch(it) as JsonObject }
                 }
@@ -322,6 +322,23 @@ class ProgressOverlay internal constructor(
                     (json.parseToJsonElement(r.body.string()).jsonObject["Items"] as? JsonArray)?.filterIsInstance<JsonObject>().orEmpty()
                 }
             }.onFailure { Timber.w(it, "Progress overlay lookup failed") }.getOrDefault(emptyList())
+
+        /**
+         * A list row's titles, failing as the server did: answered empty, a blip took every list
+         * row off the page with no error (nothing retried it or kept its titles), and the empty
+         * page was saved as the one to show at the next start.
+         */
+        private fun listItems(
+            chain: Interceptor.Chain,
+            original: Request,
+            url: HttpUrl,
+        ): List<JsonObject> =
+            chain.proceed(original.newBuilder().url(url).get().build()).use { r ->
+                if (!r.isSuccessful) throw java.io.IOException("List row lookup answered HTTP ${r.code}")
+                // Only IOExceptions may leave an interceptor (anything else takes the app down)
+                val body = runCatching { json.parseToJsonElement(r.body.string()).jsonObject }.getOrElse { throw java.io.IOException("List row lookup unreadable", it) }
+                (body["Items"] as? JsonArray)?.filterIsInstance<JsonObject>().orEmpty()
+            }
 
         /** The server's base URL (keeps a reverse-proxy prefix): everything before the API path. */
         private fun serverBase(url: HttpUrl): HttpUrl.Builder {

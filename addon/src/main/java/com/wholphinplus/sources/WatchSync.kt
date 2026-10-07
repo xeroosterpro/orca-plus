@@ -75,7 +75,14 @@ internal class WatchSync(
     ) {
         val key = "overlay_since_${extra.connectionId}"
         val since = Instant.ofEpochMilli(prefs.getLong(key, Instant.now().minus(FIRST_LOOKBACK).toEpochMilli()))
-        val entries = hook.client.recentWatchActivity(extra, since, limit = 20)
+        // The newest 20 come first; a full batch may hide older ones since the last run (a binge,
+        // the first 30 days), and the mark below moves past them, so ask for more until it isn't
+        var limit = 20
+        var entries = hook.client.recentWatchActivity(extra, since, limit)
+        while (entries.size >= limit && limit < MAX_BATCH) {
+            limit = (limit * 5).coerceAtMost(MAX_BATCH)
+            entries = hook.client.recentWatchActivity(extra, since, limit)
+        }
         Timber.i("Watch sync: %d new items on %s since %s", entries.size, extra.label, since)
         if (entries.isEmpty()) return
         // Oldest first, saving progress after each, so a timeout never skips anything.
@@ -121,6 +128,7 @@ internal class WatchSync(
         const val MIN_INTERVAL_MS = 2 * 60 * 1000L
         const val BUDGET_MS = 90_000L
         const val HOME_WAIT_MS = 1_500L
+        const val MAX_BATCH = 500
         val FIRST_LOOKBACK: Duration = Duration.ofDays(30)
     }
 }

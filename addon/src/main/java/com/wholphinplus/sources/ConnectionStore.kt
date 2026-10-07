@@ -75,6 +75,31 @@ class ConnectionStore
             _cinemaRollUp.value = on
         }
 
+        private val _kidsTab = MutableStateFlow(prefs.getBoolean(KIDS_TAB_KEY, false))
+
+        /** Cinema mode's Kids tab (off until switched on in Settings → Home & Look). */
+        val kidsTab: StateFlow<Boolean> = _kidsTab.asStateFlow()
+
+        fun setKidsTab(on: Boolean) {
+            prefs.edit().putBoolean(KIDS_TAB_KEY, on).apply()
+            _kidsTab.value = on
+        }
+
+        private val _shuffleLocks = MutableStateFlow(prefs.getStringSet(SHUFFLE_LOCKS_KEY, null).orEmpty().toSet())
+
+        /** Rows set to always shuffle, by [com.wholphinplus.sources.cinema.RowSource.lockKey]. */
+        val shuffleLocks: StateFlow<Set<String>> = _shuffleLocks.asStateFlow()
+
+        fun setShuffleLocks(keys: Set<String>) {
+            prefs.edit().putStringSet(SHUFFLE_LOCKS_KEY, keys).apply()
+            _shuffleLocks.value = keys
+        }
+
+        fun setShuffleLock(
+            key: String,
+            on: Boolean,
+        ) = setShuffleLocks(if (on) _shuffleLocks.value + key else _shuffleLocks.value - key)
+
         private val _overlays =
             MutableStateFlow(
                 runCatching { com.wholphinplus.sources.cinema.PosterOverlays.fromSaved(json, prefs.getString(OVERLAYS_KEY, null)!!) }
@@ -191,6 +216,8 @@ class ConnectionStore
                 overlays = _overlays.value,
                 ratings = _ratingPrefs.value,
                 layouts = _pageLayouts.value,
+                shuffleLocks = _shuffleLocks.value,
+                kidsTab = _kidsTab.value,
             )
 
         /** A cloud profile's settings, through the usual setters so every screen follows. */
@@ -201,6 +228,8 @@ class ConnectionStore
             if (s.mdblistKey != _mdblistKey.value) setMdblistKey(s.mdblistKey)
             if (s.cinemaMode != _cinemaMode.value) setCinemaMode(s.cinemaMode)
             if (s.rollUp != _cinemaRollUp.value) setCinemaRollUp(s.rollUp)
+            if (s.shuffleLocks != _shuffleLocks.value) setShuffleLocks(s.shuffleLocks)
+            if (s.kidsTab != _kidsTab.value) setKidsTab(s.kidsTab)
             if (s.overlays != _overlays.value) setOverlays(s.overlays)
             if (s.ratings != _ratingPrefs.value) setRatingPrefs(s.ratings)
             com.wholphinplus.sources.cinema.RowsPage.entries.forEach { page -> if (s.layouts[page] != _pageLayouts.value[page]) setPageLayout(page, s.layouts[page]) }
@@ -254,6 +283,8 @@ class ConnectionStore
             const val TMDB_KEY = "tmdb_key_v1"
             const val CINEMA_KEY = "cinema_mode"
             const val ROLL_UP_KEY = "cinema_roll_up"
+            const val SHUFFLE_LOCKS_KEY = "shuffle_locks"
+            const val KIDS_TAB_KEY = "kids_tab"
             const val ONBOARDING_KEY = "onboarding_stage"
 
             const val OVERLAYS_KEY = "poster_overlays"

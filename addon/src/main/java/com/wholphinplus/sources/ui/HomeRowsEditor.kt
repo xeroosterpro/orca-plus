@@ -83,7 +83,8 @@ internal fun HomeRowsScreen(
 
     // The page picker: each page keeps its own rows
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 4.dp)) {
-        RowsPage.entries.forEach { p ->
+        val kidsTab by hook.store.kidsTab.collectAsState()
+        RowsPage.entries.filter { it != RowsPage.KIDS || kidsTab }.forEach { p ->
             FilterChip(
                 selected = p == page,
                 onClick = { if (p != page) onPage(p) },
@@ -230,6 +231,7 @@ private fun note(
             HomeRowType.SERVICES -> "Streaming services, each opens its page"
             HomeRowType.GENRES -> "Genres, each opens its page"
             HomeRowType.DECADES -> "Decades, each opens its page"
+            HomeRowType.BECAUSE_YOU_WATCHED -> "More like what you're watching"
         }
     val renamed = spec.title.isNotBlank() && spec.title != spec.defaultName(libs, lists)
     return listOfNotNull(kind, if (renamed) "was “${spec.defaultName(libs, lists)}”" else null).joinToString("  ·  ")

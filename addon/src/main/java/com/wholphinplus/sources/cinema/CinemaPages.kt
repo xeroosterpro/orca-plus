@@ -36,6 +36,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusRequester
+import kotlinx.coroutines.launch
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -75,8 +77,11 @@ internal fun TileRowView(
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(row.title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 48.dp))
-        CompositionLocalProvider(LocalBringIntoViewSpec provides cardSpec) {
+        val rowState = androidx.compose.foundation.lazy.rememberLazyListState()
+        ReportMotion(rowState)
+        CompositionLocalProvider(LocalBringIntoViewSpec provides cardSpec.gliding(rowState)) {
             LazyRow(
+                state = rowState,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(start = 48.dp, end = 400.dp, top = 8.dp, bottom = 8.dp),
             ) {
@@ -96,14 +101,19 @@ private fun PageTileCard(
     width: Dp = TileWidth,
 ) {
     val shape = RoundedCornerShape(6.dp)
+    val self = remember { androidx.compose.ui.focus.FocusRequester() }
+    val open = {
+        ReturnFocus.target = self
+        onClick(tile)
+    }
     Card(
-        onClick = { onClick(tile) },
+        onClick = open,
         shape = CardDefaults.shape(shape),
-        border = CardDefaults.border(focusedBorder = Border(BorderStroke(3.dp, Ink), shape = shape)),
-        scale = CardDefaults.scale(focusedScale = 1.08f),
+        border = CardDefaults.border(focusedBorder = Border.None),
+        scale = CardDefaults.scale(focusedScale = 1f),
         glow = CardDefaults.glow(),
         colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
-        modifier = Modifier.width(width).aspectRatio(16f / 9f).onFocusChanged { if (it.isFocused) onFocused() }.tapToClick { onClick(tile) },
+        modifier = Modifier.width(width).aspectRatio(16f / 9f).focusRequester(self).glideLift(onFocused = onFocused).tapToClick { open() },
     ) {
         if (tile.service) ServiceFace(tile, width) else GenreFace(tile)
     }
@@ -251,7 +261,8 @@ internal fun CloudPageView(
         val key = "$id:$side"
         errors = null
         try {
-            val d = repo.loadCloudPage(id, side)
+            // The first rows show at once; the full page replaces them when it's in
+            val d = repo.loadCloudPage(id, side) { first -> launch { if (loaded[key] == null) loaded = loaded + (key to first) } }
             PageCache.data[key] = d
             loaded = loaded + (key to d)
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -262,7 +273,7 @@ internal fun CloudPageView(
         }
     }
     Box(Modifier.fillMaxSize().background(Stage)) {
-        AnimatedContent(targetState = side, transitionSpec = { fadeIn(tween(300, easing = CinemaEase)) togetherWith fadeOut(tween(160)) }, label = "side") { s ->
+        AnimatedContent(targetState = side, transitionSpec = { fadeIn(tween(300, easing = CinemaEase)) togetherWith fadeOut(tween(220, easing = CinemaFade)) }, label = "side") { s ->
             val d = loaded["$id:$s"]
             Box(Modifier.fillMaxSize()) {
                 when {

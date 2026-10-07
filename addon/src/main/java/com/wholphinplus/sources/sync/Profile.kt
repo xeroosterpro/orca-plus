@@ -20,7 +20,12 @@ data class OrcaSettings(
     val rollUp: Boolean = true,
     val overlays: PosterOverlays = PosterOverlays(),
     val ratings: RatingPrefs = RatingPrefs(),
+    // Pages and rows a newer Orca+ added are left out, so its profile still loads here
+    @Serializable(with = com.wholphinplus.sources.cinema.LenientLayouts::class)
     val layouts: Map<RowsPage, HomeLayout> = emptyMap(),
+    /** Rows set to always shuffle ("PAGE|row key"). */
+    val shuffleLocks: Set<String> = emptySet(),
+    val kidsTab: Boolean = false,
 )
 
 /** Trakt/MDBList lists, Top Streaming charts and their accounts. */
@@ -100,7 +105,7 @@ object ProfileMerge {
         }.toSortedMap()
 
     /** Settings with the page layouts in a fixed order, so equal settings hash the same. */
-    private fun OrcaSettings.sorted() = copy(layouts = layouts.toSortedMap(compareBy { it.ordinal }))
+    private fun OrcaSettings.sorted() = copy(layouts = layouts.toSortedMap(compareBy { it.ordinal }), shuffleLocks = shuffleLocks.toSortedSet())
 
     private fun hash(s: String) = ProfileCrypto.hex(ProfileCrypto.sha256(s.toByteArray()))
 }

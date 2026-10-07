@@ -198,6 +198,18 @@ class MatcherTest {
         assertEquals(listOf(60L, 30L, 40L, 50L), sorted.map { it.sizeBytes })
     }
 
+    @Test fun `identical copies keep the Settings order of servers whatever order they arrived in`() {
+        fun copy(server: String) = source("4K", "Dolby Vision", 70).copy(connectionId = server, serverLabel = server.uppercase(), url = "http://$server/midway")
+        val order = listOf("b", "c", "a")
+        val expected = listOf("b", "c", "a")
+        listOf(listOf("a", "b", "c"), listOf("c", "a", "b"), listOf("b", "a", "c")).forEach { arrival ->
+            assertEquals(expected, arrival.map(::copy).sortedWith(stableRanking(order)).map { it.connectionId })
+        }
+        // Quality still comes first
+        val better = source("4K", "Dolby Vision", 90).copy(connectionId = "a")
+        assertEquals("a", (order.map(::copy) + better).sortedWith(stableRanking(order)).first().connectionId)
+    }
+
     @Test fun `direct play beats a bigger server conversion of the same quality`() {
         val sorted = listOf(source("4K", "HDR10", 20, compatible = true), source("4K", "HDR10", 10)).sortedWith(sourceRanking)
         assertEquals(listOf(false, true), sorted.map { it.compatible })

@@ -214,6 +214,65 @@ class HomeLayoutTest {
         assertFalse(off.rows.first { it.type == HomeRowType.SERVICES }.on)
     }
 
+    @Test fun `the cloud places because you watched and the every-library rows, library rows then start off`() {
+        val charts = listOf(PageList("trend", "Trending", pages = listOf("HOME", "MOVIES"), order = mapOf("HOME" to 1, "MOVIES" to 1)))
+        val tiles = mapOf(HomeRowType.SERVICES to 0, HomeRowType.BECAUSE_YOU_WATCHED to 2, HomeRowType.RECENT_MOVIES to 3, HomeRowType.NEW_EPISODES to 4)
+        val home = HomeLayout.defaults(RowsPage.HOME, libs, charts, tiles).rows
+        assertEquals(
+            listOf("CONTINUE_WATCHING", "SERVICES", "trend", "BECAUSE_YOU_WATCHED", "RECENT_MOVIES", "NEW_EPISODES"),
+            home.filter { it.on }.map { it.ref.ifBlank { it.type.name } },
+        )
+        // One Recently Added row for every movie library instead of one per library
+        assertTrue(home.filter { it.type == HomeRowType.LIBRARY }.none { it.on })
+        // Movies has no New Episodes: its show libraries aren't offered, the movie ones start off
+        val movies = HomeLayout.defaults(RowsPage.MOVIES, libs, charts, tiles).rows
+        assertEquals(listOf("CONTINUE_WATCHING", "SERVICES", "trend", "BECAUSE_YOU_WATCHED", "RECENT_MOVIES"), movies.filter { it.on }.map { it.ref.ifBlank { it.type.name } })
+        // A page saved before the row existed gets it in its place; the every-library rows it had off stay off
+        val saved = HomeLayout(HomeLayout.defaults(RowsPage.HOME, libs, charts, mapOf(HomeRowType.SERVICES to 0)).rows.filter { it.type != HomeRowType.BECAUSE_YOU_WATCHED })
+        val after = saved.reconciled(RowsPage.HOME, libs, charts, tiles).rows.filter { it.on && it.type != HomeRowType.LIBRARY }.map { it.ref.ifBlank { it.type.name } }
+        assertEquals(listOf("CONTINUE_WATCHING", "SERVICES", "trend", "BECAUSE_YOU_WATCHED"), after)
+        // New & Popular has no Continue Watching, so nothing to go by
+        assertFalse(RowsPage.NEW_POPULAR.offers(HomeRowType.BECAUSE_YOU_WATCHED))
+    }
+
+    @Test fun `a profile from a newer orca still loads, without the rows and pages it doesn't know`() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        val synced =
+            """{"layouts":{"HOME":{"rows":[{"type":"CONTINUE_WATCHING"},{"type":"HOLOGRAM_ROW"},{"type":"MY_LIST","on":false}]},""" +
+                """"ARCADE":{"rows":[{"type":"MY_LIST"}]},"SHOWS":{"rows":[{"type":"NEW_EPISODES"}]}}}"""
+        val s = json.decodeFromString<com.wholphinplus.sources.sync.OrcaSettings>(synced)
+        assertEquals(setOf(RowsPage.HOME, RowsPage.SHOWS), s.layouts.keys)
+        assertEquals(listOf(HomeRowType.CONTINUE_WATCHING, HomeRowType.MY_LIST), s.layouts.getValue(RowsPage.HOME).rows.map { it.type })
+        // And it writes back the same way
+        assertEquals(s, json.decodeFromString<com.wholphinplus.sources.sync.OrcaSettings>(json.encodeToString(s)))
+    }
+
+    @Test fun `kids starts with continue watching and the cloud's kids rows, never the library's newest`() {
+        val charts =
+            listOf(
+                PageList("family", "Family Movie Night", series = false, pages = listOf("HOME", "KIDS"), order = mapOf("HOME" to 3, "KIDS" to 1)),
+                PageList("preschool", "Preschool Favorites", series = true, pages = listOf("KIDS"), order = mapOf("KIDS" to 2)),
+                PageList("trend", "Trending Movies", series = false, pages = listOf("HOME"), order = mapOf("HOME" to 0)),
+            )
+        val kids = HomeLayout.defaults(RowsPage.KIDS, libs, charts + PageList("mine", "My own list"), mapOf(HomeRowType.BECAUSE_YOU_WATCHED to 0)).rows
+        assertEquals(listOf("CONTINUE_WATCHING", "BECAUSE_YOU_WATCHED", "family", "preschool"), kids.filter { it.on }.map { it.ref.ifBlank { it.type.name } })
+        // No library, newest, My List or genre rows to switch on there
+        assertTrue(kids.all { it.type in setOf(HomeRowType.CONTINUE_WATCHING, HomeRowType.BECAUSE_YOU_WATCHED, HomeRowType.COLLECTION) })
+    }
+
+    @Test fun `a saved page gets services right under continue watching once, then it can move`() {
+        val charts = listOf(PageList("trend", "Trending", pages = listOf("HOME"), order = mapOf("HOME" to 1)))
+        // Saved before the move: Services further down
+        val old = HomeLayout(HomeLayout.defaults(RowsPage.HOME, libs, charts, mapOf(HomeRowType.SERVICES to 3)).rows)
+        val tiles = mapOf(HomeRowType.SERVICES to 0)
+        val moved = old.reconciled(RowsPage.HOME, libs, charts, tiles)
+        assertEquals(listOf("CONTINUE_WATCHING", "SERVICES", "trend"), moved.rows.filter { it.on && it.type != HomeRowType.LIBRARY }.map { it.ref.ifBlank { it.type.name } })
+        assertTrue(moved.servicesTop)
+        // Moved down afterwards, it stays where it was put
+        val down = moved.moved("SERVICES:", 1)
+        assertEquals(down.rows, down.reconciled(RowsPage.HOME, libs, charts, tiles).rows)
+    }
+
     @Test fun `only charts are numbered top 10 rows`() {
         listOf("Hulu Top 10 Movies", "Top Movies of the week", "Top Watched Movies of The Week").forEach { assertTrue(it, CinemaRepository.isTopList(it)) }
         listOf("Top 250 Movies (iMDB)", "Top Rated Movies of All Time", "Top Movies", "IMDb Moviemeter (Top 100)").forEach { assertFalse(it, CinemaRepository.isTopList(it)) }

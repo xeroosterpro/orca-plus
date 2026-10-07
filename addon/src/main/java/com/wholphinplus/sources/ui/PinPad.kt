@@ -157,22 +157,24 @@ private fun Key(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(14.dp)
+    val f = com.wholphinplus.sources.cinema.rememberFocusFade(Color.White.copy(alpha = 0.08f), Ink, Ink, Color(0xFF111111), quick = true)
     Surface(
         onClick = onClick,
         enabled = !busy,
         shape = ClickableSurfaceDefaults.shape(shape),
         colors =
             ClickableSurfaceDefaults.colors(
-                containerColor = Color.White.copy(alpha = 0.08f),
-                contentColor = Ink,
-                focusedContainerColor = Ink,
-                focusedContentColor = Color(0xFF111111),
+                containerColor = f.fill,
+                contentColor = f.content,
+                focusedContainerColor = f.fill,
+                focusedContentColor = f.content,
                 disabledContainerColor = Color.White.copy(alpha = 0.04f),
                 disabledContentColor = InkDim,
             ),
         border = ClickableSurfaceDefaults.border(border = Border(BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)), shape = shape)),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.08f),
-        modifier = modifier.size(width = 78.dp, height = 48.dp),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
+        modifier = with(com.wholphinplus.sources.cinema.TapHelper) { modifier.size(width = 78.dp, height = 48.dp).glideFocus(1.08f) },
     ) {
         Box(Modifier.size(width = 78.dp, height = 48.dp), contentAlignment = Alignment.Center) {
             Text(label, fontSize = 24.sp, fontWeight = FontWeight.Bold)

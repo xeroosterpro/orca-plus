@@ -220,3 +220,17 @@ val sourceRanking: Comparator<ExternalSource> =
         .thenByDescending { hdrRank(it.hdr) }
         .thenBy { it.compatible }
         .thenByDescending { it.sizeBytes }
+
+/**
+ * [sourceRanking], with exact ties (the same remux on three servers) settled the same way every
+ * time: the servers in the order they're listed in Settings, then the file name. They used to
+ * keep the order the servers happened to answer in, so copies swapped places between opens.
+ */
+fun stableRanking(serverOrder: List<String>): Comparator<ExternalSource> {
+    val place = serverOrder.withIndex().associate { (i, id) -> id to i }
+    return sourceRanking
+        .thenBy { place[it.connectionId] ?: Int.MAX_VALUE }
+        .thenBy { it.serverLabel.lowercase() }
+        .thenBy { it.fileName }
+        .thenBy { it.url }
+}

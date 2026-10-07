@@ -74,6 +74,12 @@ jobs:
           {
             echo "Orca+ built on Wholphin $WHOLPHIN."
             echo
+            # A push publishes its own news: the commit's message (a scheduled rebuild for a new
+            # Wholphin release has none of its own)
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              git log -1 --format=%B | sed '/^Co-Authored-By/d'
+              echo
+            fi
             echo "**New install:** download Wholphin-release.apk on the TV (e.g. with the Downloader app) and install it."
             echo "**Already installed:** Orca+ offers this update itself (Install update, at the top of Settings)."
             echo

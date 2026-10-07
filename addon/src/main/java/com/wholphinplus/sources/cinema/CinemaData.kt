@@ -1,3 +1,5 @@
+@file:UseSerializers(UUIDSerializer::class)
+
 package com.wholphinplus.sources.cinema
 
 import com.wholphinplus.sources.HomeCollections
@@ -9,6 +11,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.UseSerializers
 import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.itemsApi
 import org.jellyfin.sdk.api.client.extensions.libraryApi
@@ -27,12 +31,14 @@ import org.jellyfin.sdk.model.api.request.GetItemsRequest
 import org.jellyfin.sdk.model.api.request.GetLatestMediaRequest
 import org.jellyfin.sdk.model.api.request.GetNextUpRequest
 import org.jellyfin.sdk.model.api.request.GetResumeItemsRequest
+import org.jellyfin.sdk.model.serializer.UUIDSerializer
 import timber.log.Timber
 import java.time.LocalDateTime
 import java.util.UUID
 
 /** One title as Cinema mode shows it. Episodes carry their series' art. */
 @androidx.compose.runtime.Immutable
+@Serializable
 data class CinemaItem(
     val id: UUID,
     val kind: BaseItemKind,
@@ -75,6 +81,7 @@ data class CinemaItem(
 }
 
 @androidx.compose.runtime.Immutable
+@Serializable
 data class CinemaRow(
     val title: String,
     val items: List<CinemaItem>,
@@ -82,10 +89,38 @@ data class CinemaRow(
     val ranked: Boolean = false,
     /** A row of Services or Genres tiles instead of titles. */
     val tiles: List<PageTile> = emptyList(),
+    /** Where more of its titles come from (null: the row is all there is: Top 10s, Continue Watching). */
+    val source: RowSource? = null,
+    /** How many titles the whole row has, when known (a list: its titles in the library). */
+    val total: Int? = null,
+)
+
+/**
+ * Where a row's titles come from, so it can keep loading and be shuffled. [seed]: a shuffled
+ * order (null: the row's own); [next]: where the next page starts.
+ */
+@androidx.compose.runtime.Immutable
+@Serializable
+data class RowSource(
+    val page: RowsPage,
+    val spec: HomeRowSpec,
+    val seed: Long? = null,
+    val next: Int = 0,
+) {
+    /** Its "always shuffle" switch, per page. */
+    val lockKey: String get() = page.name + "|" + spec.key
+}
+
+/** One more page of a row; [end] once its source has nothing more. */
+class RowPage(
+    val items: List<CinemaItem>,
+    val next: Int,
+    val end: Boolean,
 )
 
 /** A service's, genre's or decade's tile; it opens that page (with its Movies or Shows side first). */
 @androidx.compose.runtime.Immutable
+@Serializable
 data class PageTile(
     val id: String,
     val name: String,
@@ -97,6 +132,7 @@ data class PageTile(
     val service: Boolean get() = kind == "service"
 }
 
+@Serializable
 data class CinemaLibrary(
     val id: UUID,
     val name: String,
@@ -105,6 +141,7 @@ data class CinemaLibrary(
 )
 
 @androidx.compose.runtime.Immutable
+@Serializable
 data class CinemaHomeData(
     val featured: List<CinemaItem>,
     val rows: List<CinemaRow>,
@@ -120,6 +157,8 @@ data class CinemaHomeData(
 internal class CinemaRepository(
     private val hook: SourceHook,
     private val collections: HomeCollections,
+    /** TMDB, for Because You Watched (null: the row stays empty). */
+    private val tmdb: com.wholphinplus.sources.core.TmdbClient? = null,
 ) {
     private val api get() = hook.jellyfin
 
@@ -150,13 +189,19 @@ internal class CinemaRepository(
     /** A Services or Genres page by id (null when the cloud no longer offers it). */
     fun cloudPage(id: String): com.wholphinplus.sources.core.CloudPage? = collections.cloudPages.value.pages.firstOrNull { it.id == id }
 
-    /** Where the cloud places the Services and Genres tiles on [page] (their lineup positions). */
+    /**
+     * Where the cloud places the rows the TV makes itself on [page] (their lineup positions): the
+     * tiles, Because You Watched and the every-library rows.
+     */
     fun tiles(page: RowsPage): Map<HomeRowType, Int> =
         collections.cloudPages.value.tiles[page.name].orEmpty().mapNotNull { (k, at) ->
             when (k) {
                 "SERVICES" -> HomeRowType.SERVICES to at
                 "GENRES" -> HomeRowType.GENRES to at
                 "DECADES" -> HomeRowType.DECADES to at
+                "BECAUSE" -> HomeRowType.BECAUSE_YOU_WATCHED to at
+                "RECENT" -> HomeRowType.RECENT_MOVIES to at
+                "EPISODES" -> HomeRowType.NEW_EPISODES to at
                 else -> null
             }
         }.toMap()
@@ -191,20 +236,39 @@ internal class CinemaRepository(
     suspend fun loadCloudPage(
         id: String,
         series: Boolean,
+        onFirst: (CinemaHomeData) -> Unit = {},
     ): CinemaHomeData =
         withContext(Dispatchers.IO) {
             val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() } ?: error("Not signed in")
             val p = collections.cloudPages.value.pages.firstOrNull { it.id == id } ?: error("This page is no longer offered")
             val side = if (series) RowsPage.SHOWS else RowsPage.MOVIES
-            val rows =
-                coroutineScope {
-                    (if (series) p.shows else p.movies).mapNotNull { r -> collections.forChart(r.chart)?.let { c -> r.name to c } }.map { (name, c) ->
-                        async { Triple(name, c, safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items }) }
-                    }.awaitAll()
-                }.map { (name, c, items) -> listRow(name, items.filter { fits(side, it) }, c) }
-                    .filter { it.items.size >= minFor(it.title) }
-            val featured = rows.flatMap { it.items.take(4) }.filter { it.backdropUrl != null && it.overview.isNotBlank() }.distinctBy { it.detailsId }.take(6)
-            ranked(CinemaHomeData(featured, rows, null, null))
+            val locks = hook.store.shuffleLocks.value
+            // A page has up to 13 rows a side: it shows once the first few are in, the rest join
+            // as they come (rows with too few titles in the library aren't asked for at all)
+            fun built(got: List<Pair<Triple<String, com.wholphinplus.sources.HomeCollection, List<BaseItemDto>>, RowSource>>): CinemaHomeData {
+                val rows =
+                    got.map { (g, source) ->
+                        val (name, c, items) = g
+                        val row = listRow(name, items.filter { fits(side, it) }, c)
+                        if (row.ranked) row else row.copy(source = source, total = c.itemIds.size)
+                    }.filter { it.items.size >= minFor(it.title) }
+                val featured = rows.flatMap { it.items.take(4) }.filter { it.backdropUrl != null && it.overview.isNotBlank() }.distinctBy { it.detailsId }.take(6)
+                return ranked(CinemaHomeData(featured, rows, null, null))
+            }
+            coroutineScope {
+                val pending =
+                    (if (series) p.shows else p.movies).mapNotNull { r -> collections.forChart(r.chart)?.takeIf { it.itemIds.size >= minFor(r.name) }?.let { c -> r.name to c } }.map { (name, c) ->
+                        async {
+                            // Rows here can keep loading and be shuffled like a tab's (Top 10s excepted)
+                            val spec = HomeRowSpec(HomeRowType.COLLECTION, ref = c.id)
+                            val seed = kotlin.random.Random.nextLong().takeIf { !isTopList(name) && RowSource(side, spec).lockKey in locks }
+                            val items = if (seed != null) fetch(spec, side, userId, 0, seed).first else safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items }
+                            Triple(name, c, items) to RowSource(side, spec, seed, 40)
+                        }
+                    }
+                if (pending.size > PAGE_FIRST_ROWS) onFirst(built(pending.take(PAGE_FIRST_ROWS).awaitAll()))
+                built(pending.awaitAll())
+            }
         }
 
     /**
@@ -287,8 +351,11 @@ internal class CinemaRepository(
                 // library list is back (the defaults include them; a saved page if it has them on)
                 // (Home's defaults depend on the libraries, so before its first save all start)
                 val guess = saved ?: HomeLayout.defaults(page, emptyList(), allLists, tiles(page)).takeIf { page != RowsPage.HOME }
+                // Rows set to always shuffle (Shuffle → lock on the row) load in a new order each time
+                val locks = hook.store.shuffleLocks.value
+                fun locked(spec: HomeRowSpec) = spec.type in SHUFFLED_ON_LOAD && RowSource(page, spec).lockKey in locks
                 val early =
-                    LIBRARY_FREE.filter { t -> page.offers(t) && (guess?.rows?.any { it.type == t && it.on } ?: true) }.associateWith { t ->
+                    LIBRARY_FREE.filter { t -> page.offers(t) && !locked(HomeRowSpec(t)) && (guess?.rows?.any { it.type == t && it.on } ?: true) }.associateWith { t ->
                         async { rowItems(HomeRowSpec(t), page, userId, emptyList(), emptyMap()) }
                     }
                 val libs = views.await().map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
@@ -300,9 +367,34 @@ internal class CinemaRepository(
                 val on = withFallback(page, layout.rows.filter { it.on }, lists.keys)
                 val genres = on.filter { it.type == HomeRowType.GENRE }
                 // Every other row's items, in one request each, all at once
+                // Because You Watched starts from Continue Watching's first title
+                val watched =
+                    async {
+                        val all = (resume.await() + nextUp.await()).filter { fits(page, it) }.distinctBy { it.seriesId ?: it.id }
+                        // Kids: kids' ratings only (an episode goes by its show's rating)
+                        if (page != RowsPage.KIDS) {
+                            all
+                        } else {
+                            fillSeriesTmdb(all, userId)
+                            all.filter { (it.officialRating ?: it.seriesId?.let { s -> seriesRating[s] }) in KID_RATINGS }
+                        }
+                    }
+                var becauseRow: Pair<String, List<CinemaItem>>? = null
+                val because = if (on.any { it.type == HomeRowType.BECAUSE_YOU_WATCHED }) async { becauseRow = because(watched.await(), page, userId) } else null
+                val seeds = on.filter(::locked).associateWith { kotlin.random.Random.nextLong() }
                 val rows =
-                    on.filter { it.type != HomeRowType.GENRE }.map { spec ->
-                        spec to (early[spec.type] ?: async { rowItems(spec, page, userId, libs, lists) })
+                    on.filter { it.type != HomeRowType.GENRE && it.type != HomeRowType.BECAUSE_YOU_WATCHED }.map { spec ->
+                        val seed = seeds[spec]
+                        spec to (
+                            if (seed != null) {
+                                async {
+                                    val name = if (spec.type == HomeRowType.COLLECTION) collections.lists.value.firstOrNull { it.id == spec.ref }?.name.orEmpty() else spec.defaultName(libs, emptyMap())
+                                    name to fetch(spec, page, userId, 0, seed).first.filter { fits(page, it) }
+                                }
+                            } else {
+                                early[spec.type] ?: async { rowItems(spec, page, userId, libs, lists) }
+                            }
+                        )
                     }
                 // Sent last, so the quick rows aren't queued behind it. Some servers ignore the
                 // genre filter, so genre rows are sorted out of one random pool
@@ -318,7 +410,7 @@ internal class CinemaRepository(
                             }
                         }
                     }
-                val cw = (resume.await() + nextUp.await()).filter { fits(page, it) }.distinctBy { it.seriesId ?: it.id }
+                val cw = watched.await()
                 // Episodes borrow their series' TMDB id for title art. Only art, so the page
                 // doesn't wait for it: the first rows use what's known, the full page has it all
                 val seriesArt = async { fillSeriesTmdb(cw, userId) }
@@ -333,11 +425,14 @@ internal class CinemaRepository(
                         when (spec.type) {
                             HomeRowType.CONTINUE_WATCHING -> CinemaRow(spec.title.ifBlank { title }, cw.map(::toItem))
                             HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES -> CinemaRow(spec.title.ifBlank { spec.defaultName(emptyList(), emptyMap()) }, emptyList(), tiles = tileRow(spec.type, page))
-                            HomeRowType.GENRE -> genreRows[spec.ref]?.let { r -> spec.title.takeIf { it.isNotBlank() }?.let { r.copy(title = it) } ?: r }
+                            HomeRowType.GENRE -> genreRows[spec.ref]?.let { r -> (spec.title.takeIf { it.isNotBlank() }?.let { r.copy(title = it) } ?: r).copy(source = RowSource(page, spec)) }
+                            // Joins once found (it waits on TMDB and a search per title), like the genre rows
+                            HomeRowType.BECAUSE_YOU_WATCHED -> becauseRow?.let { (name, items) -> CinemaRow(spec.title.ifBlank { name }, items) }
                             else ->
                                 got.firstOrNull { it.first == spec }?.second?.let { (name, items) ->
                                     val shown = spec.title.ifBlank { name }
-                                    if (spec.type == HomeRowType.COLLECTION) listRow(shown, items, collections.lists.value.firstOrNull { it.id == spec.ref }) else CinemaRow(shown, items.map(::toItem))
+                                    val row = if (spec.type == HomeRowType.COLLECTION) listRow(shown, items, collections.lists.value.firstOrNull { it.id == spec.ref }) else CinemaRow(shown, items.map(::toItem))
+                                    if (row.ranked || spec.type !in PAGED) row else row.copy(source = RowSource(page, spec, seeds[spec], firstPage(spec, seeds[spec] != null)), total = listTotal(spec))
                                 }
                         }
                     }.filter { it.items.isNotEmpty() || it.tiles.isNotEmpty() }
@@ -366,15 +461,156 @@ internal class CinemaRepository(
                 // What Wholphin's own home does on load: refresh stale Trakt/MDBList rows and pull
                 // progress from the extra servers. In the background; it shows on the next refresh
                 if (page == RowsPage.HOME) hook.syncWatchStateLater()
+                // What the rest of the page waits on, for performance checks
+                val t0 = System.currentTimeMillis()
                 got = rows.map { (spec, items) -> spec to items.await() }
+                val tRows = System.currentTimeMillis()
+                because?.await()
+                val tBecause = System.currentTimeMillis()
                 seriesArt.await()
+                val tArt = System.currentTimeMillis()
                 val picked = genres.mapNotNull { g -> page.genres.firstOrNull { it.second == g.ref } }
                 val genreRows = pool?.await()?.let { genreRows(it, picked, picked.size) }.orEmpty().associateBy { it.title }
+                val tPool = System.currentTimeMillis()
+                Timber.i("Cinema load %s: after first rows, rows +%d ms, because +%d, series art +%d, genre pool +%d", page.name.lowercase(), tRows - t0, tBecause - tRows, tArt - tBecause, tPool - tArt)
                 val all = build(genreRows)
                 // Nothing for the billboard in the first rows (they weren't in yet): pick from the whole page
                 ranked(CinemaHomeData(featured.ifEmpty { pick(all) }, all, showLibs.firstOrNull(), movieLibs.firstOrNull()))
             }
         }
+
+    /** The next page of a row, from [offset] in its source (filtered to its page). */
+    suspend fun more(
+        source: RowSource,
+        offset: Int,
+    ): RowPage =
+        withContext(Dispatchers.IO) {
+            val (items, end) = fetch(source.spec, source.page, userId(), offset, source.seed)
+            RowPage(items.filter { fits(source.page, it) }.map(::toItem), offset + PAGE, end)
+        }
+
+    /** A list row's size: its titles in the library (null for other rows). */
+    private fun listTotal(spec: HomeRowSpec): Int? =
+        if (spec.type != HomeRowType.COLLECTION) null else collections.lists.value.firstOrNull { it.id == spec.ref }?.itemIds?.size
+
+    /** Where a row's first load stopped in its source, so the next page carries on from there. */
+    private fun firstPage(
+        spec: HomeRowSpec,
+        shuffled: Boolean,
+    ) = when {
+        spec.type == HomeRowType.COLLECTION -> 40
+        shuffled -> PAGE
+        spec.type == HomeRowType.NEW_EPISODES -> 40
+        spec.type in setOf(HomeRowType.NEW_RELEASE_MOVIES, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS, HomeRowType.MY_LIST) -> 24
+        // Recently Added and library rows come from the server's Latest, grouped: start over in
+        // date order (titles already shown are skipped)
+        else -> 0
+    }
+
+    /**
+     * A page of [spec]'s titles from [offset] and whether that's the last. With a [seed] the
+     * order is shuffled: a list's own titles in a fixed random order, other rows random pages
+     * (they never say "last"; the row stops when pages stop bringing anything new).
+     */
+    private suspend fun fetch(
+        spec: HomeRowSpec,
+        page: RowsPage,
+        userId: UUID,
+        offset: Int,
+        seed: Long?,
+    ): Pair<List<BaseItemDto>, Boolean> {
+        fun request(
+            kinds: List<BaseItemKind>?,
+            sort: ItemSortBy,
+            parentId: UUID? = null,
+            favorite: Boolean? = null,
+            limit: Int = PAGE,
+        ) = GetItemsRequest(
+            userId = userId,
+            parentId = parentId,
+            isFavorite = favorite,
+            includeItemTypes = kinds,
+            recursive = true,
+            sortBy = listOf(if (seed != null) ItemSortBy.RANDOM else sort),
+            sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING),
+            startIndex = if (seed != null) null else offset,
+            limit = limit,
+            fields = fields,
+            enableImageTypes = images,
+            imageTypeLimit = 1,
+        )
+
+        suspend fun get(r: GetItemsRequest): Pair<List<BaseItemDto>, Boolean> {
+            val items = safe { api.itemsApi.getItems(r).content.items }
+            return items to (seed == null && items.size < (r.limit ?: PAGE))
+        }
+        return when (spec.type) {
+            HomeRowType.COLLECTION -> {
+                val c = collections.lists.value.firstOrNull { it.id == spec.ref } ?: return emptyList<BaseItemDto>() to true
+                val all = c.itemIds
+                val items =
+                    if (seed == null) {
+                        // The list's own order, through the same tag the row was loaded with
+                        safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, startIndex = offset, limit = PAGE, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items }
+                    } else {
+                        cards(all.shuffled(kotlin.random.Random(seed)).drop(offset).take(PAGE), userId)
+                    }
+                items to (offset + PAGE >= all.size)
+            }
+            // The server ignores the genre filter (Silo): random titles, sorted out by genre here
+            HomeRowType.GENRE -> {
+                val names = page.genres.firstOrNull { it.second == spec.ref }?.first?.map { it.lowercase() }?.toSet() ?: return emptyList<BaseItemDto>() to true
+                safe { api.itemsApi.getItems(request(kinds(page), ItemSortBy.RANDOM, limit = POOL / 2).copy(sortBy = listOf(ItemSortBy.RANDOM), startIndex = null)).content.items }
+                    .filter { d -> d.genres.orEmpty().any { it.lowercase() in names } } to false
+            }
+            HomeRowType.RECENT_MOVIES -> get(request(listOf(BaseItemKind.MOVIE), ItemSortBy.DATE_CREATED))
+            HomeRowType.NEW_EPISODES -> get(request(listOf(BaseItemKind.SERIES), ItemSortBy.DATE_LAST_CONTENT_ADDED))
+            HomeRowType.NEW_RELEASE_MOVIES -> get(request(listOf(BaseItemKind.MOVIE), ItemSortBy.PREMIERE_DATE))
+            HomeRowType.NEW_RELEASE_SHOWS -> get(request(listOf(BaseItemKind.SERIES), ItemSortBy.PREMIERE_DATE))
+            HomeRowType.NEW_ARRIVALS -> get(request(kinds(page), ItemSortBy.DATE_CREATED))
+            HomeRowType.MY_LIST -> get(request(kinds(page), ItemSortBy.DATE_CREATED, favorite = true)).let { (items, end) -> items.filter { it.userData?.isFavorite != false } to end }
+            HomeRowType.LIBRARY -> {
+                val lib = runCatching { UUID.fromString(spec.ref) }.getOrNull() ?: return emptyList<BaseItemDto>() to true
+                get(request(listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES), ItemSortBy.DATE_CREATED, parentId = lib))
+            }
+            else -> emptyList<BaseItemDto>() to true
+        }
+    }
+
+    /**
+     * Titles by id, as cards need them, in [ids]' order (one comma-joined value: see [itemsByIds]).
+     * In small batches at once: Silo builds a batch's records one title at a time (~250 ms each on
+     * the Shield), so 20 titles in one request took ~5 s.
+     */
+    private suspend fun cards(
+        ids: List<String>,
+        userId: UUID,
+    ): List<BaseItemDto> {
+        if (ids.isEmpty()) return emptyList()
+        val got =
+            coroutineScope {
+                ids.chunked(ID_BATCH).map { chunk ->
+                    async {
+                        safe {
+                            api.get<org.jellyfin.sdk.model.api.BaseItemDtoQueryResult>(
+                                "/Items",
+                                queryParameters =
+                                    mapOf(
+                                        "userId" to userId,
+                                        "ids" to chunk.joinToString(",") { dash(it) },
+                                        "fields" to "Overview,Genres,DateCreated,ChildCount,ProviderIds",
+                                        "enableImageTypes" to "Primary,Backdrop,Thumb,Logo",
+                                        "imageTypeLimit" to 1,
+                                        "limit" to chunk.size,
+                                    ),
+                            ).content.items
+                        }
+                    }
+                }.awaitAll().flatten()
+            }
+        val byId = got.associateBy { it.id.toString().replace("-", "").lowercase() }
+        return ids.mapNotNull { byId[it.replace("-", "").lowercase()] }
+    }
 
     /**
      * [on] plus the server's newest titles when it would show less than two rows of titles (the
@@ -392,7 +628,7 @@ internal class CinemaRepository(
         val titled =
             on.count {
                 when (it.type) {
-                    HomeRowType.CONTINUE_WATCHING, HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES -> false
+                    HomeRowType.CONTINUE_WATCHING, HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES, HomeRowType.BECAUSE_YOU_WATCHED -> false
                     HomeRowType.COLLECTION -> it.ref in loadingLists
                     else -> true
                 }
@@ -473,7 +709,7 @@ internal class CinemaRepository(
                     val lib = libs.firstOrNull { it.id.toString() == spec.ref } ?: return "" to emptyList()
                     name to safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, parentId = lib.id, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
                 }
-                HomeRowType.CONTINUE_WATCHING, HomeRowType.GENRE, HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES -> "" to emptyList()
+                HomeRowType.CONTINUE_WATCHING, HomeRowType.GENRE, HomeRowType.SERVICES, HomeRowType.GENRES, HomeRowType.DECADES, HomeRowType.BECAUSE_YOU_WATCHED -> "" to emptyList()
             }
         return shown to items.filter { fits(page, it) }
     }
@@ -609,12 +845,18 @@ internal class CinemaRepository(
     ) = coroutineScope {
         val ids = items.mapNotNull { it.seriesId }.distinct().filter { !seriesTmdb.containsKey(it) }.take(30)
         if (ids.isEmpty()) return@coroutineScope
-        val got = runCatching { itemsByIds(ids, userId, "ProviderIds") }.getOrDefault(emptyList())
-        got.forEach { s -> tmdbOf(s)?.let { seriesTmdb[s.id] = it } }
+        val got = itemsByIdsQuick(ids, userId, "ProviderIds")
+        got.forEach { s ->
+            tmdbOf(s)?.let { seriesTmdb[s.id] = it }
+            s.officialRating?.let { seriesRating[s.id] = it }
+        }
         val missing = ids - got.map { it.id }.toSet()
         missing.map { id ->
             async { runCatching { api.userLibraryApi.getItem(id, userId).content }.getOrNull() }
-        }.awaitAll().filterNotNull().forEach { s -> tmdbOf(s)?.let { seriesTmdb[s.id] = it } }
+        }.awaitAll().filterNotNull().forEach { s ->
+            tmdbOf(s)?.let { seriesTmdb[s.id] = it }
+            s.officialRating?.let { seriesRating[s.id] = it }
+        }
     }
 
     /**
@@ -631,7 +873,21 @@ internal class CinemaRepository(
             queryParameters = mapOf("userId" to userId, "ids" to ids.joinToString(","), "fields" to fields, "enableImages" to false, "limit" to ids.size),
         ).content.items
 
+    /** [itemsByIds] in small batches at once (see [cards]); a batch that fails is left out. */
+    private suspend fun itemsByIdsQuick(
+        ids: List<UUID>,
+        userId: UUID,
+        fields: String,
+    ): List<BaseItemDto> =
+        coroutineScope {
+            ids.chunked(ID_BATCH).map { chunk -> async { runCatching { itemsByIds(chunk, userId, fields) }.getOrDefault(emptyList()) } }.awaitAll().flatten()
+        }
+
     // ------------------------------------------------------------ details page
+
+    /** An episode's show, for opening its page from a card made before the show was known. */
+    suspend fun seriesOf(episodeId: UUID): UUID? =
+        withContext(Dispatchers.IO) { runCatching { api.userLibraryApi.getItem(episodeId, userId()).content.seriesId }.getOrNull() }
 
     suspend fun details(
         id: UUID,
@@ -731,20 +987,7 @@ internal class CinemaRepository(
     ): List<CinemaItem> =
         withContext(Dispatchers.IO) {
             val userId = userId()
-            val recommended =
-                item.tmdbId?.takeIf { tmdb?.available == true }?.let { id ->
-                    val type = if (item.tmdbTv) com.wholphinplus.sources.core.TmdbType.TV else com.wholphinplus.sources.core.TmdbType.MOVIE
-                    runCatching { tmdb!!.recommendations(type, id) }
-                        .onFailure { Timber.w(it, "TMDB recommendations failed for %s", item.title) }
-                        .getOrDefault(emptyList())
-                        .take(RECOMMENDATIONS)
-                }.orEmpty()
-            val gate = kotlinx.coroutines.sync.Semaphore(4)
-            val found =
-                coroutineScope {
-                    recommended.map { r -> async { gate.withPermit { inLibrary(r, userId) } } }.awaitAll()
-                }.filterNotNull().filter { it.detailsId != item.detailsId }.distinctBy { it.key }
-            Timber.i("More Like This for %s: %d of %d recommendations in the library", item.title, found.size, recommended.size)
+            val found = recommendedInLibrary(item, tmdb, userId)
             if (found.size >= 3) {
                 found
             } else {
@@ -753,6 +996,67 @@ internal class CinemaRepository(
                     .filter { it.backdropUrl != null || it.cardUrl != null }
                     .distinctBy { it.key }
             }
+        }
+
+    /**
+     * Because You Watched: More Like This for the first title in [watched] (Continue Watching,
+     * Orca+'s own progress included) that TMDB knows, without what's already in [watched]. Only
+     * TMDB's picks: the server's Similar fallback is too loose for a row that names its reason.
+     * No row (empty) under three titles.
+     */
+    private suspend fun because(
+        watched: List<BaseItemDto>,
+        page: RowsPage,
+        userId: UUID,
+    ): Pair<String, List<CinemaItem>> {
+        if (tmdb?.available != true || watched.isEmpty()) return "" to emptyList()
+        val started = System.currentTimeMillis()
+        fillSeriesTmdb(watched.filter { it.type == BaseItemKind.EPISODE }, userId)
+        Timber.i("Because You Watched: series ids in %d ms", System.currentTimeMillis() - started)
+        val seen = watched.map { it.seriesId ?: it.id }.toSet()
+        val source =
+            watched.firstOrNull { d -> (if (d.type == BaseItemKind.EPISODE) d.seriesId?.let { seriesTmdb[it] } else tmdbOf(d)) != null }
+                ?.let(::toItem) ?: return "" to emptyList()
+        val found = recommendedInLibrary(source, tmdb, userId).filter { it.detailsId !in seen && (page.series == null || (it.kind == BaseItemKind.SERIES) == page.series) }
+        // An episode's card is titled with its show
+        return if (found.size >= 3) "Because You Watched ${source.title}" to found.take(24) else "" to emptyList()
+    }
+
+    /** TMDB's recommendations for [item] as found in the library, best first. */
+    private suspend fun recommendedInLibrary(
+        item: CinemaItem,
+        tmdb: com.wholphinplus.sources.core.TmdbClient?,
+        userId: UUID,
+    ): List<CinemaItem> =
+        coroutineScope {
+            val started = System.currentTimeMillis()
+            val recommended =
+                item.tmdbId?.takeIf { tmdb?.available == true }?.let { id ->
+                    val type = if (item.tmdbTv) com.wholphinplus.sources.core.TmdbType.TV else com.wholphinplus.sources.core.TmdbType.MOVIE
+                    runCatching { tmdb!!.recommendations(type, id) }
+                        .onFailure { Timber.w(it, "TMDB recommendations failed for %s", item.title) }
+                        .getOrDefault(emptyList())
+                        .take(RECOMMENDATIONS)
+                }.orEmpty()
+            // The library index knows at once which are here: one request then brings their cards.
+            // Before it's read, each title is a name search (four at a time)
+            val tTmdb = System.currentTimeMillis()
+            val idx = collections.savedIndexFor(hook)
+            val tIndex = System.currentTimeMillis()
+            val inLibrary =
+                if (idx != null) {
+                    val ids = recommended.mapNotNull { r -> (if (r.type == com.wholphinplus.sources.core.TmdbType.TV) idx.series else idx.movies).takeIf { it.size > 0 }?.find(r.id, null) }.distinct()
+                    safe { cards(ids, userId) }.map(::toItem).filter { it.backdropUrl != null || it.cardUrl != null }
+                } else {
+                    val gate = kotlinx.coroutines.sync.Semaphore(4)
+                    recommended.map { r -> async { gate.withPermit { inLibrary(r, userId) } } }.awaitAll().filterNotNull()
+                }
+            val found = inLibrary.filter { it.detailsId != item.detailsId }.distinctBy { it.key }
+            Timber.i(
+                "More Like This for %s: %d of %d recommendations in the library (TMDB %d ms, index %d ms%s, cards %d ms)",
+                item.title, found.size, recommended.size, tTmdb - started, tIndex - tTmdb, if (idx == null) " none" else "", System.currentTimeMillis() - tIndex,
+            )
+            found
         }
 
     /** One TMDB title in the library, or null. Remembered (misses too) for the session. */
@@ -791,9 +1095,22 @@ internal class CinemaRepository(
     suspend fun episodes(
         seriesId: UUID,
         seasonId: UUID,
+        // For TMDB's stills: some servers list an episode picture they then answer 404 for
+        // (Silo: every Mickey Mouse Clubhouse episode), which left the cards blank
+        tmdbId: Int? = null,
+        seasonNumber: Int? = null,
     ): List<CinemaEpisode> =
         withContext(Dispatchers.IO) {
             val userId = userId()
+            val stills =
+                async {
+                    if (tmdbId == null || seasonNumber == null || tmdb == null || !tmdb.available) {
+                        emptyMap()
+                    } else {
+                        runCatching { tmdb.episodes(tmdbId, seasonNumber).mapNotNull { e -> e.stillPath?.let { e.number to "https://image.tmdb.org/t/p/w500$it" } }.toMap() }.getOrDefault(emptyMap())
+                    }
+                }
+            val tmdbStills = stills.await()
             safe {
                 api.tvShowsApi.getEpisodes(
                     org.jellyfin.sdk.model.api.request.GetEpisodesRequest(
@@ -813,6 +1130,7 @@ internal class CinemaRepository(
                     overview = e.overview.orEmpty(),
                     runtime = e.runTimeTicks?.let { "${it / 600_000_000L}m" },
                     stillUrl = e.imageTags?.get(ImageType.PRIMARY)?.let { image(e.id, "Primary", it, 480) },
+                    tmdbStill = e.indexNumber?.let { tmdbStills[it] },
                     progress = e.userData?.playedPercentage?.takeIf { it > 0 }?.let { (it / 100).toFloat() },
                     played = e.userData?.played == true,
                     resumeMs = (e.userData?.playbackPositionTicks ?: 0L) / 10_000L,
@@ -868,6 +1186,16 @@ internal class CinemaRepository(
         return d
     }
 
+    /**
+     * Whose pages these are (server and sign-in, the token hashed): a saved page from another one
+     * is never shown. Known without asking the server, so a saved page shows at once.
+     */
+    fun owner(): String? {
+        val token = api.accessToken ?: return null
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest((api.baseUrl.orEmpty().trimEnd('/') + "|" + token).toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
     private fun userId(): UUID =
         hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() } ?: error("Not signed in")
 
@@ -890,6 +1218,9 @@ internal class CinemaRepository(
         }
 
     private val seriesTmdb = java.util.concurrent.ConcurrentHashMap<UUID, Int>()
+
+    /** Shows' ratings, for their episodes on the Kids tab. */
+    private val seriesRating = java.util.concurrent.ConcurrentHashMap<UUID, String>()
 
     private fun tmdbOf(d: BaseItemDto): Int? =
         d.providerIds?.entries?.firstOrNull { it.key.equals("Tmdb", true) }?.value?.toIntOrNull()
@@ -1000,6 +1331,9 @@ internal class CinemaRepository(
     private fun dash(id: String): String = com.wholphinplus.sources.ProgressOverlay.dashed(id)
 
     companion object {
+        /** Titles per by-id request; several are sent at once. */
+        private const val ID_BATCH = 5
+
         /** TMDB titles looked up in the library for More Like This (empty = not there). */
         private val libraryMatches = java.util.concurrent.ConcurrentHashMap<String, LibraryMatch>()
 
@@ -1021,6 +1355,25 @@ internal class CinemaRepository(
 
         /** Home rows whose request doesn't depend on the library list. */
         private val LIBRARY_FREE = listOf(HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES, HomeRowType.NEW_RELEASE_MOVIES, HomeRowType.MY_LIST, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS, HomeRowType.JUST_AIRED)
+
+        /** US ratings the Kids tab's Continue Watching keeps. */
+        private val KID_RATINGS = setOf("G", "PG", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "TV-PG")
+
+        /** A tile page shows once this many of its rows are in. */
+        private const val PAGE_FIRST_ROWS = 3
+
+        /** Titles per page when a row loads more. */
+        const val PAGE = 40
+
+        /** Rows that keep loading as you browse (and can be shuffled): not Top 10s or Continue Watching. */
+        val PAGED =
+            setOf(
+                HomeRowType.COLLECTION, HomeRowType.GENRE, HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES, HomeRowType.NEW_RELEASE_MOVIES,
+                HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS, HomeRowType.MY_LIST, HomeRowType.LIBRARY,
+            )
+
+        /** Rows an "always shuffle" lock reorders on load (genre rows are random anyway). */
+        private val SHUFFLED_ON_LOAD = PAGED - HomeRowType.GENRE
 
         /** How many random titles a page sorts into genre rows. */
         const val POOL = 500
@@ -1090,6 +1443,8 @@ data class CinemaEpisode(
     val overview: String,
     val runtime: String?,
     val stillUrl: String?,
+    /** TMDB's still, tried when the server's picture fails. */
+    val tmdbStill: String? = null,
     val progress: Float?,
     val played: Boolean,
     val resumeMs: Long,

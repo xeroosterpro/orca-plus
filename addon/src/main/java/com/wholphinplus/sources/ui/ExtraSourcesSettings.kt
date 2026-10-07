@@ -174,6 +174,18 @@ fun OrcaTopicItems(
                         trailingContent = { androidx.tv.material3.Switch(checked = rollUp, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
                         modifier = Modifier.width(720.dp),
                     )
+                    val kidsTab by hook.store.kidsTab.collectAsState()
+                    PlusListItem(
+                        onClick = {
+                            hook.store.setKidsTab(!kidsTab)
+                            // Its rows are matched to the library only once it's wanted
+                            if (!kidsTab) hook.collections.refreshStale(hook)
+                        },
+                        headlineContent = { Text("Kids tab", style = MaterialTheme.typography.titleMedium) },
+                        supportingContent = { Text(if (kidsTab) "On: a Kids tab at the top, with kids' movies and shows only" else "Off: turn on for a tab of kids' movies, shows and little ones' favourites") },
+                        trailingContent = { androidx.tv.material3.Switch(checked = kidsTab, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
+                        modifier = Modifier.width(720.dp),
+                    )
                 }
                 // Lists you added (the Orca+ cloud's charts are arranged in Rows, not here)
                 val all by hook.collections.lists.collectAsState()
@@ -1048,7 +1060,16 @@ private fun CloudScreen(hook: SourceHook) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             status.problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            // "Forgot PIN" was used elsewhere: say when the setup goes, and offer to keep it
+            val context = androidx.compose.ui.platform.LocalContext.current
+            if (status.resetAt > 0) {
+                Text(
+                    "Someone used \"Forgot PIN\" on another TV: the setup saved for this account will be deleted ${resetTime(context, status.resetAt)} unless you keep it.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             ActionRow {
+                if (status.resetAt > 0) Button(onClick = { act("Keeping your setup…") { sync.keepSetup(hook) } }) { Text("Keep my setup") }
                 Button(onClick = { act("Syncing…") { sync.syncNow(hook) } }, modifier = Modifier.focusRequester(focus)) { Text("Sync now") }
                 Button(onClick = { pad = "pin" }) { Text("Change PIN") }
                 Button(onClick = { sync.turnOff() }) { Text("Turn off on this TV") }

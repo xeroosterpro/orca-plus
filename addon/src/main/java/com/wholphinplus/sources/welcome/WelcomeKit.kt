@@ -69,6 +69,7 @@ import androidx.tv.material3.Text
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import com.wholphinplus.sources.cinema.CinemaEase
+import com.wholphinplus.sources.cinema.CinemaFade
 import com.wholphinplus.sources.cinema.Ink
 import com.wholphinplus.sources.cinema.InkDim
 import com.wholphinplus.sources.cinema.Plus
@@ -212,13 +213,15 @@ internal fun ChoiceCard(
     compact: Boolean = false,
     onClick: () -> Unit,
 ) {
+    val f = com.wholphinplus.sources.cinema.rememberFocusFade(Glass, Ink, Ink, Stage)
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(16.dp)),
-        colors = ClickableSurfaceDefaults.colors(containerColor = Glass, contentColor = Ink, focusedContainerColor = Ink, focusedContentColor = Stage),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
         border = ClickableSurfaceDefaults.border(border = androidx.tv.material3.Border(BorderStroke(1.dp, GlassLine), shape = RoundedCornerShape(16.dp))),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.03f),
-        modifier = modifier.fillMaxWidth().tapClick(onClick),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
+        modifier = with(com.wholphinplus.sources.cinema.TapHelper) { modifier.fillMaxWidth().tapClick(onClick).glideFocus(1.03f) },
     ) {
         Row(Modifier.padding(horizontal = 18.dp, vertical = if (compact) 9.dp else 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(if (compact) 36.dp else 44.dp).clip(CircleShape).background(accent.copy(alpha = 0.9f)), contentAlignment = Alignment.Center) {
@@ -243,18 +246,15 @@ internal fun PillButton(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
+    val f = com.wholphinplus.sources.cinema.rememberFocusFade(if (primary) Ink else Glass, if (primary) Color.White else Ink, if (primary) Stage else Ink, Stage)
     Surface(
         onClick = { if (enabled) onClick() },
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(50)),
-        colors =
-            ClickableSurfaceDefaults.colors(
-                containerColor = if (primary) Ink else Glass,
-                contentColor = if (primary) Stage else Ink,
-                focusedContainerColor = if (primary) Color.White else Ink,
-                focusedContentColor = Stage,
-            ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
-        modifier = modifier.graphicsLayer { alpha = if (enabled) 1f else 0.45f }.tapClick { if (enabled) onClick() },
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
+        // Like Play on the billboard: a ring fades in around the pill as it grows
+        modifier = modifier.graphicsLayer { alpha = if (enabled) 1f else 0.45f }.then(com.wholphinplus.sources.cinema.glideRing(1.06f)).tapClick { if (enabled) onClick() },
     ) {
         Text(text, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 30.dp, vertical = 13.dp))
     }
@@ -317,7 +317,7 @@ internal fun CodeDisplay(
     modifier: Modifier = Modifier,
 ) {
     val t = rememberInfiniteTransition(label = "wait")
-    val pulse by t.animateFloat(0.35f, 1f, infiniteRepeatable(tween(1100, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "pulse")
+    val pulse by t.animateFloat(0.35f, 1f, infiniteRepeatable(tween(1100, easing = CinemaFade), RepeatMode.Reverse), label = "pulse")
     Column(modifier, verticalArrangement = Arrangement.spacedBy(16.dp), horizontalAlignment = Alignment.Start) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             code.forEach { c ->

@@ -1,6 +1,14 @@
 package com.wholphinplus.sources.cinema
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import org.jellyfin.sdk.model.api.CollectionType
 
 /** The kinds of row Cinema mode's pages can show. */
@@ -47,6 +55,9 @@ enum class HomeRowType {
 
     /** Tiles of decades (2020s… 70s), each opening the decade's page. */
     DECADES,
+
+    /** More Like This for the title at the front of Continue Watching, as found in the library. */
+    BECAUSE_YOU_WATCHED,
 }
 
 /**
@@ -62,6 +73,9 @@ enum class RowsPage(
     SHOWS("Shows", true),
     MOVIES("Movies", false),
     NEW_POPULAR("New & Popular", null),
+
+    /** Kids' rows only (off until switched on in Settings). */
+    KIDS("Kids", null),
     ;
 
     val hasContinueWatching: Boolean get() = this != NEW_POPULAR
@@ -73,13 +87,17 @@ enum class RowsPage(
                 HOME -> CinemaRepository.GENRE_ROWS
                 SHOWS -> CinemaRepository.SHOW_GENRES
                 MOVIES -> CinemaRepository.MOVIE_GENRES
-                NEW_POPULAR -> emptyList()
+                NEW_POPULAR, KIDS -> emptyList()
             }
 
     /** The kinds of row this page offers. */
     fun offers(type: HomeRowType): Boolean =
-        when (type) {
-            HomeRowType.CONTINUE_WATCHING -> hasContinueWatching
+        // Kids: only kids' charts and Continue Watching (kept to kids' ratings), never the
+        // library's newest or your own favourites
+        if (this == KIDS) {
+            type in setOf(HomeRowType.CONTINUE_WATCHING, HomeRowType.BECAUSE_YOU_WATCHED, HomeRowType.COLLECTION)
+        } else when (type) {
+            HomeRowType.CONTINUE_WATCHING, HomeRowType.BECAUSE_YOU_WATCHED -> hasContinueWatching
             HomeRowType.RECENT_MOVIES, HomeRowType.NEW_RELEASE_MOVIES -> series != true
             HomeRowType.NEW_EPISODES, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.JUST_AIRED -> series != false
             HomeRowType.GENRE -> genres.isNotEmpty()
@@ -146,6 +164,7 @@ data class HomeRowSpec(
             HomeRowType.SERVICES -> "Services"
             HomeRowType.GENRES -> "Genres"
             HomeRowType.DECADES -> "Decades"
+            HomeRowType.BECAUSE_YOU_WATCHED -> "Because You Watched"
             HomeRowType.LIBRARY ->
                 libraries.firstOrNull { it.id.toString() == ref }?.let { lib ->
                     if (lib.collectionType == CollectionType.TVSHOWS) "New Episodes in ${lib.name}" else "Recently Added in ${lib.name}"
@@ -159,16 +178,21 @@ data class HomeRowSpec(
  */
 @Serializable
 data class HomeLayout(
-    val rows: List<HomeRowSpec>,
+    @Serializable(with = LenientRows::class) val rows: List<HomeRowSpec>,
+    /**
+     * Services was moved right under Continue Watching (owner, 2026-10-06), once: a layout saved
+     * before that gets it there on its next load, and you can move it again after.
+     */
+    val servicesTop: Boolean = false,
 ) {
     /** Continue Watching first and on (keeping a name you gave it), when the layout has it. */
     fun pinned(): HomeLayout {
         val cw = rows.firstOrNull { it.type == HomeRowType.CONTINUE_WATCHING }?.copy(on = true) ?: return this
-        return HomeLayout(listOf(cw) + rows.filter { it.type != HomeRowType.CONTINUE_WATCHING })
+        return copy(rows = listOf(cw) + rows.filter { it.type != HomeRowType.CONTINUE_WATCHING })
     }
 
     /** The rows that show, in order, then the ones you can add (each group keeps its order). */
-    fun tidy(): HomeLayout = HomeLayout(rows.filter { it.on } + rows.filterNot { it.on }).pinned()
+    fun tidy(): HomeLayout = copy(rows = rows.filter { it.on } + rows.filterNot { it.on }).pinned()
 
     /**
      * [key]'s row switched on (it joins the bottom of the page) or off (it goes back among the
@@ -182,14 +206,14 @@ data class HomeLayout(
         if (row.type == HomeRowType.CONTINUE_WATCHING || row.on == on) return this
         val rest = tidy().rows.filter { it.key != key }
         val at = rest.count { it.on }
-        return HomeLayout(rest.take(at) + row.copy(on = on) + rest.drop(at)).pinned()
+        return copy(rows = rest.take(at) + row.copy(on = on) + rest.drop(at)).pinned()
     }
 
     /** [key]'s row with a name of your own; blank goes back to the row's own name. */
     fun renamed(
         key: String,
         title: String,
-    ): HomeLayout = HomeLayout(rows.map { if (it.key == key) it.copy(title = title.trim()) else it }).pinned()
+    ): HomeLayout = copy(rows = rows.map { if (it.key == key) it.copy(title = title.trim()) else it }).pinned()
 
     /** [key]'s row moved [by] places among the rows that show, never above Continue Watching. */
     fun moved(
@@ -201,9 +225,9 @@ data class HomeLayout(
         val first = if (list.firstOrNull()?.type == HomeRowType.CONTINUE_WATCHING) 1 else 0
         if (from < first || !list[from].on) return this
         val to = (from + by).coerceIn(first, list.count { it.on } - 1)
-        if (to == from) return HomeLayout(list)
+        if (to == from) return copy(rows = list)
         list.add(to, list.removeAt(from))
-        return HomeLayout(list)
+        return copy(rows = list)
     }
 
     companion object {
@@ -223,7 +247,8 @@ data class HomeLayout(
             val rows =
                 buildList {
                     if (page.hasContinueWatching) add(HomeRowSpec(HomeRowType.CONTINUE_WATCHING))
-                    // The cloud's lineup: its charts and the Services / Genres tiles, in its order
+                    // The cloud's lineup: its charts and the rows it places by token (tiles, Because You
+                    // Watched, the every-library rows), in its order
                     val lineup =
                         offered.filter { page.listStartsOn(it) }.map { (it.order?.get(page.name) ?: Int.MAX_VALUE) to HomeRowSpec(HomeRowType.COLLECTION, ref = it.id) } +
                             tiles.filterKeys { page.offers(it) }.map { (t, at) -> at to HomeRowSpec(t) }
@@ -235,9 +260,13 @@ data class HomeLayout(
                     page.genres.forEach { (_, name) -> add(HomeRowSpec(HomeRowType.GENRE, on = false, ref = name)) }
                     // Your own libraries' latest additions, after the cloud's rows: a page always has
                     // the server's own titles, even when few chart titles are in the library
-                    libraries.filter { page.offers(it) }.forEach { add(HomeRowSpec(HomeRowType.LIBRARY, ref = it.id.toString())) }
+                    // (off where the cloud places the every-library row of their kind instead)
+                    libraries.filter { page.offers(it) }.forEach { lib ->
+                        val combined = if (lib.collectionType == CollectionType.TVSHOWS) HomeRowType.NEW_EPISODES else HomeRowType.RECENT_MOVIES
+                        add(HomeRowSpec(HomeRowType.LIBRARY, on = combined !in tiles, ref = lib.id.toString()))
+                    }
                 }
-            return HomeLayout(rows).pinned()
+            return HomeLayout(rows, servicesTop = true).pinned()
         }
     }
 
@@ -296,6 +325,52 @@ data class HomeLayout(
         libraries
             .filter { page.offers(it) && it.id.toString() !in haveLibraries }
             .forEach { kept += HomeRowSpec(HomeRowType.LIBRARY, on = false, ref = it.id.toString()) }
-        return HomeLayout(kept).pinned()
+        // Once: Services right under Continue Watching where the cloud puts it first
+        if (!servicesTop && tiles[HomeRowType.SERVICES] == 0) {
+            val at = kept.indexOfFirst { it.type == HomeRowType.SERVICES }
+            if (at >= 0) {
+                val services = kept.removeAt(at).copy(on = true)
+                kept.add(if (kept.firstOrNull()?.type == HomeRowType.CONTINUE_WATCHING) 1 else 0, services)
+            }
+        }
+        return copy(rows = kept, servicesTop = servicesTop || tiles[HomeRowType.SERVICES] == 0).pinned()
+    }
+}
+
+/**
+ * A layout's rows, leaving out any this app doesn't know (a kind of row a newer Orca+ added): a
+ * layout synced from a newer TV still loads here, without those rows.
+ */
+internal object LenientRows : KSerializer<List<HomeRowSpec>> {
+    private val list = ListSerializer(HomeRowSpec.serializer())
+    override val descriptor = list.descriptor
+
+    override fun serialize(
+        encoder: Encoder,
+        value: List<HomeRowSpec>,
+    ) = list.serialize(encoder, value)
+
+    override fun deserialize(decoder: Decoder): List<HomeRowSpec> {
+        val json = decoder as? JsonDecoder ?: return list.deserialize(decoder)
+        return json.decodeJsonElement().jsonArray.mapNotNull { runCatching { json.json.decodeFromJsonElement(HomeRowSpec.serializer(), it) }.getOrNull() }
+    }
+}
+
+/** Every page's layout, leaving out pages this app doesn't know (a tab a newer Orca+ added). */
+internal object LenientLayouts : KSerializer<Map<RowsPage, HomeLayout>> {
+    private val map = MapSerializer(RowsPage.serializer(), HomeLayout.serializer())
+    override val descriptor = map.descriptor
+
+    override fun serialize(
+        encoder: Encoder,
+        value: Map<RowsPage, HomeLayout>,
+    ) = map.serialize(encoder, value)
+
+    override fun deserialize(decoder: Decoder): Map<RowsPage, HomeLayout> {
+        val json = decoder as? JsonDecoder ?: return map.deserialize(decoder)
+        return json.decodeJsonElement().jsonObject.mapNotNull { (name, layout) ->
+            val page = RowsPage.entries.firstOrNull { it.name == name } ?: return@mapNotNull null
+            runCatching { page to json.json.decodeFromJsonElement(HomeLayout.serializer(), layout) }.getOrNull()
+        }.toMap()
     }
 }

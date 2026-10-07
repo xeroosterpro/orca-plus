@@ -96,6 +96,9 @@ class ProgressOverlay internal constructor(
             val request = chain.request()
             val response = chain.proceed(request)
             if (entries.isEmpty() || request.method != "GET" || !response.isSuccessful) return response
+            // Asked without watch data (the library index's 1,000-title pages): nothing to merge,
+            // and copying and scanning them would undo what makes them light
+            if ((request.url.queryParameter("enableUserData") ?: request.url.queryParameter("EnableUserData")).equals("false", true)) return response
             val type = response.body.contentType()
             if (type?.subtype?.contains("json") != true) return response
             val path = request.url.encodedPath
@@ -131,21 +134,26 @@ class ProgressOverlay internal constructor(
                 .firstOrNull { it.startsWith(HomeCollection.TAG_PREFIX) } ?: return null
             val ids = collections.itemIdsForTag(tag).orEmpty()
             val start = (url.queryParameter("startIndex") ?: url.queryParameter("StartIndex"))?.toIntOrNull() ?: 0
-            val limit = limitOf(request) ?: ids.size
+            // At most 200 an answer (a list can hold 1,000; TotalRecordCount says how many, so a
+            // pager asks again), fetched 100 ids a request so the address stays short
+            val limit = (limitOf(request) ?: MAX_LIST_PAGE).coerceIn(0, MAX_LIST_PAGE)
             val page = ids.drop(start).take(limit)
             val items =
                 if (page.isEmpty()) {
                     emptyList()
                 } else {
-                    val rewritten =
-                        url
-                            .newBuilder()
-                            .apply {
-                                listOf(tagParam, "startIndex", "StartIndex", "limit", "Limit", "sortBy", "SortBy", "sortOrder", "SortOrder", "includeItemTypes", "IncludeItemTypes")
-                                    .forEach { removeAllQueryParameters(it) }
-                            }.addQueryParameter("ids", page.joinToString(",") { dashed(it) })
-                            .build()
-                    val byId = getItems(chain, request, rewritten).associateBy { norm((it["Id"] as? JsonPrimitive)?.content.orEmpty()) }
+                    val byId =
+                        page.chunked(100).flatMap { chunk ->
+                            val rewritten =
+                                url
+                                    .newBuilder()
+                                    .apply {
+                                        listOf(tagParam, "startIndex", "StartIndex", "limit", "Limit", "sortBy", "SortBy", "sortOrder", "SortOrder", "includeItemTypes", "IncludeItemTypes")
+                                            .forEach { removeAllQueryParameters(it) }
+                                    }.addQueryParameter("ids", chunk.joinToString(",") { dashed(it) })
+                                    .build()
+                            getItems(chain, request, rewritten)
+                        }.associateBy { norm((it["Id"] as? JsonPrimitive)?.content.orEmpty()) }
                     page.mapNotNull { byId[norm(it)] }.map { patch(it) as JsonObject }
                 }
             val body =
@@ -220,8 +228,11 @@ class ProgressOverlay internal constructor(
                 entries
                     .filter { (id, e) -> !e.played && e.positionTicks > 0 && e.lastPlayed > cutoff && id !in present }
                     .filter { (_, e) -> !(excludeEpisodes && e.seriesId != null) }
-                    .keys
+                    // The most recently watched, when there are more than fit
+                    .entries
+                    .sortedByDescending { it.value.lastPlayed }
                     .take(MAX_INJECT)
+                    .map { it.key }
             val extra = if (wanted.isEmpty()) emptyList() else fetchItems(chain, request, wanted)
             Timber.i("Progress overlay: Continue Watching %d from server, %d wanted, %d added (%d known)", items.size, wanted.size, extra.size, entries.size)
             val merged =
@@ -369,6 +380,7 @@ class ProgressOverlay internal constructor(
             private val RECENT: Duration = Duration.ofDays(30)
             private val KEEP: Duration = Duration.ofDays(120)
             private const val MAX_ENTRIES = 500
+            private const val MAX_LIST_PAGE = 200
             private const val MAX_INJECT = 12
             private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
             private val ID_FIELD = Regex("\"Id\"\\s*:\\s*\"([0-9a-fA-F-]{32,36})\"")

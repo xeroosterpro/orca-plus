@@ -13,7 +13,7 @@ import com.wholphinplus.sources.core.normalizeServerUrl
 import com.wholphinplus.sources.core.qualityLabel
 import com.wholphinplus.sources.core.qualityRank
 import com.wholphinplus.sources.core.sameEndpoint
-import com.wholphinplus.sources.core.sourceRanking
+import com.wholphinplus.sources.core.stableRanking
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -278,6 +278,9 @@ data class PickerUi(
     val serversDone: Int,
     val onSelect: (ExternalSource) -> Unit,
     val onCancel: () -> Unit,
+    // What's playing (and its show), so Cinema mode can show the title's art behind the choice
+    val itemId: String = "",
+    val seriesId: String? = null,
 )
 
 /**
@@ -393,6 +396,8 @@ class PickSession internal constructor(
                     decision.complete(if (row.connectionId == SourceHook.JELLYFIN_ROW) Pick.Jellyfin else Pick.External(row))
                 },
                 onCancel = { decision.complete(Pick.Cancelled) },
+                itemId = item.id.toString(),
+                seriesId = item.seriesId?.toString(),
             )
         // finally: a playback screen closed mid-search must not leave the picker on screen
         val result =
@@ -409,7 +414,7 @@ class PickSession internal constructor(
                                     }
                                 }.awaitAll()
                             // Rank only once everything is in, so rows never jump under the cursor.
-                            _ui.update { ui -> ui?.copy(rows = found.value.sortedWith(sourceRanking), searching = false) }
+                            _ui.update { ui -> ui?.copy(rows = found.value.sortedWith(stableRanking(connections.map { it.connectionId })), searching = false) }
                         }
                     decision.await().also { search.cancel() }
                 }

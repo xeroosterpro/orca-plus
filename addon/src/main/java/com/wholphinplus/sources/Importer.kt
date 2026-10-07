@@ -31,6 +31,10 @@ data class ImportedLogin(
  * `{"main": <record>, "sources": [<record>, ...]}`, records in Source Bench shape
  * (`type,name,url,token,username,userId,serverId,enabled,collections`). The file is deleted once
  * read so tokens don't sit on shared storage.
+ *
+ * Or `/data/local/tmp/wholphinplus-import.json`: on a fresh Android 11+ install (the Android 11
+ * emulator bench) adb can't write the app's own folder. Only adb can write there, so it's no less
+ * safe; the app can't delete it, push-servers.py does once it's read.
  */
 internal object Importer {
     const val FILE_NAME = "wholphinplus-import.json"
@@ -40,8 +44,9 @@ internal object Importer {
         store: ConnectionStore,
         collections: HomeCollections? = null,
     ): ImportedLogin? {
-        val file = context.getExternalFilesDir(null)?.let { File(it, FILE_NAME) } ?: return null
-        if (!file.exists()) return null
+        val file =
+            listOfNotNull(context.getExternalFilesDir(null)?.let { File(it, FILE_NAME) }, File("/data/local/tmp", FILE_NAME))
+                .firstOrNull { runCatching { it.canRead() }.getOrDefault(false) } ?: return null
         return try {
             val root = Json.parseToJsonElement(file.readText()) as JsonObject
             root.array("sources").filterIsInstance<JsonObject>().mapNotNull(::toConnection).forEach {

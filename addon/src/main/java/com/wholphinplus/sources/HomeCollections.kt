@@ -84,6 +84,26 @@ class HomeCollections
 
         private val prefs = context.getSharedPreferences("wholphinplus_collections", Context.MODE_PRIVATE)
         private val json = Json { ignoreUnknownKeys = true }
+
+        // The lists live in a file of their own: with lists of up to 1,000 titles they're several
+        // MB, too much for a preferences file (read whole at start, rewritten on every change)
+        private val listsFile = java.io.File(context.filesDir, "home_lists_v1.json")
+        private val writer = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+        /** The main server's library by TMDB/IMDb id: lists match by id, no search per title. */
+        private val index = LibraryIndex(java.io.File(context.filesDir, "library_index_v1.bin"))
+
+        /** Whose library an index is: the main server and the signed-in user. */
+        private fun ownerOf(c: com.wholphinplus.sources.core.ServerConnection) = c.serverUrl.trimEnd('/') + "|" + c.userId
+
+        /** The main server's library index as it stands (null before it's first read). */
+        internal fun indexFor(hook: SourceHook): LibraryIndex.Snapshot? = hook.mainConnection()?.let { index.peek(ownerOf(it)) }
+
+        /** [indexFor], or the index saved on the device when it isn't in memory yet (a cold start). */
+        internal suspend fun savedIndexFor(hook: SourceHook): LibraryIndex.Snapshot? = hook.mainConnection()?.let { index.saved(ownerOf(it)) }
+
+        /** A full read of the library in progress ("Getting your library ready"), null when none. */
+        internal val indexProgress: kotlinx.coroutines.flow.StateFlow<LibraryIndex.Progress?> get() = index.progress
         private val _lists = MutableStateFlow(load())
         val lists: StateFlow<List<HomeCollection>> = _lists.asStateFlow()
 
@@ -156,6 +176,14 @@ class HomeCollections
             val tilesBefore = _cloudPages.value.tiles
             val own = _topStreaming.value.isNotBlank()
             val all = client.charts()
+            // A cloud answer that would drop most of this TV's charts is a fault (a bad deploy, a
+            // half-built file), not a change: rows left now would also leave every page arranged
+            // with them. Keep what's here until a sound answer comes
+            val known = _lists.value.count { isChart(it) }
+            if (all.isEmpty() || (known >= 20 && all.size < known / 2)) {
+                Timber.w("Orca+ charts: the cloud sent %d charts for %d here; keeping these", all.size, known)
+                return
+            }
             val shared = all.filter { it.source == "top-streaming" }.associateBy { it.id }
             val charts = all.filter { !(own && it.source == "top-streaming") }
             val urls = charts.associateBy { it.url }
@@ -225,18 +253,23 @@ class HomeCollections
             return catalogs.size
         }
 
-        /** Lists, charts and their accounts, for a cloud profile. */
+        /**
+         * Lists, charts and their accounts, for a cloud profile: what each list is, not what it
+         * matched (that's this library's, up to 1,000 titles a list, and every TV redoes it).
+         * Charts go too: page layouts name them by their id on this TV.
+         */
         fun snapshot(): com.wholphinplus.sources.sync.ListsState =
-            com.wholphinplus.sources.sync.ListsState(_lists.value, _traktClientId.value, _topStreaming.value)
+            com.wholphinplus.sources.sync.ListsState(forSync(_lists.value), _traktClientId.value, _topStreaming.value)
 
-        /** A cloud profile's lists (their matches came with them, so rows show at once). */
+        /** A cloud profile's lists, each keeping what this TV already matched for it. */
         fun restore(s: com.wholphinplus.sources.sync.ListsState) {
             if (s.traktClientId != _traktClientId.value) setTraktClientId(s.traktClientId)
             if (s.topStreaming != _topStreaming.value) {
                 prefs.edit().putString(TOP_STREAMING_KEY, s.topStreaming).apply()
                 _topStreaming.value = s.topStreaming
             }
-            if (s.lists != _lists.value) save(s.lists)
+            val merged = restored(_lists.value, s.lists)
+            if (merged != _lists.value) save(merged)
         }
 
         fun byTag(tag: String): HomeCollection? = _lists.value.firstOrNull { it.tag == tag }
@@ -259,13 +292,34 @@ class HomeCollections
             save(list)
         }
 
+        private val writePending = java.util.concurrent.atomic.AtomicBoolean(false)
+
         private fun save(list: List<HomeCollection>) {
-            prefs.edit().putString(KEY, json.encodeToString(list)).apply()
             _lists.value = list
+            // Off the caller's thread, and changes close together written once (a refresh updates
+            // ~150 lists one after another; the file is several MB). The newest always wins
+            if (writePending.compareAndSet(false, true)) {
+                writer.execute {
+                    Thread.sleep(WRITE_DELAY_MS)
+                    writePending.set(false)
+                    runCatching {
+                        val tmp = java.io.File(listsFile.path + ".tmp")
+                        tmp.writeText(json.encodeToString(_lists.value))
+                        if (!tmp.renameTo(listsFile)) error("Couldn't replace ${listsFile.name}")
+                    }.onFailure { Timber.w(it, "Saving the lists failed") }
+                }
+            }
         }
 
-        private fun load(): List<HomeCollection> =
-            runCatching { prefs.getString(KEY, null)?.let { json.decodeFromString<List<HomeCollection>>(it) } }.getOrNull().orEmpty()
+        private fun load(): List<HomeCollection> {
+            runCatching { if (listsFile.exists()) return json.decodeFromString<List<HomeCollection>>(listsFile.readText()) }.onFailure { Timber.w(it, "Reading the lists failed") }
+            // Before the lists had their own file: the preferences copy, moved over once
+            val old = runCatching { prefs.getString(KEY, null)?.let { json.decodeFromString<List<HomeCollection>>(it) } }.getOrNull().orEmpty()
+            if (old.isNotEmpty()) {
+                runCatching { listsFile.writeText(json.encodeToString(old)) }.onSuccess { prefs.edit().remove(KEY).apply() }
+            }
+            return old
+        }
 
         private fun loadMatches(): Map<String, String> =
             runCatching { prefs.getString(MATCH_KEY, null)?.let { json.decodeFromString<Map<String, String>>(it) } }.getOrNull().orEmpty()
@@ -322,57 +376,96 @@ class HomeCollections
                                 !c.pages.isNullOrEmpty() -> 1
                                 else -> 2
                             }
-                        val stale = _lists.value.filter { (onlyId == null || it.id == onlyId) && now - it.refreshedAt > maxAgeMs }.sortedWith(compareBy({ group(it) }, { it.order?.get("HOME") ?: Int.MAX_VALUE }))
+                        // Kids-only charts wait until the Kids tab is on (or one is switched on elsewhere)
+                        val layouts = hook.store.pageLayouts.value.values
+                        fun waits(c: HomeCollection) =
+                            isChart(c) && c.pages == listOf("KIDS") && !hook.store.kidsTab.value &&
+                                layouts.none { l -> l.rows.any { it.on && it.ref == c.id } }
+                        // The library index: read in the background the first time (minutes on a big
+                        // server); meanwhile big lists match their first titles by search
+                        val owner = hook.mainConnection()?.let(::ownerOf)
+                        val indexJob = async { owner?.let { index.ensure(hook, it) } }
+                        val partial = mutableListOf<String>()
+                        val stale = _lists.value.filter { (onlyId == null || it.id == onlyId) && now - it.refreshedAt > maxAgeMs && (onlyId != null || !waits(it)) }.sortedWith(compareBy({ group(it) }, { it.order?.get("HOME") ?: Int.MAX_VALUE }))
                         stale.forEachIndexed { i, c ->
                             if (i > 0 && group(c) != group(stale[i - 1])) announce()
                             _refreshing.value = c.name
-                            refreshOne(hook, c)
+                            if (!refreshOne(hook, c, indexJob)) partial += c.id
+                        }
+                        // Lists matched only in part (no index yet): all of them, once it's in
+                        if (partial.isNotEmpty() && indexJob.await() != null) {
+                            announce()
+                            _lists.value.filter { it.id in partial }.forEach { c ->
+                                _refreshing.value = c.name
+                                refreshOne(hook, c, indexJob)
+                            }
                         }
                         _refreshing.value = null
                         announce()
+                        // Once a run, not once a list: searches remembered, and the cloud's charts
+                        // kept without their 60k titles until a list needs them again
+                        saveMatches()
+                        client.trimCharts()
                     }
             }
         }
 
+        /** Matches [c] to the library; false when only its first titles could be (no index yet). */
         private suspend fun refreshOne(
             hook: SourceHook,
             c: HomeCollection,
-        ) {
+            indexJob: kotlinx.coroutines.Deferred<LibraryIndex.Snapshot?>? = null,
+        ): Boolean {
+            var whole = true
             val updated =
                 try {
                     val source = ListSource.parse(c.url) ?: error("Not a Trakt, MDBList, Top Streaming or Orca+ chart link")
-                    val fetched = client.fetch(source)
+                    val all = client.fetch(source)
                     val main = hook.mainConnection() ?: error("Not signed in")
-                    val gate = Semaphore(6)
+                    val idx = indexJob?.takeIf { it.isCompleted }?.await()
+                    // Without the index a long list would be minutes of searches: its first titles now
+                    val fetched = if (idx == null && all.entries.size > SEARCH_CAP) all.copy(entries = all.entries.take(SEARCH_CAP)).also { whole = false } else all
+                    // The index answers at once (a miss there is a miss); only titles it can't answer
+                    // (no index yet, a title without ids, a server whose titles carry none) are
+                    // searched for on the server, six at a time
+                    val matched = arrayOfNulls<String>(fetched.entries.size)
+                    val toSearch = ArrayList<Int>()
+                    fetched.entries.forEachIndexed { i, e ->
+                        val part = idx?.let { if (e.type == TmdbType.TV) it.series else it.movies }?.takeIf { it.size > 0 }
+                        if (part != null && (e.tmdbId != null || e.imdbId != null)) matched[i] = part.find(e.tmdbId, e.imdbId) else toSearch += i
+                    }
                     // Titles the server couldn't be asked about (it didn't answer) aren't misses
                     val failed = java.util.concurrent.atomic.AtomicInteger()
-                    // Each title found, with its place in the list
-                    val found =
+                    if (toSearch.isNotEmpty()) {
+                        val gate = Semaphore(6)
                         coroutineScope {
-                            fetched.entries.mapIndexed { i, e ->
+                            toSearch.map { i ->
                                 async {
                                     gate.withPermit {
-                                        try {
-                                            match(hook, main, e)?.let { it to i + 1 }
-                                        } catch (ex: Exception) {
-                                            if (ex is kotlinx.coroutines.CancellationException) throw ex
-                                            failed.incrementAndGet()
-                                            null
-                                        }
+                                        matched[i] =
+                                            try {
+                                                search(hook, main, fetched.entries[i])
+                                            } catch (ex: Exception) {
+                                                if (ex is kotlinx.coroutines.CancellationException) throw ex
+                                                failed.incrementAndGet()
+                                                null
+                                            }
                                     }
                                 }
                             }.awaitAll()
-                        }.filterNotNull().distinctBy { it.first }
+                        }
+                    }
+                    // Each title found, with its place in the list
+                    val found = matched.withIndex().mapNotNull { (i, id) -> id?.let { it to i + 1 } }.distinctBy { it.first }
                     val ids = found.map { it.first }
-                    saveMatches()
                     // A refresh that hit server errors never shrinks the row: keep it as it was
                     if (failed.get() > 0 && ids.size < c.itemIds.size) error("The server didn't answer for ${failed.get()} titles")
-                    Timber.i("Home collection %s: %d of %d titles in the library", c.name, ids.size, fetched.entries.size)
+                    Timber.i("Home collection %s: %d of %d titles in the library%s", c.name, ids.size, all.entries.size, if (whole) "" else " (first ${fetched.entries.size} so far)")
                     c.copy(
                         name = if (c.name.isBlank() || c.name == PENDING_NAME) fetched.name else c.name,
                         itemIds = ids,
                         ranks = found.map { it.second },
-                        listSize = fetched.entries.size,
+                        listSize = all.entries.size,
                         refreshedAt = System.currentTimeMillis(),
                         error = null,
                     )
@@ -385,9 +478,11 @@ class HomeCollections
             _lists.value.firstOrNull { it.id == c.id }?.let { current ->
                 update(updated.copy(showOnHome = current.showOnHome, name = if (current.name == c.name) updated.name else current.name))
             }
+            return whole
         }
 
-        private suspend fun match(
+        /** One title found on the server by a search (remembered, misses too, for a day). */
+        private suspend fun search(
             hook: SourceHook,
             main: com.wholphinplus.sources.core.ServerConnection,
             e: ListEntry,
@@ -422,6 +517,31 @@ class HomeCollections
             private const val MISS_RESET_KEY = "miss_reset_at"
             const val PENDING_NAME = "Loading list…"
             const val STALE_MS = 6 * 60 * 60 * 1000L
+
+            private const val WRITE_DELAY_MS = 2_000L
+
+            /** [lists] as a cloud profile carries them: without what this library matched. */
+            fun forSync(lists: List<HomeCollection>): List<HomeCollection> = lists.map { it.copy(itemIds = emptyList(), ranks = emptyList(), listSize = 0, refreshedAt = 0L, error = null) }
+
+            /**
+             * A profile's [incoming] lists over this TV's [local] ones: each keeps what this TV
+             * matched for it (by id, else the same link); the rest match at the next refresh.
+             */
+            fun restored(
+                local: List<HomeCollection>,
+                incoming: List<HomeCollection>,
+            ): List<HomeCollection> {
+                val byId = local.associateBy { it.id }
+                val byUrl = local.associateBy { it.url }
+                return incoming.map { r ->
+                    (byId[r.id]?.takeIf { it.url == r.url } ?: byUrl[r.url])
+                        ?.let { l -> r.copy(itemIds = l.itemIds, ranks = l.ranks, listSize = l.listSize, refreshedAt = l.refreshedAt, error = l.error) }
+                        ?: r
+                }
+            }
+
+            /** Titles of a list matched by search while there's no library index yet. */
+            private const val SEARCH_CAP = 120
 
             /** Fewest library titles an Orca+ chart row shows with ([MIN_TOP] for a numbered Top 10). */
             const val MIN_ROW = 5

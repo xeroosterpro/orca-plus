@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -22,11 +23,21 @@ class CloudException(
     val version: Int? = null,
 ) : Exception(error)
 
-/** The cloud's copy: its version, the wrap for the key, and the encrypted profile (null when empty). */
+/**
+ * The cloud's copy: its version, the wrap for the key, the encrypted profile (null when empty),
+ * and when a "forgot PIN" reset will delete it (0: none asked for).
+ */
 class CloudCopy(
     val version: Int,
     val wrap: String,
     val blob: ByteArray?,
+    val resetAt: Long = 0,
+)
+
+/** Whether the cloud has a profile for an account, and when a "forgot PIN" reset deletes it (0: none). */
+class CloudState(
+    val exists: Boolean,
+    val resetAt: Long,
 )
 
 /** A pairing for adding keys from a phone: show [qr] (or [url] and [code]), collect with [secret]. */
@@ -51,7 +62,23 @@ internal class CloudClient(
     private val json = Json { ignoreUnknownKeys = true }
     private val b64 = Base64.getEncoder()
 
-    fun exists(id: String): Boolean = (call("GET", id, null)["exists"] as? JsonPrimitive)?.content == "true"
+    fun state(id: String): CloudState {
+        val o = call("GET", id, null)
+        return CloudState((o["exists"] as? JsonPrimitive)?.content == "true", (o["resetAt"] as? JsonPrimitive)?.longOrNull ?: 0)
+    }
+
+    fun exists(id: String): Boolean = state(id).exists
+
+    /** "Forgot PIN": asks the cloud to delete the profile a day from now; when it will. Needs no PIN. */
+    fun requestReset(id: String): Long = (call("POST", "$id/reset", JsonObject(emptyMap()))["resetAt"] as? JsonPrimitive)?.longOrNull ?: error("The cloud left out resetAt")
+
+    /** Cancels a pending reset: only a TV that syncs (it has the keys) can. */
+    fun keep(
+        id: String,
+        auth: String,
+    ) {
+        call("POST", "$id/keep", buildJsonObject { put("auth", auth) })
+    }
 
     /** Claims [id] with this PIN's [auth]; the wrap for its first upload. */
     fun create(
@@ -68,6 +95,7 @@ internal class CloudClient(
             version = (o["version"] as? JsonPrimitive)?.intOrNull ?: 0,
             wrap = text(o, "wrap"),
             blob = (o["blob"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { Base64.getDecoder().decode(it) },
+            resetAt = (o["resetAt"] as? JsonPrimitive)?.longOrNull ?: 0,
         )
     }
 

@@ -277,10 +277,28 @@ index 8c2d84cb..f611df4d 100644
  
          /**
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
-index 06607cf9..3afb4d7f 100644
+index 06607cf9..17a196d9 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
-@@ -130,7 +130,11 @@ object AppModule {
+@@ -94,6 +94,8 @@ object AppModule {
+             .Builder()
+             .apply {
+                 // TODO user agent, timeouts, logging, etc
++                // Orca+: a page asks for ~20 rows at once; OkHttp's 5 per server queued them for seconds
++                dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 12 })
+             }.build()
+ 
+     @AuthOkHttpClient
+@@ -106,6 +108,8 @@ object AppModule {
+         deviceInfo: DeviceInfo,
+     ) = okHttpClient
+         .newBuilder()
++        // Orca+: images (Coil) queue on their own, so a screen of posters doesn't hold up the rows
++        .dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 8 })
+         .addInterceptor {
+             val request = it.request()
+             val newRequest =
+@@ -130,7 +134,11 @@ object AppModule {
      @Singleton
      fun okHttpFactory(
          @StandardOkHttpClient okHttpClient: OkHttpClient,
@@ -294,10 +312,23 @@ index 06607cf9..3afb4d7f 100644
      @Provides
      @Singleton
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
-index 0cf42622..490726a5 100644
+index 0cf42622..ea61be1a 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
-@@ -78,7 +78,10 @@ fun ApplicationContent(
+@@ -66,9 +66,12 @@ fun ApplicationContent(
+             viewModel = viewModel,
+         )
+         val navDrawerListState = rememberLazyListState()
++        val cinemaMotion = com.wholphinplus.sources.cinema.cinemaModeOn() // Orca+
+         NavDisplay(
+             backStack = navigationManager.backStack,
+             onBack = { navigationManager.goBack() },
++            transitionSpec = { if (cinemaMotion) com.wholphinplus.sources.cinema.CinemaNavMotion.push() else com.wholphinplus.sources.cinema.CinemaNavMotion.classic() }, // Orca+
++            popTransitionSpec = { if (cinemaMotion) com.wholphinplus.sources.cinema.CinemaNavMotion.pop() else com.wholphinplus.sources.cinema.CinemaNavMotion.classic() }, // Orca+
+             entryDecorators =
+                 listOf(
+                     rememberSaveableStateHolderNavEntryDecorator(),
+@@ -78,7 +81,10 @@ fun ApplicationContent(
                  key as Destination
                  val contentKey = "${key}_${server?.id}_${user?.id}"
                  NavEntry(key, contentKey = contentKey) {

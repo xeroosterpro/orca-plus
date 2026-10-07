@@ -66,6 +66,7 @@ import com.wholphinplus.sources.core.EmbyConnectServer
 import com.wholphinplus.sources.core.ServerConnection
 import com.wholphinplus.sources.core.ServerKind
 import com.wholphinplus.sources.cinema.CinemaEase
+import com.wholphinplus.sources.cinema.CinemaFade
 import com.wholphinplus.sources.cinema.CinemaRepository
 import com.wholphinplus.sources.cinema.Ink
 import com.wholphinplus.sources.cinema.InkDim
@@ -114,7 +115,7 @@ fun WelcomeServerFlow(
         WelcomeBackdrop(emptyList())
         AnimatedContent(
             targetState = intro,
-            transitionSpec = { (fadeIn(tween(700, delayMillis = 200)) + slideInHorizontally(tween(700, easing = CinemaEase)) { it / 8 }) togetherWith fadeOut(tween(400)) },
+            transitionSpec = { (fadeIn(tween(700, delayMillis = 200, easing = CinemaFade)) + slideInHorizontally(tween(700, easing = CinemaEase)) { it / 8 }) togetherWith fadeOut(tween(400, easing = CinemaFade)) },
             label = "welcome",
         ) { showIntro ->
             if (showIntro) {
@@ -143,7 +144,8 @@ private fun Intro(onStart: (returning: Boolean) -> Unit) {
             }
         }
         delay(letters.length * 110L + 250)
-        launch { plus.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.45f, stiffness = 260f)) }
+        // The one bounce in the app: the logo's plus lands with a small overshoot (a brand moment, once)
+        launch { plus.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 260f)) }
         delay(450)
         rest.animateTo(1f, tween(800, easing = CinemaEase))
         runCatching { start.requestFocus() }
@@ -397,12 +399,14 @@ private fun UserChip(
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
+    val f = com.wholphinplus.sources.cinema.rememberFocusFade(if (selected) Color(0x33FFFFFF) else Color.White.copy(alpha = 0f), Ink, Ink, Stage)
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(16.dp)),
-        colors = ClickableSurfaceDefaults.colors(containerColor = if (selected) Color(0x33FFFFFF) else Color.Transparent, contentColor = Ink, focusedContainerColor = Ink, focusedContentColor = Stage),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
-        modifier = modifier.tapClick(onClick),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
+        modifier = with(com.wholphinplus.sources.cinema.TapHelper) { modifier.tapClick(onClick).glideFocus(1.06f) },
     ) {
         Column(Modifier.padding(10.dp).width(76.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Box(Modifier.size(56.dp).clip(CircleShape).background(Brush.linearGradient(listOf(Violet, Rose))), contentAlignment = Alignment.Center) {
@@ -493,7 +497,7 @@ fun WelcomeFinish(
         androidx.compose.runtime.CompositionLocalProvider(LocalTourStops provides stops) {
             AnimatedContent(
                 targetState = step,
-                transitionSpec = { fadeIn(tween(500, delayMillis = 120, easing = CinemaEase)) togetherWith fadeOut(tween(250)) },
+                transitionSpec = { fadeIn(tween(500, delayMillis = 120, easing = CinemaEase)) togetherWith fadeOut(tween(250, easing = CinemaFade)) },
                 label = "finish",
             ) { s ->
                 when (s) {
@@ -941,17 +945,18 @@ private fun LookCard(
     onClick: () -> Unit,
     preview: @Composable () -> Unit,
 ) {
+    val f = com.wholphinplus.sources.cinema.rememberFocusFade(Glass, Color(0x33FFFFFF), Ink, Ink)
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(20.dp)),
-        colors = ClickableSurfaceDefaults.colors(containerColor = Glass, contentColor = Ink, focusedContainerColor = Color(0x33FFFFFF), focusedContentColor = Ink),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
         border =
             ClickableSurfaceDefaults.border(
                 border = androidx.tv.material3.Border(androidx.compose.foundation.BorderStroke(1.dp, GlassLine), shape = RoundedCornerShape(20.dp)),
-                focusedBorder = androidx.tv.material3.Border(androidx.compose.foundation.BorderStroke(3.dp, Ink), shape = RoundedCornerShape(20.dp)),
             ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.03f),
-        modifier = modifier.onFocusChanged { if (it.isFocused) onFocus() }.tapClick(onClick),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
+        modifier = modifier.onFocusChanged { if (it.isFocused) onFocus() }.tapClick(onClick).then(com.wholphinplus.sources.cinema.glideEdge(1.03f, 20.dp)),
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(12.dp)).background(Stage)) { preview() }

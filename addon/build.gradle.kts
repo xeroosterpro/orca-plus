@@ -15,6 +15,7 @@ android {
     }
     defaultConfig {
         minSdk = libs.versions.minSdk.getInt()
+        consumerProguardFiles("consumer-rules.pro")
         // -PwholphinPlusPublic=true: the shared build (text badges, in-app updates from
         // -PwholphinPlusRepo=owner/name). Default: the personal build.
         val public = providers.gradleProperty("wholphinPlusPublic").orNull == "true"

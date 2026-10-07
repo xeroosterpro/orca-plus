@@ -43,6 +43,15 @@ import kotlinx.coroutines.delay
 fun SourcePickerOverlay(session: PickSession) {
     val ui by session.ui.collectAsState()
     val current = ui ?: return
+    // Cinema mode: the picker in Cinema's look (classic Wholphin keeps the Material dialog)
+    if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
+        com.wholphinplus.sources.cinema.CinemaSourcePicker(current) { row, best, modifier ->
+            com.wholphinplus.sources.cinema.CinemaSourceRow(best, row.serverLabel, row.compatible, onClick = { current.onSelect(row) }, modifier = modifier) {
+                BadgeRow(badges = badgesFor(row), trailing = listOf(row.size, row.container), inverted = false)
+            }
+        }
+        return
+    }
     val firstRow = remember(current.title) { FocusRequester() }
     LaunchedEffect(current.title, current.searching) {
         // Wait a frame for the list to lay out, then focus the best row (always the first).

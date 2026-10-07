@@ -108,7 +108,8 @@ fun CinemaDetails(
     val hook = remember { entry.sourceHook() }
     val art = remember { entry.cinemaArt() }
     val search = remember { entry.searchService() }
-    val repo = remember { CinemaRepository(hook, hook.collections) }
+    // With TMDB: episode stills when the server's pictures are missing
+    val repo = remember { CinemaRepository(hook, hook.collections, search.tmdb) }
     val overlays by hook.store.overlays.collectAsState()
     val ratingPrefs by hook.store.ratingPrefs.collectAsState()
     val ratings = remember { entry.ratings() }
@@ -203,6 +204,8 @@ private fun DetailsScreen(
     onOpen: (UUID, BaseItemKind) -> Unit,
 ) {
     val item = d.item
+    // The source picker stands on this title's picture when Play is pressed here
+    LaunchedEffect(item.key) { StageArt.set(item) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val focus = remember { DetailsFocus() }
@@ -220,9 +223,6 @@ private fun DetailsScreen(
     val pageSpec =
         remember(rowSpec, list) {
             object : BringIntoViewSpec {
-                @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-                override val scrollAnimationSpec = rowSpec.scrollAnimationSpec
-
                 override fun calculateScrollDistance(
                     offset: Float,
                     size: Float,
@@ -253,7 +253,7 @@ private fun DetailsScreen(
         // screen edge
         val heroAlpha = animateFloatAsState(if (focus.hero) 1f else 0f, tween(320, easing = CinemaEase), label = "heroAlpha")
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = dim }.background(Stage))
-        CompositionLocalProvider(LocalBringIntoViewSpec provides pageSpec) {
+        CompositionLocalProvider(LocalBringIntoViewSpec provides pageSpec.gliding(list)) {
             LazyColumn(
                 state = list,
                 contentPadding = PaddingValues(bottom = 80.dp),
@@ -346,8 +346,10 @@ private fun DetailsScreen(
                                 .onFocusChanged { if (it.hasFocus) focus.hero = false },
                         ) {
                             SectionTitle("More Like This")
-                            CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
+                            val similarRow = rememberLazyListState()
+                            CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec.gliding(similarRow)) {
                                 LazyRow(
+                                    state = similarRow,
                                     contentPadding = PaddingValues(horizontal = 58.dp, vertical = 12.dp),
                                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                                 ) {
@@ -518,7 +520,7 @@ private fun Episodes(
     LaunchedEffect(selected) {
         // An empty answer is usually a failed request: not kept, so the season asks again next time
         suspend fun load(id: UUID) {
-            if (id !in loaded) repo.episodes(seriesId, id).takeIf { it.isNotEmpty() }?.let { loaded[id] = it }
+            if (id !in loaded) repo.episodes(seriesId, id, d.item.tmdbId, d.seasons.firstOrNull { it.id == id }?.number).takeIf { it.isNotEmpty() }?.let { loaded[id] = it }
         }
         load(d.seasons[selected].id)
         // Warm the neighbour so the next tab is instant
@@ -548,7 +550,7 @@ private fun Episodes(
         val season = d.seasons[selected]
         AnimatedContent(
             targetState = season.id,
-            transitionSpec = { fadeIn(tween(260, easing = CinemaEase)) togetherWith fadeOut(tween(160)) },
+            transitionSpec = { fadeIn(tween(260, easing = CinemaEase)) togetherWith fadeOut(tween(220, easing = CinemaFade)) },
             label = "season",
         ) { id ->
             val eps = loaded[id]
@@ -567,6 +569,7 @@ private fun Episodes(
                     itemsIndexed(eps, key = { _, e -> e.id }) { i, e ->
                         EpisodeCard(
                             e,
+                            fallback = d.item.backdropUrl,
                             modifier =
                                 Modifier
                                     .then(if (i == current) Modifier.focusRequester(currentEp) else Modifier)
@@ -588,18 +591,14 @@ private fun SeasonTab(
     onFocused: () -> Unit,
 ) {
     val shape = RoundedCornerShape(50)
+    val f = rememberFocusFade(if (selected) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0f), Ink, if (selected) Ink else InkDim, Stage)
     Surface(
         onClick = onFocused,
         shape = ClickableSurfaceDefaults.shape(shape),
-        colors =
-            ClickableSurfaceDefaults.colors(
-                containerColor = if (selected) Color.White.copy(alpha = 0.16f) else Color.Transparent,
-                contentColor = if (selected) Ink else InkDim,
-                focusedContainerColor = Ink,
-                focusedContentColor = Stage,
-            ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.05f),
-        modifier = modifier.onFocusChanged { if (it.isFocused) onFocused() }.tapToClick(onFocused),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
+        modifier = modifier.glideLift(scale = 1.05f, edge = false, onFocused = onFocused).tapToClick(onFocused),
     ) {
         Text(name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp))
     }
@@ -608,6 +607,7 @@ private fun SeasonTab(
 @Composable
 private fun EpisodeCard(
     e: CinemaEpisode,
+    fallback: String?,
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
@@ -617,13 +617,25 @@ private fun EpisodeCard(
         Card(
             onClick = onClick,
             shape = CardDefaults.shape(shape),
-            border = CardDefaults.border(focusedBorder = Border(BorderStroke(3.dp, Ink), shape = shape)),
-            scale = CardDefaults.scale(focusedScale = 1.05f),
+            border = CardDefaults.border(focusedBorder = Border.None),
+            scale = CardDefaults.scale(focusedScale = 1f),
             colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
-            modifier = modifier.fillMaxWidth().aspectRatio(16f / 9f).tapToClick(onClick),
+            modifier = modifier.fillMaxWidth().aspectRatio(16f / 9f).glideLift(scale = 1.05f).tapToClick(onClick),
         ) {
             Box(Modifier.fillMaxSize()) {
-                e.stillUrl?.let { AsyncImage(model = request(context, it, 600, 338), contentDescription = e.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                // The server's picture, else TMDB's still, else the show's backdrop: the next is
+                // tried when one fails (some servers list a picture they don't have)
+                val pictures = remember(e.id) { listOfNotNull(e.stillUrl, e.tmdbStill, fallback).distinct() }
+                var tried by remember(e.id) { mutableIntStateOf(0) }
+                pictures.getOrNull(tried)?.let { url ->
+                    AsyncImage(
+                        model = request(context, url, 600, 338),
+                        contentDescription = e.title,
+                        contentScale = ContentScale.Crop,
+                        onError = { tried++ },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.6f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.6f))))
                 if (e.played) {
                     Text("Watched", color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(3.dp)).padding(horizontal = 6.dp, vertical = 2.dp))

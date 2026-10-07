@@ -61,6 +61,13 @@ class SearchService
 
         suspend fun availability(item: TmdbItem): Availability {
             libraryCache[item.key]?.let { return it }
+            // In the library index: known at once. Not there: a search confirms (the index can be
+            // a day behind a title added today)
+            hook.collections.indexFor(hook)?.let { idx ->
+                (if (item.type == TmdbType.TV) idx.series else idx.movies).find(item.id, null)
+                    ?.let { id -> runCatching { UUID.fromString(dashed(id)) }.getOrNull() }
+                    ?.let { uuid -> return Availability.Library(uuid, item.type == TmdbType.TV).also { libraryCache[item.key] = it } }
+            }
             // Only a real answer is remembered: after a failed lookup (network blip) the title
             // is asked about again next time instead of staying "elsewhere" until a restart
             var answered = false

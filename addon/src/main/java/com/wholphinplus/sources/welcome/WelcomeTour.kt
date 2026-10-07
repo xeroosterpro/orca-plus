@@ -157,7 +157,7 @@ internal fun PagesStep(
         val libs = repo.libraries()
         val names = hook.collections.lists.value.associate { it.id to it.name }
         pages =
-            RowsPage.entries.map { page ->
+            RowsPage.entries.filter { it != RowsPage.KIDS || hook.store.kidsTab.value }.map { page ->
                 page to
                     repo.layoutFor(page, libs).rows.filter { it.on }.map { spec ->
                         when (spec.type) {

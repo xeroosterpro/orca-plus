@@ -51,6 +51,8 @@ class ProfileSync
             val busy: Boolean = false,
             val lastSync: Long = 0,
             val problem: String? = null,
+            /** Someone asked to reset the cloud setup ("forgot PIN"); it's deleted then unless kept (0: no). */
+            val resetAt: Long = 0,
         )
 
         @Volatile var appSettings: AppSettings? = null
@@ -67,8 +69,27 @@ class ProfileSync
         // ------------------------------------------------------------ turning it on and off
 
         /** Whether the cloud has a profile for the signed-in user (null: can't tell right now). */
-        suspend fun cloudHasProfile(hook: SourceHook): Boolean? =
-            withContext(Dispatchers.IO) { runCatching { client.exists(identity(hook)) }.onFailure { Timber.w(it, "Cloud check failed") }.getOrNull() }
+        suspend fun cloudHasProfile(hook: SourceHook): Boolean? = cloudState(hook)?.exists
+
+        /** The cloud's profile for the signed-in user and any pending reset (null: can't tell right now). */
+        suspend fun cloudState(hook: SourceHook): CloudState? =
+            withContext(Dispatchers.IO) { runCatching { client.state(identity(hook)) }.onFailure { Timber.w(it, "Cloud check failed") }.getOrNull() }
+
+        /**
+         * "Forgot PIN": the cloud deletes this account's profile a day from now, unless a TV that
+         * still syncs keeps it. After that a new PIN starts a fresh one. When the reset happens.
+         */
+        suspend fun forgotPin(hook: SourceHook): Long = withContext(Dispatchers.IO) { client.requestReset(identity(hook)) }
+
+        /** Keeps the cloud setup: cancels a pending "forgot PIN" reset, from a TV that syncs. */
+        suspend fun keepSetup(hook: SourceHook) =
+            withContext(Dispatchers.IO) {
+                mutex.withLock {
+                    val (id, seed) = keys(hook) ?: error("Cloud sync isn't on")
+                    client.keep(id, ProfileCrypto.auth(seed))
+                    _status.update { it.copy(resetAt = 0) }
+                }
+            }
 
         /**
          * Turns sync on with [pin]. With a profile already in the cloud this TV joins it and takes
@@ -110,6 +131,11 @@ class ProfileSync
         suspend fun pairStart(): PairStart = withContext(Dispatchers.IO) { client.pairStart() }
 
         suspend fun pairCollect(p: PairStart): Map<String, String>? = withContext(Dispatchers.IO) { client.pairCollect(p) }
+
+        /** The pending reset this TV was already asked about (its time), so it asks once. */
+        var resetSeen: Long
+            get() = prefs.getLong(RESET_SEEN, 0)
+            set(v) = prefs.edit().putLong(RESET_SEEN, v).apply()
 
         /** Whether this TV already offered cloud sync (welcome or the one-time prompt). */
         val prompted: Boolean get() = prefs.getBoolean(PROMPTED, false)
@@ -196,6 +222,8 @@ class ProfileSync
             val auth = ProfileCrypto.auth(seed)
             repeat(3) {
                 val copy = client.open(id, auth)
+                // A "forgot PIN" reset asked for elsewhere: this TV shows it and can keep the setup
+                _status.update { it.copy(resetAt = copy.resetAt) }
                 val result = merged(hook, copy, seed, joining)
                 val remote = copy.blob?.let { decode(ProfileCrypto.open(it, seed, copy.wrap)) }
                 val version =
@@ -210,7 +238,7 @@ class ProfileSync
                         }
                     }
                 remember(id, seed, version, ProfileMerge.hashes(localProfile()))
-                _status.update { it.copy(on = true, lastSync = System.currentTimeMillis(), problem = null) }
+                _status.update { it.copy(on = true, lastSync = System.currentTimeMillis(), problem = null, resetAt = copy.resetAt) }
                 prefs.edit().putLong(LAST, System.currentTimeMillis()).apply()
                 Timber.i("Cloud sync: version %d", version)
                 return
@@ -299,6 +327,7 @@ class ProfileSync
             const val ENDPOINT = "https://orca-cloud-production.up.railway.app"
 
             private const val ID = "profile_id"
+            private const val RESET_SEEN = "reset_seen"
             private const val SEED = "seed"
             private const val VERSION = "version"
             private const val HASHES = "hashes"

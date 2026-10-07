@@ -300,15 +300,17 @@ fun CinemaSearch(
                 }
                 AnimatedContent(
                     targetState = sections,
-                    transitionSpec = { fadeIn(tween(280, delayMillis = 60, easing = CinemaEase)) togetherWith fadeOut(tween(140)) },
+                    transitionSpec = { fadeIn(tween(280, delayMillis = 60, easing = CinemaEase)) togetherWith fadeOut(tween(220, easing = CinemaFade)) },
                     contentKey = { list -> list.map { (label, items) -> label to items.map { it.key } } },
                     label = "results",
                 ) { groups ->
                     val density = LocalDensity.current
                     // Room above the focused row for its group's label (Movies, TV Shows)
                     val spec = remember(density) { pivot(with(density) { 52.dp.toPx() }) }
-                    CompositionLocalProvider(LocalBringIntoViewSpec provides spec, LocalArt provides art, LocalOverlays provides overlays, LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) {
+                    val grid = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides spec.gliding(grid), LocalArt provides art, LocalOverlays provides overlays, LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) {
                         LazyVerticalGrid(
+                            state = grid,
                             columns = GridCells.Fixed(3),
                             contentPadding = PaddingValues(top = 10.dp, end = 48.dp, bottom = 80.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -399,18 +401,14 @@ private fun MicButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val f = rememberFocusFade(Color.White.copy(alpha = 0.12f), Ink, Ink, Stage)
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(CircleShape),
-        colors =
-            ClickableSurfaceDefaults.colors(
-                containerColor = Color.White.copy(alpha = 0.12f),
-                contentColor = Ink,
-                focusedContainerColor = Ink,
-                focusedContentColor = Stage,
-            ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.08f),
-        modifier = modifier.size(44.dp).tapToClick(onClick),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
+        modifier = modifier.size(44.dp).glideLift(scale = 1.08f, edge = false).tapToClick(onClick),
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Icon(MicIcon, contentDescription = "Search by voice", modifier = Modifier.size(24.dp))
@@ -491,19 +489,15 @@ private fun Key(
     onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
+    val f = rememberFocusFade(Color.White.copy(alpha = 0f), Ink, Ink, Stage, quick = true)
     Surface(
         onClick = onClick,
         onLongClick = onLongClick,
         modifier = modifier.width(width).height(40.dp).tapToClick(onClick),
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(4.dp)),
-        colors =
-            ClickableSurfaceDefaults.colors(
-                containerColor = Color.Transparent,
-                contentColor = Ink,
-                focusedContainerColor = Ink,
-                focusedContentColor = Stage,
-            ),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (icon != null) {
@@ -520,11 +514,13 @@ private fun Suggestion(
     text: String,
     onClick: () -> Unit,
 ) {
+    val f = rememberFocusFade(Color.White.copy(alpha = 0f), Ink, InkDim, Stage, quick = true)
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(4.dp)),
-        colors = ClickableSurfaceDefaults.colors(containerColor = Color.Transparent, contentColor = InkDim, focusedContainerColor = Ink, focusedContentColor = Stage),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        interactionSource = f.source,
         modifier = Modifier.fillMaxWidth().tapToClick(onClick),
     ) {
         Text(text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))

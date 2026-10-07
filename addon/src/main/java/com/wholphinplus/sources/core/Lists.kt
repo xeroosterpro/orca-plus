@@ -105,12 +105,15 @@ class ListClient(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
+    // A null where a value has a default (a chart without a kind) takes the default
+    private val chartsJson = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+
     fun fetch(source: ListSource): FetchedList =
         when (source) {
             is ListSource.MdbList -> mdblist(source)
             is ListSource.Trakt -> trakt(source)
             is ListSource.TopStreaming -> topStreaming(source)
-            is ListSource.OrcaChart -> FetchedList(source.id, chartsFrom(source.base).firstOrNull { it.id == source.id }?.entries ?: error("The Orca+ cloud no longer has this chart"))
+            is ListSource.OrcaChart -> FetchedList(source.id, chartsFrom(source.base, entries = true).firstOrNull { it.id == source.id }?.entries ?: error("The Orca+ cloud no longer has this chart"))
         }
 
     /** An Orca+ chart, as the cloud serves it. */
@@ -129,6 +132,20 @@ class ListClient(
 
     @Volatile private var chartsCache: Pair<Long, List<Chart>>? = null
 
+    /** The cached charts were trimmed to their names and pages ([trimCharts]). */
+    @Volatile private var chartsTrimmed = false
+
+    /**
+     * Keeps the cached charts' names and pages but lets their titles go (~60k entries, ~10 MB):
+     * after a refresh only the names and pages are asked for until the next one, which reads the
+     * file again for the titles.
+     */
+    fun trimCharts() {
+        val (at, charts) = chartsCache ?: return
+        chartsCache = at to charts.map { Chart(it.id, it.url, it.name, it.kind, it.pages, it.order, it.source, emptyList(), it.hidden) }
+        chartsTrimmed = true
+    }
+
     /** The Orca+ cloud's charts (remembered for half an hour, so one refresh asks once). */
     fun charts(): List<Chart> = chartsFrom(com.wholphinplus.sources.sync.ProfileSync.ENDPOINT)
 
@@ -141,39 +158,46 @@ class ListClient(
     @Volatile private var pagesCache: CloudPages? = null
 
     @Synchronized
-    private fun chartsFrom(base: String): List<Chart> {
-        chartsCache?.takeIf { System.currentTimeMillis() - it.first < 30 * 60 * 1000 }?.let { return it.second }
+    private fun chartsFrom(
+        base: String,
+        entries: Boolean = false,
+    ): List<Chart> {
+        chartsCache?.takeIf { System.currentTimeMillis() - it.first < 30 * 60 * 1000 && !(entries && chartsTrimmed) }?.let { return it.second }
         // The TV's country picks the rows that depend on it (services, new releases, Top 10s)
         val region = java.util.Locale.getDefault().country.uppercase(java.util.Locale.US).ifBlank { "US" }
-        val raw = get("$base/v1/charts?region=$region", emptyMap())
-        val o = json.parseToJsonElement(raw) as? JsonObject ?: error("The Orca+ cloud didn't answer")
-        pagesCache = runCatching { json.decodeFromString(CloudPages.serializer(), raw) }.getOrElse { CloudPages() }
+        // size=full: the whole rows (up to 1,000 titles). This app matches them through its library
+        // index; older apps get them cut to the sizes they can search their way through
+        val raw = get("$base/v1/charts?region=$region&size=full", emptyMap())
+        // Straight into small typed objects: the file is ~4 MB with 60k titles, and a generic JSON
+        // tree of it is tens of MB of short-lived objects (garbage collection stalls on the Shield)
+        val file = runCatching { chartsJson.decodeFromString(ChartsFile.serializer(), raw) }.getOrElse { error("The Orca+ cloud's charts couldn't be read: ${it.message}") }
+        pagesCache = CloudPages(file.pages, file.tiles)
         val charts =
-            (o["charts"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().mapNotNull { c ->
-                val id = c.string("id").ifBlank { return@mapNotNull null }
+            file.charts.filter { it.id.isNotBlank() }.map { c ->
                 Chart(
-                    id = id,
-                    url = "$base/v1/charts#$id",
-                    name = c.string("name"),
-                    kind = c.string("kind").ifBlank { null },
-                    pages = (c["pages"] as? JsonArray).orEmpty().mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content },
-                    order = (c["order"] as? JsonObject).orEmpty().mapNotNull { (k, v) -> (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()?.let { k to it } }.toMap(),
-                    source = c.string("source"),
-                    hidden = (c["hidden"] as? kotlinx.serialization.json.JsonPrimitive)?.content == "true",
+                    id = c.id,
+                    url = "$base/v1/charts#${c.id}",
+                    name = c.name,
+                    kind = c.kind?.ifBlank { null },
+                    pages = c.pages,
+                    order = c.order,
+                    source = c.source,
+                    hidden = c.hidden,
                     entries =
-                        (c["items"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().mapNotNull { i ->
+                        c.items.mapNotNull { i ->
                             ListEntry(
-                                type = if (i.string("t") == "series") TmdbType.TV else TmdbType.MOVIE,
-                                title = i.string("title").ifBlank { return@mapNotNull null },
-                                year = i.int("year"),
-                                tmdbId = i.int("tmdb"),
-                                imdbId = i.string("imdb").ifBlank { null },
+                                type = if (i.t == "series") TmdbType.TV else TmdbType.MOVIE,
+                                title = i.title.ifBlank { return@mapNotNull null },
+                                year = i.year,
+                                tmdbId = i.tmdb,
+                                imdbId = i.imdb?.ifBlank { null },
                                 tvdbId = null,
                             )
                         },
                 )
             }
         chartsCache = System.currentTimeMillis() to charts
+        chartsTrimmed = false
         return charts
     }
 
@@ -337,4 +361,33 @@ data class CloudPage(
 data class CloudPages(
     val pages: List<CloudPage> = emptyList(),
     val tiles: Map<String, Map<String, Int>> = emptyMap(),
+)
+
+/** The cloud's chart file, as much of it as the app reads. */
+@kotlinx.serialization.Serializable
+private class ChartsFile(
+    val charts: List<ChartJson> = emptyList(),
+    val pages: List<CloudPage> = emptyList(),
+    val tiles: Map<String, Map<String, Int>> = emptyMap(),
+)
+
+@kotlinx.serialization.Serializable
+private class ChartJson(
+    val id: String = "",
+    val name: String = "",
+    val kind: String? = null,
+    val pages: List<String> = emptyList(),
+    val order: Map<String, Int> = emptyMap(),
+    val source: String = "",
+    val hidden: Boolean = false,
+    val items: List<ItemJson> = emptyList(),
+)
+
+@kotlinx.serialization.Serializable
+private class ItemJson(
+    val t: String = "",
+    val title: String = "",
+    val year: Int? = null,
+    val tmdb: Int? = null,
+    val imdb: String? = null,
 )

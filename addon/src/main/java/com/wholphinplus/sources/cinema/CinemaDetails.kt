@@ -397,7 +397,7 @@ private fun Hero(
             Spacer(Modifier.height(8.dp))
             if (logo != null) {
                 AsyncImage(
-                    model = logo,
+                    model = rememberPlain(logo),
                     contentDescription = item.title,
                     contentScale = ContentScale.Fit,
                     alignment = Alignment.BottomStart,

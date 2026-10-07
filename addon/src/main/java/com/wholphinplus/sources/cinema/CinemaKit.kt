@@ -68,6 +68,7 @@ import coil3.SingletonImageLoader
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
+import coil3.request.allowHardware
 import com.wholphinplus.sources.core.TitleArt
 
 // Palette shared by every Cinema screen: true black stage, off-white type, red only for labels
@@ -458,13 +459,17 @@ internal suspend fun preloadBackdrop(
 /** A picture that loads this fast came from memory: it can be shown without a fade. */
 private const val INSTANT_MS = 120L
 
-/** Fixed-size requests so a preloaded image is a memory-cache hit when it's shown. */
+/**
+ * Fixed-size requests so a preloaded image is a memory-cache hit when it's shown. Plain bitmaps
+ * (see rememberCardPicture): the billboard fetches the next backdrop as soon as focus moves, and
+ * as a hardware bitmap its upload landed mid-glide and held the frame 50-200 ms.
+ */
 internal fun request(
     context: android.content.Context,
     url: String,
     width: Int = 1280,
     height: Int = 720,
-) = ImageRequest.Builder(context).data(url).size(width, height).build()
+) = ImageRequest.Builder(context).data(url).size(width, height).allowHardware(false).build()
 
 @Composable
 internal fun Wordmark(

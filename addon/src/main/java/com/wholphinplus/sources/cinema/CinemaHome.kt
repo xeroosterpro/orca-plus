@@ -1073,7 +1073,7 @@ private fun InfoPanel(
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
                             if (l != null) {
                                 AsyncImage(
-                                    model = l,
+                                    model = rememberPlain(l),
                                     contentDescription = shownItem.title,
                                     contentScale = ContentScale.Fit,
                                     alignment = Alignment.BottomStart,

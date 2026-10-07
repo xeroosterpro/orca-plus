@@ -9,6 +9,8 @@ import coil3.decode.DataSource
 import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
+import coil3.request.allowHardware
+import coil3.request.crossfade
 import timber.log.Timber
 import java.util.Collections
 import java.util.WeakHashMap
@@ -154,11 +156,20 @@ internal fun rememberCardPicture(
             .data(PosterSize.fit(url))
             .size(width, height)
             .listener(PosterSize.timing)
+            // Plain bitmaps: a hardware one is allocated and uploaded on a second GL context per
+            // picture, and while posters land the frame on screen waited 50-150 ms for the GPU
+            .allowHardware(false)
+            // Fades in when it arrives mid-glide instead of popping; one already in memory
+            // (scrolling back) shows at once, Coil skips the fade for those
+            .crossfade(CARD_FADE_MS)
             // A retry must differ from the failed request, or the image won't ask again
             .apply { if (attempt > 0) memoryCacheKeyExtra("try", attempt.toString()) }
             .build()
     }
 }
+
+/** A card picture's (and its logo's) fade in, when it wasn't in memory already. */
+internal const val CARD_FADE_MS = 300
 
 /** Pauses before each new try of a card picture that failed. */
 private val RETRY_AFTER_MS = longArrayOf(1_500, 4_000, 10_000)

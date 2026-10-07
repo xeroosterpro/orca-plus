@@ -31,6 +31,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
+import coil3.request.allowHardware
+import coil3.request.crossfade
 import coil3.request.transformations
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
@@ -532,6 +534,22 @@ internal object WhiteWordmark : coil3.transform.Transformation() {
 }
 
 /**
+ * A picture link as a plain-bitmap request (see rememberCardPicture): logos arrive while rows
+ * glide, and a hardware bitmap's upload held the frame on screen.
+ */
+@Composable
+internal fun rememberPlain(
+    model: Any?,
+    /** Fade in over this long when it wasn't in memory (0: appear at once). */
+    fade: Int = 0,
+): Any? {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    return androidx.compose.runtime.remember(model) {
+        if (model is String) coil3.request.ImageRequest.Builder(context).data(model).allowHardware(false).crossfade(fade).build() else model
+    }
+}
+
+/**
  * A logo drawn as large as fits [height] x [maxWidth] for its shape. Sized from the image once
  * it's loaded (a wrapping image stays at its pixel size, small on a TV).
  */
@@ -547,7 +565,7 @@ internal fun FittedLogo(
 ) {
     var ratio by androidx.compose.runtime.remember(model) { androidx.compose.runtime.mutableStateOf<Float?>(null) }
     coil3.compose.AsyncImage(
-        model = model,
+        model = rememberPlain(model, CARD_FADE_MS),
         contentDescription = null,
         contentScale = androidx.compose.ui.layout.ContentScale.Fit,
         alignment = alignment,

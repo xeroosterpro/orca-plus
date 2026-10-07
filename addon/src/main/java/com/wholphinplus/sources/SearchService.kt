@@ -47,7 +47,7 @@ class SearchService
             TmdbClient(
                 http = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).build(),
                 apiKey = { hook.store.tmdbKey.value },
-                proxy = com.wholphinplus.sources.sync.ProfileSync.ENDPOINT + "/v1/tmdb",
+                proxy = com.wholphinplus.sources.sync.ProfileSync.ENDPOINT.takeIf { it.isNotBlank() }?.let { "$it/v1/tmdb" },
             )
 
         val enabled: Boolean get() = tmdb.available

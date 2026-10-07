@@ -323,8 +323,15 @@ class ProfileSync
         private fun decode(b: ByteArray) = ProfileMerge.json.decodeFromString<Profile>(String(b))
 
         companion object {
-            /** The Orca+ cloud (cloud/ in the repo, hosted on Railway). */
-            const val ENDPOINT = "https://orca-cloud-production.up.railway.app"
+            /**
+             * The Orca+ cloud, given to the build (-PorcaCloudUrl; the official release sets it
+             * from a repository secret, personal builds from .cloud-url). Not in the source, so a
+             * build from it has no cloud: sync, phone pairing, charts and the TMDB proxy stay off.
+             */
+            val ENDPOINT: String = com.wholphinplus.sources.BuildConfig.CLOUD_URL.trimEnd('/')
+
+            /** Whether this build has a cloud at all (see [ENDPOINT]). */
+            val AVAILABLE: Boolean get() = ENDPOINT.isNotBlank()
 
             private const val ID = "profile_id"
             private const val RESET_SEEN = "reset_seen"

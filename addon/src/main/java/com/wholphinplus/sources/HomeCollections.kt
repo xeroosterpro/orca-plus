@@ -160,7 +160,7 @@ class HomeCollections
         fun minFor(name: String): Int = if (com.wholphinplus.sources.cinema.CinemaRepository.isTopList(name)) MIN_TOP else MIN_ROW
 
         /** An Orca+ chart (the cloud's default rows: Trakt, TMDB, streaming Top 10s). */
-        fun isChart(c: HomeCollection): Boolean = c.url.startsWith(com.wholphinplus.sources.sync.ProfileSync.ENDPOINT + "/v1/charts#")
+        fun isChart(c: HomeCollection): Boolean = com.wholphinplus.sources.sync.ProfileSync.AVAILABLE && c.url.startsWith(com.wholphinplus.sources.sync.ProfileSync.ENDPOINT + "/v1/charts#")
 
         /** Bumped after a refresh changed any row, so the Cinema pages reload. */
         private val _changed = MutableStateFlow(0)

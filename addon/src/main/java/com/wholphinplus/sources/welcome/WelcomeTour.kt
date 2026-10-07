@@ -226,7 +226,17 @@ internal fun PowerUpsStep(
             )
             PillButton("Continue", modifier = Modifier.focusRequester(go), onClick = onNext)
         }
-        KeysFromPhone(hook, Modifier.weight(0.66f))
+        if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) {
+            KeysFromPhone(hook, Modifier.weight(0.66f))
+        } else {
+            // No cloud in this build, so no phone pairing: keys go in by hand later
+            androidx.tv.material3.Text(
+                "Add your keys any time in Settings → Home & Look → Your lists, and Settings → Servers & Search.",
+                color = com.wholphinplus.sources.cinema.InkDim,
+                fontSize = 18.sp,
+                modifier = Modifier.weight(0.66f),
+            )
+        }
     }
 }
 

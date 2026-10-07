@@ -193,7 +193,9 @@ private fun Intro(onStart: (returning: Boolean) -> Unit) {
             // Two doors: a guided setup, or bringing a saved setup back with the sync PIN
             Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                 ChoiceCard("I'm new to Orca+", "A quick tour sets up your server, look and pages", "+", Violet, modifier = Modifier.width(400.dp).focusRequester(start)) { onStart(false) }
-                ChoiceCard("I have an Orca+ account", "Sign in, enter your sync PIN, and it's all back", "↺", Rose, modifier = Modifier.width(400.dp)) { onStart(true) }
+                if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) {
+                    ChoiceCard("I have an Orca+ account", "Sign in, enter your sync PIN, and it's all back", "↺", Rose, modifier = Modifier.width(400.dp)) { onStart(true) }
+                }
             }
         }
     }

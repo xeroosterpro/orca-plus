@@ -210,12 +210,13 @@ fun OrcaTopicItems(
                 MenuItem(
                     "Cloud sync",
                     when {
+                        !com.wholphinplus.sources.sync.ProfileSync.AVAILABLE -> "Not available in this build"
                         !cloud.on -> "Off: keep your whole setup in the cloud and bring it to any TV"
                         cloud.problem != null -> "On  ·  ${cloud.problem}"
                         else -> "On  ·  synced ${ago(cloud.lastSync)}"
                     },
                     firstModifier,
-                ) { open = Screen.Cloud }
+                ) { if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) open = Screen.Cloud }
             }
             "ABOUT" -> {
                 var credits by remember { mutableStateOf(false) }
@@ -797,11 +798,12 @@ private fun MenuScreen(
             MenuItem(
                 "Cloud sync",
                 when {
+                    !com.wholphinplus.sources.sync.ProfileSync.AVAILABLE -> "Not available in this build"
                     !cloud.on -> "Off: keep your whole setup in the cloud and bring it to any TV"
                     cloud.problem != null -> "On  ·  ${cloud.problem}"
                     else -> "On  ·  synced ${ago(cloud.lastSync)}"
                 },
-            ) { go(Screen.Cloud) }
+            ) { if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) go(Screen.Cloud) }
         }
         item {
             Text(

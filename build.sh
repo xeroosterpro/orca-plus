@@ -60,6 +60,15 @@ $G commit -q -m "Wholphin+ addon" --no-verify
 for _ in $(seq 2 "$REV"); do $G commit -q --allow-empty -m "Wholphin+ addon revision" --no-verify; done
 
 GRADLE_ARGS=()
+# The Orca+ cloud's address: $ORCA_CLOUD_URL (the release workflow, from a repository secret), else
+# a local .cloud-url file. Never in the source; a build without it simply has no cloud features.
+CLOUD_URL=${ORCA_CLOUD_URL:-$(cat "$ROOT/.cloud-url" 2>/dev/null || true)}
+if [ -n "$CLOUD_URL" ]; then
+    GRADLE_ARGS+=("-PorcaCloudUrl=$CLOUD_URL")
+    echo "==> Cloud: on"
+else
+    echo "==> Cloud: off (no ORCA_CLOUD_URL or .cloud-url)"
+fi
 if [ "$PUBLIC" = 1 ]; then
     GRADLE_ARGS+=(-PwholphinPlusPublic=true "-PwholphinPlusRepo=$REPO")
 fi

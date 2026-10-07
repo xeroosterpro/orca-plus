@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -76,22 +77,26 @@ internal object StageArt {
 
 /**
  * Choosing a copy, in Cinema's look (owner, 2026-10-06: the picker "doesn't match the theme"):
- * the title's own picture, its logo, and the copies as rows that lift like cards. Fills the
- * screen at one size from the first moment, so servers answering never resize it; rows that
- * come in fade up, and the final ranking glides them into order.
+ * the title's own picture, its logo and facts, and the copies as rows that read left to right:
+ * the quality stamp, where it is and what's in it, its size. Fills the screen at one size from the
+ * first moment: servers still looking hold shimmering places, real rows fade up into them, and
+ * the final ranking glides them into order.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-internal fun CinemaSourcePicker(
-    ui: PickerUi,
-    row: @Composable (ExternalSource, Boolean, Modifier) -> Unit,
-) {
+internal fun CinemaSourcePicker(ui: PickerUi) {
     val art = remember(ui.itemId) { StageArt.forPick(ui.itemId, ui.seriesId) }
     val first = remember(ui.title) { FocusRequester() }
+    val list = rememberLazyListState()
     LaunchedEffect(ui.title, ui.searching) {
-        // A frame for the list to lay out, then the best copy (always the first)
-        delay(50)
-        runCatching { first.requestFocus() }
+        // The final ranking reorders the rows under the focused one, and a lazy list keeps that
+        // row where it was: the better copies ended up scrolled away above it. Back to the top,
+        // then the best copy (always the first) takes focus once it's laid out.
+        if (!ui.searching) list.scrollToItem(0)
+        for (attempt in 0 until 20) {
+            androidx.compose.runtime.withFrameNanos {}
+            if (runCatching { first.requestFocus() }.getOrDefault(false)) break
+        }
     }
     val enter = remember { Animatable(0f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, tween(480, easing = CinemaEase)) }
@@ -99,9 +104,9 @@ internal fun CinemaSourcePicker(
         Box(Modifier.fillMaxSize().background(Stage)) {
             StableBackdrop(art?.backdropUrl, drift = false)
             // Darker than a billboard: the rows sit over the picture
-            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Stage.copy(alpha = 0.92f), 0.55f to Stage.copy(alpha = 0.7f), 1f to Stage.copy(alpha = 0.25f))))
+            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Stage.copy(alpha = 0.94f), 0.5f to Stage.copy(alpha = 0.78f), 1f to Stage.copy(alpha = 0.2f))))
             Column(
-                Modifier.fillMaxHeight().width(860.dp).padding(start = 48.dp, top = 40.dp).graphicsLayer {
+                Modifier.fillMaxHeight().width(900.dp).padding(start = 48.dp, top = 40.dp).graphicsLayer {
                     alpha = enter.value
                     translationY = (1f - enter.value) * 20.dp.toPx()
                 },
@@ -114,32 +119,47 @@ internal fun CinemaSourcePicker(
                 }
                 val logo = rememberArt(art)?.logoUrl() ?: art?.logoUrl
                 if (logo != null) {
-                    AsyncImage(model = logo, contentDescription = ui.title, contentScale = ContentScale.Fit, alignment = Alignment.CenterStart, modifier = Modifier.height(64.dp).width(320.dp))
-                    Text(ui.title, color = InkDim, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    AsyncImage(model = logo, contentDescription = ui.title, contentScale = ContentScale.Fit, alignment = Alignment.CenterStart, modifier = Modifier.height(72.dp).width(340.dp))
                 } else {
                     Text(ui.title, color = Ink, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
+                // The title's facts (an episode says which), or just the name under a logo
+                val facts = art?.let { listOfNotNull(it.subtitle) + it.meta }.orEmpty()
+                Text(
+                    if (logo != null && facts.isEmpty()) ui.title else facts.joinToString("  ·  "),
+                    color = Ink.copy(alpha = 0.8f),
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 SearchLine(ui)
-                val list = rememberLazyListState()
                 val density = LocalDensity.current
                 val spec = remember(density) { pivot(with(density) { 24.dp.toPx() }) }
+                // Servers still looking hold a place each (a few at most)
+                val waiting = if (ui.searching) (ui.serversTotal - ui.serversDone).coerceIn(0, 3) else 0
                 CompositionLocalProvider(LocalBringIntoViewSpec provides spec.gliding(list)) {
                     LazyColumn(
                         state = list,
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         // Room for a lifted row's edge, and for the last rows to come up off the bottom
-                        contentPadding = PaddingValues(start = 8.dp, end = 24.dp, top = 12.dp, bottom = 160.dp),
-                        modifier = Modifier.fillMaxWidth().padding(start = 0.dp),
+                        contentPadding = PaddingValues(start = 8.dp, end = 24.dp, top = 14.dp, bottom = 160.dp),
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
+                        val arrive = tween<Float>(360, easing = CinemaEase)
+                        val glide = spring(dampingRatio = 1f, stiffness = 110f, visibilityThreshold = IntOffset.VisibilityThreshold)
+                        val leave = tween<Float>(200, easing = CinemaFade)
                         itemsIndexed(ui.rows, key = { _, r -> r.connectionId + r.url }) { index, r ->
-                            val best = index == 0 && !ui.searching && ui.rows.size > 1
-                            Box(
-                                Modifier.animateItem(
-                                    fadeInSpec = tween(360, easing = CinemaEase),
-                                    placementSpec = spring(dampingRatio = 1f, stiffness = 110f, visibilityThreshold = IntOffset.VisibilityThreshold),
-                                    fadeOutSpec = tween(200, easing = CinemaFade),
-                                ),
-                            ) { row(r, best, if (index == 0) Modifier.focusRequester(first) else Modifier) }
+                            Box(Modifier.animateItem(fadeInSpec = arrive, placementSpec = glide, fadeOutSpec = leave)) {
+                                CopyRow(
+                                    r,
+                                    best = index == 0 && !ui.searching && ui.rows.size > 1,
+                                    onClick = { ui.onSelect(r) },
+                                    modifier = if (index == 0) Modifier.focusRequester(first) else Modifier,
+                                )
+                            }
+                        }
+                        items(waiting, key = { "waiting$it" }) {
+                            Box(Modifier.animateItem(fadeInSpec = arrive, placementSpec = glide, fadeOutSpec = leave)) { WaitingRow() }
                         }
                     }
                 }
@@ -148,14 +168,14 @@ internal fun CinemaSourcePicker(
     }
 }
 
-/** "Searching 3 servers… 1 done" with a soft moving bar, then "6 copies · best first". */
+/** "Looking on 3 servers… 1 answered" with a soft moving bar, then "6 copies · best first". */
 @Composable
 private fun SearchLine(ui: PickerUi) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            if (ui.searching) "Looking on ${ui.serversTotal} servers… ${ui.serversDone} answered" else "${ui.rows.size} ${if (ui.rows.size == 1) "copy" else "copies"} · best first",
+            if (ui.searching) "Looking on ${ui.serversTotal} ${if (ui.serversTotal == 1) "server" else "servers"}…  ${ui.serversDone} answered" else "${ui.rows.size} ${if (ui.rows.size == 1) "copy" else "copies"}  ·  best first",
             color = InkDim,
-            fontSize = 15.sp,
+            fontSize = 14.sp,
         )
         Box(Modifier.width(320.dp).height(2.dp).clip(RoundedCornerShape(1.dp)).background(Color.White.copy(alpha = if (ui.searching) 0.08f else 0f))) {
             if (ui.searching) {
@@ -166,46 +186,85 @@ private fun SearchLine(ui: PickerUi) {
     }
 }
 
-/** One copy: a dark glass row that lifts with a fading white edge, like the cards. */
+private val RowShape = RoundedCornerShape(10.dp)
+private val RowHeight = 78.dp
+
+/**
+ * One copy, read left to right: the quality stamp (4K, and its HDR under it), where it is with
+ * what's in it, then its size. A dark glass row that lifts with a fading edge, like the cards.
+ */
 @Composable
-internal fun CinemaSourceRow(
+private fun CopyRow(
+    r: ExternalSource,
     best: Boolean,
-    server: String,
-    compatible: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    badges: @Composable () -> Unit,
 ) {
-    val shape = RoundedCornerShape(10.dp)
+    val f = rememberFocusFade(Color.White.copy(alpha = 0.06f), Color(0xFF26262A), Ink, Ink)
+    val badges = remember(r) { com.wholphinplus.sources.ui.badgesFor(r).map { it.text } }
+    val hdr =
+        when {
+            "DV" in badges -> "DOLBY VISION"
+            "HDR10+" in badges -> "HDR10+"
+            "HDR10" in badges || "HDR" in badges -> "HDR10"
+            "HLG" in badges -> "HLG"
+            else -> null
+        }
+    // The rest of what's in it, on one line: "WEB-DL · HEVC · DD+ 5.1 · Atmos"
+    val details =
+        remember(r) {
+            val rest = badges.filterNot { it == r.quality || it in setOf("DV", "HDR10+", "HDR10", "HDR", "HLG") }
+            val joined = mutableListOf<String>()
+            rest.forEach { t -> if (Regex("""\d\.\d""").matches(t) && joined.isNotEmpty()) joined[joined.lastIndex] += " $t" else joined += t }
+            (if (r.compatible) listOf("Server converts it") else emptyList()) + joined
+        }
     Surface(
         onClick = onClick,
-        shape = ClickableSurfaceDefaults.shape(shape),
-        colors =
-            ClickableSurfaceDefaults.colors(
-                containerColor = Color.White.copy(alpha = 0.06f),
-                contentColor = Ink,
-                focusedContainerColor = Color(0xFF232326),
-                focusedContentColor = Ink,
-            ),
+        shape = ClickableSurfaceDefaults.shape(RowShape),
+        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
-        modifier = modifier.fillMaxWidth().glideLift(scale = 1.02f, corner = 10.dp).tapToClick(onClick),
+        interactionSource = f.source,
+        modifier = modifier.fillMaxWidth().height(RowHeight).glideLift(scale = 1.02f, corner = 10.dp).tapToClick(onClick),
     ) {
-        Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(server, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (best) {
-                    Text(
-                        "BEST",
-                        color = Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 1.5.sp,
-                        modifier = Modifier.background(Plus.copy(alpha = 0.9f), RoundedCornerShape(3.dp)).padding(horizontal = 7.dp, vertical = 2.dp),
-                    )
-                }
-                if (compatible) Text("Server converts it", color = InkDim, fontSize = 13.sp)
+        Row(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.width(118.dp)) {
+                Text(
+                    r.quality.takeIf { it != "?" } ?: "—",
+                    fontSize = if (r.quality == "4K") 28.sp else 22.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = (-0.5).sp,
+                    maxLines = 1,
+                )
+                Text(hdr ?: "SDR", color = if (hdr != null) Ink.copy(alpha = 0.85f) else InkDim.copy(alpha = 0.7f), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1)
             }
-            badges()
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val own = r.connectionId == com.wholphinplus.sources.SourceHook.JELLYFIN_ROW
+                    Text(if (own) "Your server" else r.serverLabel, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    if (best) {
+                        Text(
+                            "BEST MATCH",
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.5.sp,
+                            modifier = Modifier.background(Plus.copy(alpha = 0.9f), RoundedCornerShape(3.dp)).padding(horizontal = 7.dp, vertical = 3.dp),
+                        )
+                    }
+                }
+                Text(details.joinToString("  ·  "), color = InkDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(start = 16.dp)) {
+                Text(r.size, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"))
+                Text(r.container.uppercase(), color = InkDim, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, maxLines = 1)
+            }
         }
     }
+}
+
+/** A server still looking: the row's shape, breathing softly, until its copies arrive. */
+@Composable
+private fun WaitingRow() {
+    val breath by rememberInfiniteTransition(label = "waiting").animateFloat(0.03f, 0.08f, infiniteRepeatable(tween(1_100, easing = CinemaFade), RepeatMode.Reverse), label = "breath")
+    Box(Modifier.fillMaxWidth().height(RowHeight).graphicsLayer { alpha = 1f }.background(Color.White.copy(alpha = breath), RowShape))
 }

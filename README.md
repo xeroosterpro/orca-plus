@@ -265,6 +265,11 @@ Requires JDK 17–21 and the Android SDK.
 ./build.sh                                   # latest Wholphin release + Orca+
 PUBLIC=1 REPO=you/wholphin-plus ./build.sh   # the shared build, as CI produces it
 ```
+
+The Orca+ cloud (Cloud sync, keys from your phone, the daily chart rows and keyless TMDB
+lookups) is only in the official release. A build from this source runs without it: everything
+else works, and TMDB lookups use your own key (Settings → Servers & Search). To use a cloud of
+your own, pass its address as `ORCA_CLOUD_URL` or put it in a `.cloud-url` file.
 </details>
 
 <br>

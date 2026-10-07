@@ -20,6 +20,10 @@ android {
         // -PwholphinPlusRepo=owner/name). Default: the personal build.
         val public = providers.gradleProperty("wholphinPlusPublic").orNull == "true"
         val repo = providers.gradleProperty("wholphinPlusRepo").orNull.orEmpty()
+        // -PorcaCloudUrl=https://…: the Orca+ cloud. Not in the source: the official release gets
+        // it from a repository secret, personal builds from .cloud-url. Without it, no cloud.
+        val cloud = providers.gradleProperty("orcaCloudUrl").orNull.orEmpty().trim()
+        buildConfigField("String", "CLOUD_URL", "\"$cloud\"")
         buildConfigField("boolean", "PUBLIC_BUILD", "$public")
         buildConfigField("boolean", "UPDATES_ENABLED", "${public && repo.isNotBlank()}")
         buildConfigField(

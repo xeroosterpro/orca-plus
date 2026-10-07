@@ -33,9 +33,9 @@ class ListsTest {
     }
 
     @Test fun `orca chart links`() {
-        val s = ListSource.parse("https://orca-cloud-production.up.railway.app/v1/charts#trakt-trending-movies") as ListSource.OrcaChart
+        val s = ListSource.parse("https://cloud.example.org/v1/charts#trakt-trending-movies") as ListSource.OrcaChart
         assertEquals("trakt-trending-movies", s.id)
-        assertEquals("https://orca-cloud-production.up.railway.app", s.base)
-        assertNull(ListSource.parse("https://orca-cloud-production.up.railway.app/v1/charts"))
+        assertEquals("https://cloud.example.org", s.base)
+        assertNull(ListSource.parse("https://cloud.example.org/v1/charts"))
     }
 }

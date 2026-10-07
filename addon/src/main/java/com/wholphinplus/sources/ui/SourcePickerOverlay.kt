@@ -45,11 +45,7 @@ fun SourcePickerOverlay(session: PickSession) {
     val current = ui ?: return
     // Cinema mode: the picker in Cinema's look (classic Wholphin keeps the Material dialog)
     if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
-        com.wholphinplus.sources.cinema.CinemaSourcePicker(current) { row, best, modifier ->
-            com.wholphinplus.sources.cinema.CinemaSourceRow(best, row.serverLabel, row.compatible, onClick = { current.onSelect(row) }, modifier = modifier) {
-                BadgeRow(badges = badgesFor(row), trailing = listOf(row.size, row.container), inverted = false)
-            }
-        }
+        com.wholphinplus.sources.cinema.CinemaSourcePicker(current)
         return
     }
     val firstRow = remember(current.title) { FocusRequester() }

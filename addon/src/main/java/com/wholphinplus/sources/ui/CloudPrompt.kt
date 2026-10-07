@@ -310,6 +310,8 @@ private fun AllSet(
  */
 @Composable
 fun CloudPrompt() {
+    // A build without the cloud (built from source with no -PorcaCloudUrl) never asks
+    if (!com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) return
     val hook = LocalContext.current.sourceHook()
     val sync = hook.profileSync
     val status by sync.status.collectAsState()

@@ -55,6 +55,8 @@ jobs:
       - name: Build
         if: steps.check.outputs.build == 'true'
         env:
+          # The Orca+ cloud for the official build only (forks build without one)
+          ORCA_CLOUD_URL: ${{ secrets.ORCA_CLOUD_URL }}
           PUBLIC: "1"
           REPO: ${{ github.repository }}
           SHIELD: ""

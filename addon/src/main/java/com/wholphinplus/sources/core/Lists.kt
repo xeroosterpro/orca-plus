@@ -147,7 +147,7 @@ class ListClient(
     }
 
     /** The Orca+ cloud's charts (remembered for half an hour, so one refresh asks once). */
-    fun charts(): List<Chart> = chartsFrom(com.wholphinplus.sources.sync.ProfileSync.ENDPOINT)
+    fun charts(): List<Chart> = if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) chartsFrom(com.wholphinplus.sources.sync.ProfileSync.ENDPOINT) else emptyList()
 
     /** The Services and Genres pages and where each tab shows their tiles, from the same file as [charts]. */
     fun cloudPages(): CloudPages {

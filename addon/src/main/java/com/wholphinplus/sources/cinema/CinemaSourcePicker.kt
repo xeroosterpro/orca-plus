@@ -69,6 +69,9 @@ internal object StageArt {
         item = i
     }
 
+    /** The last title's backdrop, for previews (subtitle style). */
+    fun backdrop(): String? = item?.backdropUrl
+
     fun forPick(
         itemId: String,
         seriesId: String?,
@@ -85,6 +88,16 @@ internal object StageArt {
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 internal fun CinemaSourcePicker(ui: PickerUi) {
+    // Opened from Wholphin's player screen, outside Orca+'s screens: bring the title art along
+    // (TMDB logos and backdrops), or a title the server has no art for shows a bare stage
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val cinemaArt = remember { dagger.hilt.android.EntryPointAccessors.fromApplication(context.applicationContext, com.wholphinplus.sources.ui.SourcesEntryPoint::class.java).cinemaArt() }
+    CompositionLocalProvider(LocalArt provides (LocalArt.current ?: cinemaArt)) { PickerScreen(ui) }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun PickerScreen(ui: PickerUi) {
     val art = remember(ui.itemId) { StageArt.forPick(ui.itemId, ui.seriesId) }
     val first = remember(ui.title) { FocusRequester() }
     val list = rememberLazyListState()
@@ -102,7 +115,9 @@ internal fun CinemaSourcePicker(ui: PickerUi) {
     LaunchedEffect(Unit) { enter.animateTo(1f, tween(480, easing = CinemaEase)) }
     Dialog(onDismissRequest = ui.onCancel, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Box(Modifier.fillMaxSize().background(Stage)) {
-            StableBackdrop(art?.backdropUrl, drift = false)
+            // The server's backdrop, else TMDB's clean one (as the billboard shows it)
+            val titleArt = rememberArt(art)
+            StableBackdrop(art?.backdropUrl ?: titleArt?.cleanBackdrop?.let { "https://image.tmdb.org/t/p/w1280$it" }, drift = false)
             // Darker than a billboard: the rows sit over the picture
             Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Stage.copy(alpha = 0.94f), 0.5f to Stage.copy(alpha = 0.78f), 1f to Stage.copy(alpha = 0.2f))))
             Column(
@@ -117,7 +132,7 @@ internal fun CinemaSourcePicker(ui: PickerUi) {
                     Spacer(Modifier.width(5.dp))
                     Text("CHOOSE A COPY", color = InkDim, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
                 }
-                val logo = rememberArt(art)?.logoUrl() ?: art?.logoUrl
+                val logo = titleArt?.logoUrl() ?: art?.logoUrl
                 if (logo != null) {
                     AsyncImage(model = logo, contentDescription = ui.title, contentScale = ContentScale.Fit, alignment = Alignment.CenterStart, modifier = Modifier.height(72.dp).width(340.dp))
                 } else {
@@ -267,4 +282,15 @@ private fun CopyRow(
 private fun WaitingRow() {
     val breath by rememberInfiniteTransition(label = "waiting").animateFloat(0.03f, 0.08f, infiniteRepeatable(tween(1_100, easing = CinemaFade), RepeatMode.Reverse), label = "breath")
     Box(Modifier.fillMaxWidth().height(RowHeight).graphicsLayer { alpha = 1f }.background(Color.White.copy(alpha = breath), RowShape))
+}
+
+/**
+ * Behind the subtitle style preview (Wholphin's page, via a hook): the last title you looked at,
+ * so the preview is on real Orca+ art; Wholphin's stock photo ([fallback]) until there is one.
+ */
+@Composable
+fun SubtitlePreviewBackdrop(fallback: @Composable () -> Unit) {
+    val url = remember { StageArt.backdrop() } ?: return fallback()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    AsyncImage(model = request(context, url), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
 }

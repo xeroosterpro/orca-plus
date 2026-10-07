@@ -80,9 +80,10 @@ data class TitleArt(
 ) {
     fun logoUrl(): String? = logo?.let { "${IMAGES}500$it" }
 
-    fun cardUrl(): String? = titledBackdrop?.let { "${IMAGES}780$it" }
+    // Cards are drawn ~416 px wide: 500 px is enough (w780 was ~2x the bytes)
+    fun cardUrl(): String? = titledBackdrop?.let { "${IMAGES}500$it" }
 
-    fun cleanCardUrl(): String? = cleanBackdrop?.let { "${IMAGES}780$it" }
+    fun cleanCardUrl(): String? = cleanBackdrop?.let { "${IMAGES}500$it" }
 
     fun serviceUrls(): List<String> = services.map { "${IMAGES}154$it" }
 }

@@ -141,17 +141,8 @@ fun OrcaTopicItems(
     Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 12.dp)) {
         when (topic) {
             "APPEARANCE" -> {
-                PlusListItem(
-                    onClick = { hook.store.setCinemaMode(!cinema) },
-                    headlineContent = { Text("Cinema home", style = MaterialTheme.typography.titleMedium) },
-                    supportingContent = {
-                        Text(if (cinema) "On: big-screen home with a featured billboard and wide rows" else "Off: the classic home with a side menu")
-                    },
-                    trailingContent = { androidx.tv.material3.Switch(checked = cinema, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
-                    modifier = firstModifier.width(720.dp),
-                )
                 if (cinema) {
-                    MenuItem("Rows", "Pick, order and rename the rows on Home, Shows, Movies and New & Popular") { open = Screen.HomeRows() }
+                    MenuItem("Rows", "Pick, order and rename the rows on Home, Shows, Movies and New & Popular", firstModifier) { open = Screen.HomeRows() }
                     val overlays by hook.store.overlays.collectAsState()
                     val ratings by hook.store.ratingPrefs.collectAsState()
                     val on =
@@ -184,6 +175,41 @@ fun OrcaTopicItems(
                         headlineContent = { Text("Kids tab", style = MaterialTheme.typography.titleMedium) },
                         supportingContent = { Text(if (kidsTab) "On: a Kids tab at the top, with kids' movies and shows only" else "Off: turn on for a tab of kids' movies, shows and little ones' favourites") },
                         trailingContent = { androidx.tv.material3.Switch(checked = kidsTab, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
+                        modifier = Modifier.width(720.dp),
+                    )
+                    // OK steps Auto → Sharp → Fast
+                    val posterSize by hook.store.posterSize.collectAsState()
+                    val sizes = com.wholphinplus.sources.cinema.PosterSize
+                    PlusListItem(
+                        onClick = {
+                            hook.store.setPosterSize(
+                                when (posterSize) {
+                                    sizes.AUTO -> sizes.SHARP
+                                    sizes.SHARP -> sizes.FAST
+                                    else -> sizes.AUTO
+                                },
+                            )
+                        },
+                        headlineContent = { Text("Poster size", style = MaterialTheme.typography.titleMedium) },
+                        supportingContent = {
+                            Text(
+                                when (posterSize) {
+                                    sizes.SHARP -> "Sharp: full-size pictures, best on a fast connection"
+                                    sizes.FAST -> "Fast: smaller pictures that load quicker, a little softer"
+                                    else -> if (sizes.slow) "Auto: smaller pictures for now, they were loading slowly" else "Auto: sharp, and smaller if pictures load slowly"
+                                },
+                            )
+                        },
+                        trailingContent = {
+                            Text(
+                                when (posterSize) {
+                                    sizes.SHARP -> "Sharp"
+                                    sizes.FAST -> "Fast"
+                                    else -> "Auto"
+                                },
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                        },
                         modifier = Modifier.width(720.dp),
                     )
                 }
@@ -397,9 +423,9 @@ private fun ExtraSourcesScreen(
             when (screen) {
                 Screen.Menu -> "Orca+" to "Everything Orca+ can do. Press Back to leave."
                 Screen.TmdbKey -> "Search" to "Finds a title on every server you have."
-                Screen.Ratings, Screen.MdblistKey -> "Score sources" to "Review scores on cards and title pages of the Cinema home, in the order you turn them on."
-                Screen.Overlays -> "Poster tags" to "Everything a card on the Cinema home can show. The preview changes as you go."
-                is Screen.HomeRows, is Screen.RenameRow -> "Rows" to "The rows on each page of the Cinema home, in the order they show. Changes show the next time you open the page."
+                Screen.Ratings, Screen.MdblistKey -> "Score sources" to "Review scores on cards and title pages, in the order you turn them on."
+                Screen.Overlays -> "Poster tags" to "Everything a card on Home can show. The preview changes as you go."
+                is Screen.HomeRows, is Screen.RenameRow -> "Rows" to "The rows on each page, in the order they show. Changes show the next time you open the page."
                 Screen.Cloud ->
                     "Cloud sync" to "Your whole setup on every TV: settings, rows, lists, keys, extra servers and where you left off. " +
                         "It's encrypted on this TV with your sync PIN before it's sent, so nobody else can read it."
@@ -735,18 +761,6 @@ private fun MenuScreen(
             MenuItem("Search", if (tmdb.isBlank()) "Smart search is on  ·  your own TMDB key is optional" else "Smart search is on, with your TMDB key") {
                 go(Screen.TmdbKey)
             }
-        }
-        item {
-            val cinema by hook.store.cinemaMode.collectAsState()
-            PlusListItem(
-                onClick = { hook.store.setCinemaMode(!cinema) },
-                headlineContent = { Text("Cinema mode", style = MaterialTheme.typography.titleMedium) },
-                supportingContent = {
-                    Text(if (cinema) "On: big-screen streaming home with a featured billboard and wide rows" else "Off: the classic home with a side menu")
-                },
-                trailingContent = { androidx.tv.material3.Switch(checked = cinema, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
-                modifier = Modifier.width(720.dp),
-            )
         }
         item {
             val cinema by hook.store.cinemaMode.collectAsState()

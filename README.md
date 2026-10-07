@@ -71,8 +71,7 @@ country for new releases and the services sold there, across 12 countries.
 </table>
 
 Make it yours: pick, reorder and rename the rows on every page, add your own MDBList, Trakt and
-Top Streaming lists, and choose how posters look. Prefer a classic side-menu home? It's one
-switch away.
+Top Streaming lists, and choose how posters look.
 
 <br>
 
@@ -177,7 +176,7 @@ always get the newest version.
 
 Orca+ works out of the box. Everything else is in **Settings**, organised by what you want to do:
 
-<p align="center"><img src="docs/screenshots/settings.jpg" alt="Settings: Home and Look first, with Cinema home, Rows, Poster tags, Roll up the billboard and Your lists" width="88%"></p>
+<p align="center"><img src="docs/screenshots/settings.jpg" alt="Settings: Home and Look first, with Rows, Poster tags, Roll up the billboard, Kids tab and Your lists" width="88%"></p>
 
 | | Where | You'll need |
 |---|---|---|

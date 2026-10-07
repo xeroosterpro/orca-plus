@@ -59,6 +59,8 @@ internal object Importer {
                     .filter { url -> collections.lists.value.none { it.url.equals(url, true) } }
                     .forEach { collections.add(collections.newCollection(it)) }
             }
+            // "tour": true → the welcome tour runs after this sign-in (testing the tour on the bench)
+            if (root.boolean("tour") == true) store.setOnboarding(com.wholphinplus.sources.welcome.Onboarding.FINISHING)
             root.string("tmdbApiKey").takeIf { it.isNotBlank() }?.let {
                 store.setTmdbKey(it)
                 Timber.i("Imported TMDB API key")

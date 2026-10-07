@@ -47,8 +47,8 @@ internal fun plusSwitchColors(): androidx.tv.material3.SwitchColors =
     if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
         androidx.tv.material3.SwitchDefaults.colors(
             checkedThumbColor = Color.White,
-            checkedTrackColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
-            checkedBorderColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
+            checkedTrackColor = com.wholphinplus.sources.cinema.CinemaColors.toggle,
+            checkedBorderColor = com.wholphinplus.sources.cinema.CinemaColors.toggle,
         )
     } else {
         androidx.tv.material3.SwitchDefaults.colors()

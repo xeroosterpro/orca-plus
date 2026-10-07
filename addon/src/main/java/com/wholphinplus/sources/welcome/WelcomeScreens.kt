@@ -485,9 +485,10 @@ fun WelcomeFinish(
                 when (step) {
                     FinishStep.CHECKING, FinishStep.LIBRARIES -> step
                     FinishStep.SAVE -> FinishStep.POWERUPS
-                    FinishStep.POWERUPS -> if (cinema) FinishStep.PAGES else FinishStep.LOOK
-                    FinishStep.PAGES -> if (hook.store.cinemaMode.value) FinishStep.TAGS else FinishStep.LOOK
-                    FinishStep.TAGS -> FinishStep.LOOK
+                    // One look now: no "pick your home screen" stop between libraries and tags
+                    FinishStep.POWERUPS -> FinishStep.PAGES
+                    FinishStep.PAGES -> FinishStep.TAGS
+                    FinishStep.TAGS -> FinishStep.LIBRARIES
                     FinishStep.LOOK -> FinishStep.LIBRARIES
                     FinishStep.EMBY_PICK -> FinishStep.EMBY
                     FinishStep.EMBY, FinishStep.EMBY_ADDRESS -> FinishStep.EMBY_CHOOSE
@@ -495,7 +496,7 @@ fun WelcomeFinish(
                     else -> FinishStep.LIBRARIES
                 }
         }
-        val stops = if (cinema) TourStop.entries.toList() else TourStop.entries - TourStop.TAGS - TourStop.PAGES
+        val stops = TourStop.entries - TourStop.LOOK
         androidx.compose.runtime.CompositionLocalProvider(LocalTourStops provides stops) {
             AnimatedContent(
                 targetState = step,
@@ -536,7 +537,7 @@ fun WelcomeFinish(
                             skipLabel = "Skip for now",
                             modifier = Modifier.fillMaxSize().background(Stage.copy(alpha = 0.82f)),
                         )
-                    FinishStep.LIBRARIES -> LibrariesStep(connections, message, onPick = { step = it }, onNext = { step = FinishStep.LOOK })
+                    FinishStep.LIBRARIES -> LibrariesStep(connections, message, onPick = { step = it }, onNext = { step = FinishStep.TAGS })
                     FinishStep.EMBY_CHOOSE ->
                         ChooseStep(
                             "Add your Emby server",

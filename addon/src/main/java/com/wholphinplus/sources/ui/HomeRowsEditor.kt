@@ -267,7 +267,7 @@ private fun RowLine(
     onRename: () -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
-    val accent = com.wholphinplus.sources.cinema.CinemaColors.accent
+    val accent = com.wholphinplus.sources.cinema.CinemaColors.toggle
     Row(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,

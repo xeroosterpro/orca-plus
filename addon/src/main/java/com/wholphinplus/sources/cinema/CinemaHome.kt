@@ -57,6 +57,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -110,6 +111,7 @@ import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Surface
+import androidx.tv.material3.LocalTextStyle
 import androidx.tv.material3.Text
 import coil3.compose.AsyncImage
 import com.wholphinplus.sources.ui.SourcesEntryPoint
@@ -343,6 +345,9 @@ fun CinemaHome(
                 setLocked = { source, on -> hook.store.setShuffleLock(source.lockKey, on) },
                 seeAll = { state ->
                     if (NavGuard.allow()) {
+                        state.gridAt = 0
+                        // Back from it lands on See all again, as a tile's page lands on its tile
+                        ReturnFocus.target = state.buttons[0]
                         OpenGrid.state = state
                         grid = state
                     }
@@ -395,7 +400,7 @@ fun CinemaHome(
                     Box(Modifier.fillMaxSize()) {
                         when {
                             d == null && error != null ->
-                                LoadError(error, onRetry = { attempt++ }, onClassic = { hook.store.setCinemaMode(false) }, Modifier.align(Alignment.Center))
+                                LoadError(error, onRetry = { attempt++ }, onClassic = null, Modifier.align(Alignment.Center))
                             // The logo only shows while the app starts; other tabs just fade in
                             d == null -> if (t == CinemaTab.HOME) Wordmark(Modifier.align(Alignment.Center), size = 34)
                             t == CinemaTab.MY_LIST -> MyListScreen(d.rows.firstOrNull()?.items.orEmpty(), onOpen)
@@ -446,7 +451,35 @@ fun CinemaHome(
         }
         // Over everything: the library index being read (rows fill in when it's done)
         // Top right, over the billboard's picture: it never covers a row
-        LibraryNotice(hook, Modifier.align(Alignment.TopEnd))
+        Column(Modifier.align(Alignment.TopEnd).padding(top = 76.dp, end = 40.dp), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.End) {
+            LibraryNotice(hook)
+            PosterNotice()
+        }
+    }
+}
+
+/** Auto poster size just went small: says why and where to change it, for a few seconds. */
+@Composable
+private fun PosterNotice() {
+    val shown = PosterSize.justSwitched
+    LaunchedEffect(shown) {
+        if (shown) {
+            delay(7_000)
+            PosterSize.justSwitched = false
+        }
+    }
+    AnimatedVisibility(
+        visible = shown,
+        enter = fadeIn(tween(300, easing = CinemaEase)),
+        exit = fadeOut(tween(400, easing = CinemaFade)),
+    ) {
+        Column(
+            Modifier.widthIn(min = 260.dp, max = 340.dp).background(Stage.copy(alpha = 0.9f), RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("Smaller posters for now", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("Pictures were loading slowly, so these load faster. Settings → Home & Look → Poster size.", color = InkDim, fontSize = 12.sp)
+        }
     }
 }
 
@@ -479,7 +512,7 @@ private fun LibraryNotice(
         visible = p != null || ready,
         enter = fadeIn(tween(300, easing = CinemaEase)),
         exit = fadeOut(tween(400, easing = CinemaFade)),
-        modifier = modifier.padding(top = 76.dp, end = 40.dp),
+        modifier = modifier,
     ) {
         Column(
             Modifier.widthIn(min = 260.dp, max = 340.dp).background(Stage.copy(alpha = 0.9f), RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
@@ -568,10 +601,13 @@ internal val TopNavHeight = 54.dp
 private val PanelTop = 16.dp
 private val PanelFull = 262.dp
 private val PanelNoButtons = 210.dp
-private val PanelRolled = 72.dp
+private val PanelRolled = 52.dp
 private val GapFull = 18.dp
 private val GapRolled = 8.dp
 private val RowsTopRolled = TopNavHeight + PanelTop + PanelRolled + GapRolled
+
+private val RolledLogoHeight = 44.dp
+private val RolledShadow = androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.75f), blurRadius = 10f)
 
 /** After this long without a key press the billboard stops rotating. */
 private const val IDLE_MS = 120_000L
@@ -961,16 +997,27 @@ private fun InfoPanel(
             ) {
                 if (shownItem == null) return@Column
                 val logo = rememberArt(shownItem)?.logoUrl() ?: shownItem.logoUrl
+                // The logo's shape once loaded: rolled up, its box hugs it, so the details sit
+                // right beside it instead of after a fixed 220 dp slot (a narrow logo left a gap)
+                var logoAspect by remember(logo) { mutableFloatStateOf(0f) }
+                val rolledLogo = if (logo != null && logoAspect > 0f) (RolledLogoHeight * logoAspect).coerceIn(48.dp, 220.dp) else 220.dp
                 // Kind tag above the logo; it folds away with its gap when the billboard rolls
                 // up, so the logo and the chart line fit the rolled-up panel
                 Box(Modifier.rollHeight(26.dp, 0.dp, roll), contentAlignment = Alignment.TopStart) { KindTag(shownItem.kind) }
-                Row(Modifier.rollHeight(70.dp, 44.dp, roll), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.fillMaxHeight().rollWidth(340.dp, 220.dp, roll), contentAlignment = Alignment.BottomStart) {
+                Row(Modifier.rollHeight(70.dp, RolledLogoHeight, roll), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.fillMaxHeight().rollWidth(340.dp, rolledLogo, roll), contentAlignment = Alignment.BottomStart) {
                     // A logo that arrives a moment late crossfades over the title text
                     Crossfade(targetState = logo, animationSpec = tween(300, easing = CinemaEase), label = "logo") { l ->
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
                             if (l != null) {
-                                AsyncImage(model = l, contentDescription = shownItem.title, contentScale = ContentScale.Fit, alignment = Alignment.BottomStart, modifier = Modifier.fillMaxSize())
+                                AsyncImage(
+                                    model = l,
+                                    contentDescription = shownItem.title,
+                                    contentScale = ContentScale.Fit,
+                                    alignment = Alignment.BottomStart,
+                                    onSuccess = { r -> r.painter.intrinsicSize.let { if (it.height > 0f) logoAspect = it.width / it.height } },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
                             } else {
                                 // No logo: the name shrinks to fit two lines of the logo's box rather than
                                 // being cut off ("Echoes of the Ice A…" at one line of 34 sp)
@@ -985,21 +1032,40 @@ private fun InfoPanel(
                         }
                     }
                 }
-                // Rolled up, the details sit beside the logo: still there while browsing rows
-                if (rolledNow) Column(
-                    Modifier.padding(start = 20.dp).widthIn(max = 420.dp).graphicsLayer {
+                // Rolled up, the details sit beside the logo, after a hairline: still there while
+                // browsing rows. A soft shadow keeps them legible over a bright picture.
+                if (rolledNow) Row(
+                    Modifier.graphicsLayer {
                         alpha = ((roll() - 0.5f) * 2f).coerceIn(0f, 1f)
                         compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
                     },
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    MetaLine(Meta(shownItem.meta, shownItem.rating))
-                    Text(shownItem.overview, color = Ink.copy(alpha = 0.8f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Box(Modifier.padding(horizontal = 18.dp).width(1.dp).height(30.dp).background(Ink.copy(alpha = 0.3f)))
+                    CompositionLocalProvider(LocalTextStyle provides LocalTextStyle.current.copy(shadow = RolledShadow)) {
+                        Column(Modifier.widthIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                // The Top 10 place joins the details (its own line folds away rolled up)
+                                shownItem.rank?.takeIf { shownItem.subtitle == null }?.let { RankLine(it, null) }
+                                MetaLine(Meta(shownItem.meta, shownItem.rating))
+                            }
+                            // An episode's name says more than the show's story here
+                            Text(
+                                shownItem.subtitle ?: shownItem.overview,
+                                color = if (shownItem.subtitle != null) Ink else Ink.copy(alpha = 0.85f),
+                                fontSize = 12.sp,
+                                fontWeight = if (shownItem.subtitle != null) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
                 }
-                Spacer(Modifier.height(8.dp))
-                // One fixed line: the episode, else the title's Top 10 place, else blank
-                Box(Modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
+                Box(Modifier.rollHeight(8.dp, 0.dp, roll))
+                // One fixed line: the episode, else the title's Top 10 place, else blank. Rolled up it
+                // folds away (the details beside the logo carry it), so the rows sit 20 dp higher
+                Box(Modifier.rollHeight(20.dp, 0.dp, roll), contentAlignment = Alignment.CenterStart) {
                     val rank = shownItem.rank
                     when {
                         shownItem.subtitle != null ->
@@ -1007,7 +1073,7 @@ private fun InfoPanel(
                         rank != null -> RankLine(rank, shownItem.rankLabel)
                     }
                 }
-                Spacer(Modifier.height(8.dp))
+                Box(Modifier.rollHeight(8.dp, 0.dp, roll))
                 if (!rolledNow) Column(Modifier.widthIn(max = 480.dp).graphicsLayer {
                     alpha = (1f - roll() * 2f).coerceIn(0f, 1f)
                     compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
@@ -1043,7 +1109,7 @@ private fun CinemaRowView(
     onItemClick: (CinemaItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier.onFocusChanged { state.focused = it.hasFocus }, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.onPreviewKeyEvent(state::stepButtons).then(modifier).onFocusChanged { state.focused = it.hasFocus }, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         // The name and how many titles the whole row has
         Row(Modifier.padding(start = 48.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(row.title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
@@ -1055,6 +1121,8 @@ private fun CinemaRowView(
         // The next cards along are kept built too (about two ahead, one behind)
         val rowState = androidx.compose.foundation.lazy.rememberLazyListState(cacheWindow = remember { androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow(ahead = 460.dp, behind = 230.dp) })
         ReportMotion(rowState)
+        // Nearing the end asks for more: a row goes on as long as its list
+        if (actions != null && !row.ranked) LoadNearEnd({ state.more(actions.load) }) { rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index to rowState.layoutInfo.totalItemsCount }
         CompositionLocalProvider(LocalBringIntoViewSpec provides cardSpec.gliding(rowState)) {
             LazyRow(
                 state = rowState,
@@ -1070,9 +1138,7 @@ private fun CinemaRowView(
                     // Above the cards, so a button's label can show over the first one
                     if (controls) item(key = "controls", contentType = "controls") { Box(Modifier.zIndex(1f)) { RowControls(state, actions!!) } }
                     val items = state.items
-                    itemsIndexed(items, key = { _, it -> it.key }, contentType = { _, _ -> "card" }) { i, item ->
-                        // The last few coming into view ask for more: a row goes on as long as its list
-                        if (actions != null && i >= items.size - LOAD_AHEAD) LaunchedEffect(items.size) { state.more(actions.load) }
+                    items(items, key = { it.key }, contentType = { "card" }) { item ->
                         CinemaCard(item, onItemFocused, onItemClick)
                     }
                 }
@@ -1194,7 +1260,7 @@ internal fun PosterFace(item: CinemaItem) {
     Box(Modifier.fillMaxSize()) {
         val url = item.posterUrl ?: item.cardUrl
         if (url != null) {
-            AsyncImage(model = request(context, url, 224, 336), contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            CardPicture(url, 224, 336, contentDescription = item.title, modifier = Modifier.fillMaxSize())
         }
         if (item.posterUrl == null) {
             Text(item.title, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
@@ -1262,7 +1328,9 @@ internal fun CinemaCardFace(
     // A title with a logo: its clean picture with the logo laid over the bottom corner, the same
     // on every card (art with the name baked in puts it anywhere, at any size). Without one, or
     // with title logos off: art with the name baked in, else the picture with the name on it
-    val clean = if (logo != null && o.titleLogos) item.cleanCardUrl ?: art?.cleanCardUrl() else null
+    // TMDB's picture first: its CDN answers in ~0.1 s on a connection of its own, where the
+    // server's (often the same TMDB picture) took 0.4-0.7 s and queued behind the rows' requests
+    val clean = if (logo != null && o.titleLogos) art?.cleanCardUrl() ?: item.cleanCardUrl else null
     val titled = if (clean == null) art?.cardUrl() else null
     val url = clean ?: titled ?: item.cardUrl
     // No logo: the name is written on the picture only when it isn't already under the card
@@ -1270,7 +1338,7 @@ internal fun CinemaCardFace(
     Box(Modifier.fillMaxSize()) {
         if (url != null) {
             // Decoded at card size: small, fast, and cached for the next visit
-            AsyncImage(model = request(context, url, 416, 234), contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            CardPicture(url, 416, 234, contentDescription = item.title, modifier = Modifier.fillMaxSize())
         } else {
             // No wide art on the server or TMDB: the poster filling the card, or a plain title
             // card, instead of an empty grey box
@@ -1327,10 +1395,11 @@ private fun NoWideArt(
     context: android.content.Context,
 ) {
     if (poster != null) {
-        AsyncImage(
-            model = request(context, poster, 416, 624),
+        CardPicture(
+            poster,
+            416,
+            624,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
             alignment = androidx.compose.ui.BiasAlignment(0f, -0.35f),
             modifier = Modifier.fillMaxSize(),
         )

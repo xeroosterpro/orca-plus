@@ -7,8 +7,11 @@ import androidx.compose.ui.graphics.Color
  * black stage, grey surfaces, white focus with black text. Settings, dialogs and menus follow it.
  */
 object CinemaColors {
-    /** The one accent: progress bars, switches, labels. */
+    /** The red accent: progress bars and labels (TOP 10). */
     val accent = Label
+
+    /** Switches that are on: Orca+'s purple, the colour of the "+" (red read as another app's). */
+    val toggle = Plus
 
     private val Surface = Color(0xFF161616)
     private val Raised = Color(0xFF242424)

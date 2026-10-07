@@ -33,7 +33,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -72,6 +79,29 @@ internal class RowState(
 
     /** Whether focus is in this row: its buttons show only then. */
     var focused by mutableStateOf(false)
+
+    /** The buttons left of the first card, top to bottom, and which one has focus (-1: none). */
+    val buttons = List(3) { FocusRequester() }
+    var button = -1
+
+    /** Where focus was in the row opened full screen, for coming back to it from a title page. */
+    var gridAt = 0
+
+    /**
+     * Up and Down between the buttons. Ahead of the row's own keys: the first row sends Up to
+     * the billboard, which left See all out of reach there.
+     */
+    fun stepButtons(e: KeyEvent): Boolean {
+        if (e.type != KeyEventType.KeyDown || button < 0) return false
+        val to =
+            when (e.key) {
+                Key.DirectionUp -> button - 1
+                Key.DirectionDown -> button + 1
+                else -> return false
+            }
+        if (to !in buttons.indices) return false
+        return runCatching { buttons[to].requestFocus() }.getOrDefault(false)
+    }
 
     val items = mutableStateListOf<CinemaItem>().apply { addAll(row.items) }
     var source by mutableStateOf(row.source)
@@ -172,9 +202,9 @@ internal fun RowControls(
         // 40 ms on the Shield's GPU, right as the first row takes focus (the billboard's roll)
         compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
     }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        RowButton(GridIcon, state.total?.let { "See all $it" } ?: "See all") { actions.seeAll(state) }
-        RowButton(ShuffleIcon, "Shuffle") { scope.launch { state.shuffle(actions.load) } }
-        RowButton(EveryVisitIcon, if (every) "Shuffle every visit: on" else "Shuffle every visit: off", lit = every) {
+        RowButton(state, 0, GridIcon, state.total?.let { "See all $it" } ?: "See all") { actions.seeAll(state) }
+        RowButton(state, 1, ShuffleIcon, "Shuffle") { scope.launch { state.shuffle(actions.load) } }
+        RowButton(state, 2, EveryVisitIcon, if (every) "Shuffle every visit: on" else "Shuffle every visit: off", lit = every) {
             actions.setLocked(source, !every)
             // Switched on in the row's own order: shuffle it now too
             if (!every && !state.shuffled) scope.launch { state.shuffle(actions.load) }
@@ -184,6 +214,8 @@ internal fun RowControls(
 
 @Composable
 private fun RowButton(
+    state: RowState,
+    index: Int,
     icon: ImageVector,
     label: String,
     lit: Boolean = false,
@@ -196,7 +228,11 @@ private fun RowButton(
     val f = rememberFocusFade(Color.White.copy(alpha = 0f), Ink, if (lit) Plus else InkDim.copy(alpha = 0.75f), Stage)
     Surface(
         onClick = onClick,
-        modifier = Modifier.glideLift(scale = 1.1f, edge = false).tapToClick(onClick).onFocusChanged { focused = it.isFocused },
+        modifier =
+            Modifier.focusRequester(state.buttons[index]).glideLift(scale = 1.1f, edge = false).tapToClick(onClick).onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) state.button = index else if (state.button == index) state.button = -1
+            },
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(50)),
         colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
@@ -237,6 +273,8 @@ internal fun TitleGrid(
     onOpen: (UUID, BaseItemKind) -> Unit,
     count: Int? = null,
     onNearEnd: (suspend () -> Unit)? = null,
+    focusAt: Int? = null,
+    onFocusedAt: (Int) -> Unit = {},
 ) {
     var focused by remember { mutableStateOf<CinemaItem?>(null) }
     var shown by remember { mutableStateOf<CinemaItem?>(null) }
@@ -261,6 +299,20 @@ internal fun TitleGrid(
                 Text(emptyText, color = InkDim, fontSize = 15.sp, modifier = Modifier.padding(start = 48.dp, top = 8.dp))
             } else {
                 val grid = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+                if (onNearEnd != null) LoadNearEnd(onNearEnd) { grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index to grid.layoutInfo.totalItemsCount }
+                // Opened over a tab (See all), focus comes here: it stayed on the hidden tab's
+                // button, so the remote moved nothing on screen. Back from a title page: that title.
+                val start = focusAt?.coerceIn(0, items.lastIndex)
+                val first = remember { FocusRequester() }
+                if (start != null) {
+                    LaunchedEffect(Unit) {
+                        if (start > 0) grid.scrollToItem(start)
+                        for (attempt in 0 until 20) {
+                            androidx.compose.runtime.withFrameNanos {}
+                            if (runCatching { first.requestFocus() }.getOrDefault(false)) break
+                        }
+                    }
+                }
                 CompositionLocalProvider(LocalBringIntoViewSpec provides spec.gliding(grid)) {
                     LazyVerticalGrid(
                         state = grid,
@@ -271,20 +323,43 @@ internal fun TitleGrid(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(items, key = { _, it -> it.key }, contentType = { _, _ -> "card" }) { i, item ->
-                            if (onNearEnd != null && i >= items.size - LOAD_AHEAD) LaunchedEffect(items.size) { onNearEnd() }
-                            CinemaCard(
-                                item,
-                                onFocused = { focused = it },
-                                onClick = {
-                                    DetailsPreview.put(it)
-                                    onOpen(it.detailsId, it.detailsKind)
-                                },
-                                width = 204.dp,
-                            )
+                            Box(if (i == start) Modifier.focusRequester(first) else Modifier) {
+                                CinemaCard(
+                                    item,
+                                    onFocused = {
+                                        focused = it
+                                        onFocusedAt(i)
+                                    },
+                                    onClick = {
+                                        DetailsPreview.put(it)
+                                        onOpen(it.detailsId, it.detailsKind)
+                                    },
+                                    width = 204.dp,
+                                )
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Asks for more while the last shown item is within [LOAD_AHEAD] of the end, for as long as the
+ * list is on screen. It used to be an effect on each card near the end: holding the remote down
+ * scrolled that card away mid-load, the load was cancelled and nothing asked again (a See all
+ * grid stopped at 80 of 157). One load at a time; after it, the position is checked again.
+ */
+@Composable
+internal fun LoadNearEnd(
+    load: suspend () -> Unit,
+    position: () -> Pair<Int?, Int>,
+) {
+    val latest by androidx.compose.runtime.rememberUpdatedState(load)
+    LaunchedEffect(Unit) {
+        snapshotFlow(position).collect { (last, total) ->
+            if (last != null && total > 0 && last >= total - LOAD_AHEAD) latest()
         }
     }
 }
@@ -296,7 +371,16 @@ internal fun RowGridScreen(
     actions: RowActions,
     onOpen: (UUID, BaseItemKind) -> Unit,
 ) {
-    TitleGrid(state.title, state.items, "Nothing here yet.", onOpen, count = state.total, onNearEnd = { state.more(actions.load) })
+    TitleGrid(
+        state.title,
+        state.items,
+        "Nothing here yet.",
+        onOpen,
+        count = state.total,
+        onNearEnd = { state.more(actions.load) },
+        focusAt = state.gridAt,
+        onFocusedAt = { state.gridAt = it },
+    )
 }
 
 /** The row opened full screen, kept across a trip to a title page and back. */

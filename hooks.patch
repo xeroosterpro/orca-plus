@@ -293,8 +293,8 @@ index 06607cf9..17a196d9 100644
          deviceInfo: DeviceInfo,
      ) = okHttpClient
          .newBuilder()
-+        // Orca+: images (Coil) queue on their own, so a screen of posters doesn't hold up the rows
-+        .dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 8 })
++        // Orca+: images (Coil) queue on their own, so a screen of posters doesn't hold up the rows; 30 s reads: on a slow link one HTTP/2 stream can wait >10 s
++        .dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 8 }).readTimeout(java.time.Duration.ofSeconds(30))
          .addInterceptor {
              val request = it.request()
              val newRequest =
@@ -312,7 +312,7 @@ index 06607cf9..17a196d9 100644
      @Provides
      @Singleton
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
-index 0cf42622..ea61be1a 100644
+index 0cf42622..fbc4a891 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
 @@ -66,9 +66,12 @@ fun ApplicationContent(
@@ -333,10 +333,10 @@ index 0cf42622..ea61be1a 100644
                  val contentKey = "${key}_${server?.id}_${user?.id}"
                  NavEntry(key, contentKey = contentKey) {
 -                    if (key.fullScreen) {
-+                    // Orca+: Cinema mode draws its own full-screen home (top menu instead of the side drawer)
-+                    if (key.fullScreen || ((key is Destination.Home || key is Destination.Search ||
-+                            (key is Destination.MediaItem && (key.type == org.jellyfin.sdk.model.api.BaseItemKind.MOVIE || key.type == org.jellyfin.sdk.model.api.BaseItemKind.SERIES))) &&
-+                            com.wholphinplus.sources.cinema.cinemaModeOn())) {
++                    // Orca+: its own full-screen screens (top menu, no side drawer). Wholphin's other
++                    // pages (an episode, a box set, a person…) open full screen too: the classic side
++                    // menu is never shown, Back returns
++                    if (key.fullScreen || com.wholphinplus.sources.cinema.cinemaModeOn()) {
                          DestinationContent(
                              destination = key,
                              preferences = preferences,
@@ -571,10 +571,10 @@ index 79d2ae57..196f34b1 100644
                                  player.prepare()
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
 new file mode 100644
-index 00000000..9e327d48
+index 00000000..b1aa9f27
 --- /dev/null
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,367 @@
 +package com.github.damontecres.wholphin.ui.preferences
 +
 +import androidx.activity.compose.BackHandler
@@ -684,6 +684,7 @@ index 00000000..9e327d48
 +                    AppPreference.OneClickPause,
 +                    AppPreference.DpadSeekModePref,
 +                    AppPreference.ControllerTimeout,
++                    AppPreference.ShowClock,
 +                ),
 +                group(R.string.orca_settings_picture, AppPreference.GlobalContentScale, AppPreference.CinemaMode),
 +            )
@@ -748,29 +749,11 @@ index 00000000..9e327d48
 +                group(R.string.orca_settings_diagnostics, AppPreference.PlaybackDebugInfo),
 +            )
 +
-+        OrcaSection.APPEARANCE ->
-+            listOf(
-+                PreferenceGroup(
-+                    R.string.orca_settings_look,
-+                    listOfNotNull(AppPreference.ThemeColors.takeUnless { cinema }, AppPreference.ShowLogos, AppPreference.BackdropStylePref, AppPreference.ShowClock),
-+                ),
-+                PreferenceGroup(
-+                    R.string.orca_settings_home_menus,
-+                    listOfNotNull(
-+                        AppPreference.CustomizeHome.takeUnless { cinema },
-+                        AppPreference.UserPinnedNavDrawerItems,
-+                        AppPreference.RememberSelectedTab,
-+                        AppPreference.DisplayTogglesPref,
-+                        AppPreference.ManageMedia,
-+                    ),
-+                ),
-+                group(
-+                    R.string.orca_settings_extras,
-+                    AppPreference.PlayThemeMusic,
-+                    AppPreference.SlideshowDuration,
-+                    AppPreference.SlideshowPlayVideos,
-+                ),
-+            )
++        // Home & Look is Orca+'s own items only (ExtraSourcesSettings). Wholphin's look settings
++        // (app theme, title logos, backdrop style, nav drawer, tabs, ratings display, media
++        // management, theme music, photo slideshows) only changed its classic screens, which
++        // Orca+ no longer shows (one look since 2026-10-07). The clock is the player's: Playback.
++        OrcaSection.APPEARANCE -> emptyList()
 +
 +        // Orca+ items (extra servers, search) first, then signing in to the main server
 +        OrcaSection.SOURCES ->
@@ -1075,7 +1058,7 @@ index c97117b7..0eb14b52 100644
              PreferenceScreenOption.BASIC,
              PreferenceScreenOption.ADVANCED,
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
-index daf6fa07..0de10d2a 100644
+index daf6fa07..691a181c 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
 @@ -67,6 +67,14 @@ fun SwitchPreference(
@@ -1086,13 +1069,33 @@ index daf6fa07..0de10d2a 100644
 +    if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
 +        return SwitchDefaults.colors(
 +            checkedThumbColor = androidx.compose.ui.graphics.Color.White,
-+            checkedTrackColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
-+            checkedBorderColor = com.wholphinplus.sources.cinema.CinemaColors.accent,
++            checkedTrackColor = com.wholphinplus.sources.cinema.CinemaColors.toggle,
++            checkedBorderColor = com.wholphinplus.sources.cinema.CinemaColors.toggle,
 +        )
 +    }
      return when (theme) {
          AppThemeColors.UNRECOGNIZED,
          AppThemeColors.PURPLE,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt
+index a96ab8fe..db4ae70c 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt
+@@ -95,6 +95,7 @@ fun SubtitleStylePage(
+                     .fillMaxSize()
+                     .weight(1f),
+         ) {
++            com.wholphinplus.sources.cinema.SubtitlePreviewBackdrop { // Orca+: the last title's art
+             Image(
+                 painter = painterResource(R.mipmap.eclipse),
+                 contentDescription = null,
+@@ -103,6 +104,7 @@ fun SubtitleStylePage(
+                     Modifier
+                         .fillMaxSize(),
+             )
++            } // Orca+
+             if (!focusedOnMargin && !focusedOnImageOpacity) {
+                 Column(
+                     verticalArrangement = Arrangement.SpaceBetween,
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
 new file mode 100644
 index 00000000..a8cc4aa2
@@ -1291,10 +1294,10 @@ index 00000000..a8cc4aa2
 +    WelcomeFinish(onDone = {}, modifier = modifier.fillMaxSize())
 +}
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
-index 8ae95b25..e24401d1 100644
+index 8ae95b25..e3f5f6c8 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
-@@ -37,6 +37,8 @@ fun WholphinTheme(
+@@ -37,19 +37,22 @@ fun WholphinTheme(
      content: @Composable () -> Unit,
  ) {
      val themeColors = getThemeColors(appThemeColors)
@@ -1303,9 +1306,12 @@ index 8ae95b25..e24401d1 100644
  
      val colorScheme =
          when {
-@@ -45,11 +47,11 @@ fun WholphinTheme(
+             darkTheme -> themeColors.darkScheme
+             else -> themeColors.lightScheme
          }
-     CompositionLocalProvider(LocalTheme provides appThemeColors) {
+-    CompositionLocalProvider(LocalTheme provides appThemeColors) {
++    // Orca+: one look; a theme picked before it (OLED black…) no longer tints the player
++    CompositionLocalProvider(LocalTheme provides if (cinema) AppThemeColors.PURPLE else appThemeColors) {
          androidx.compose.material3.MaterialTheme(
 -            colorScheme = if (darkTheme) themeColors.darkSchemeMaterial else themeColors.lightSchemeMaterial,
 +            colorScheme = if (cinema) com.wholphinplus.sources.cinema.CinemaColors.material else if (darkTheme) themeColors.darkSchemeMaterial else themeColors.lightSchemeMaterial,

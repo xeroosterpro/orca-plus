@@ -41,15 +41,18 @@ class ConnectionStore
 
         private val _tmdbKey = MutableStateFlow(decrypt(prefs.getString(TMDB_KEY, "").orEmpty()))
 
-        private val _cinemaMode = MutableStateFlow(prefs.getBoolean(CINEMA_KEY, false))
+        /**
+         * Orca+'s own look (the big-screen home, title pages, search) instead of Wholphin's.
+         * Always on since 2026-10-07 (owner: one look, no theme to choose); the classic look and
+         * its switches are gone. Kept as a flow so the screens that ask needn't change.
+         */
+        private val _cinemaMode = MutableStateFlow(true)
 
-        /** Cinema mode: the big-screen streaming home instead of Wholphin's home page. */
         val cinemaMode: StateFlow<Boolean> = _cinemaMode.asStateFlow()
 
-        fun setCinemaMode(on: Boolean) {
-            prefs.edit().putBoolean(CINEMA_KEY, on).apply()
-            _cinemaMode.value = on
-        }
+        /** No-op: there's only one look now (old synced profiles may still carry "off"). */
+        @Suppress("UNUSED_PARAMETER")
+        fun setCinemaMode(on: Boolean) = Unit
 
         private val _onboarding = MutableStateFlow(prefs.getString(ONBOARDING_KEY, com.wholphinplus.sources.welcome.Onboarding.NEW) ?: com.wholphinplus.sources.welcome.Onboarding.NEW)
 
@@ -83,6 +86,29 @@ class ConnectionStore
         fun setKidsTab(on: Boolean) {
             prefs.edit().putBoolean(KIDS_TAB_KEY, on).apply()
             _kidsTab.value = on
+        }
+
+        private val _posterSize = MutableStateFlow(prefs.getString(POSTER_SIZE_KEY, null) ?: com.wholphinplus.sources.cinema.PosterSize.AUTO)
+
+        /**
+         * Card picture size: auto, sharp or fast (300 px). This TV's network, so not synced.
+         * Auto's "slow" verdict is kept a day ([com.wholphinplus.sources.cinema.PosterSize]).
+         */
+        val posterSize: StateFlow<String> = _posterSize.asStateFlow()
+
+        fun setPosterSize(mode: String) {
+            prefs.edit().putString(POSTER_SIZE_KEY, mode).apply()
+            _posterSize.value = mode
+            com.wholphinplus.sources.cinema.PosterSize.mode = mode
+            if (mode == com.wholphinplus.sources.cinema.PosterSize.AUTO) com.wholphinplus.sources.cinema.PosterSize.retest()
+        }
+
+        init {
+            com.wholphinplus.sources.cinema.PosterSize.also {
+                it.mode = _posterSize.value
+                it.restore(prefs.getLong(POSTER_SLOW_KEY, 0L))
+                it.onVerdict = { since -> prefs.edit().putLong(POSTER_SLOW_KEY, since).apply() }
+            }
         }
 
         private val _shuffleLocks = MutableStateFlow(prefs.getStringSet(SHUFFLE_LOCKS_KEY, null).orEmpty().toSet())
@@ -285,6 +311,8 @@ class ConnectionStore
             const val ROLL_UP_KEY = "cinema_roll_up"
             const val SHUFFLE_LOCKS_KEY = "shuffle_locks"
             const val KIDS_TAB_KEY = "kids_tab"
+            const val POSTER_SIZE_KEY = "poster_size"
+            const val POSTER_SLOW_KEY = "poster_slow_since"
             const val ONBOARDING_KEY = "onboarding_stage"
 
             const val OVERLAYS_KEY = "poster_overlays"

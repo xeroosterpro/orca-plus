@@ -447,7 +447,7 @@ internal fun PosterTagsPreview(
  * scaled size. Crisp: a canvas scale, not a bitmap.
  */
 @Composable
-private fun Scaled(
+internal fun Scaled(
     width: androidx.compose.ui.unit.Dp,
     scale: Float,
     content: @Composable () -> Unit,

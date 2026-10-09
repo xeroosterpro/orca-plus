@@ -273,7 +273,7 @@ class ListClient(
     }
 
     private fun trakt(s: ListSource.Trakt): FetchedList {
-        val key = traktClientId().ifBlank { error("Trakt links need a Trakt client ID (Settings → Home & Look → Your lists)") }
+        val key = traktClientId().ifBlank { error("Trakt links need a Trakt client ID (Settings → Keys & Services → Trakt)") }
         val headers = mapOf("trakt-api-version" to "2", "trakt-api-key" to key, "Content-Type" to "application/json")
         val name =
             if (s.apiPath.endsWith("watchlist") || s.apiPath.endsWith("favorites")) {

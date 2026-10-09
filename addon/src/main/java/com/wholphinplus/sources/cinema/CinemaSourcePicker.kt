@@ -163,7 +163,9 @@ private fun PickerScreen(ui: PickerUi) {
                         val arrive = tween<Float>(360, easing = CinemaEase)
                         val glide = spring(dampingRatio = 1f, stiffness = 110f, visibilityThreshold = IntOffset.VisibilityThreshold)
                         val leave = tween<Float>(200, easing = CinemaFade)
-                        itemsIndexed(ui.rows, key = { _, r -> r.connectionId + r.url }) { index, r ->
+                        // By copy: the main server's versions share a server and have no URL of their own
+                        // (two keyed "jellyfin" crashed the list); one row per copy
+                        itemsIndexed(ui.rows.distinctBy { com.wholphinplus.sources.copyKey(it) }, key = { _, r -> com.wholphinplus.sources.copyKey(r) }) { index, r ->
                             Box(Modifier.animateItem(fadeInSpec = arrive, placementSpec = glide, fadeOutSpec = leave)) {
                                 val failed = com.wholphinplus.sources.copyKey(r) in ui.failed
                                 CopyRow(
@@ -177,6 +179,12 @@ private fun PickerScreen(ui: PickerUi) {
                         }
                         items(waiting, key = { "waiting$it" }) {
                             Box(Modifier.animateItem(fadeInSpec = arrive, placementSpec = glide, fadeOutSpec = leave)) { WaitingRow() }
+                        }
+                        // The servers that had nothing, and why (offline, sign-in expired, not there)
+                        if (ui.misses.isNotEmpty()) {
+                            item(key = "misses") {
+                                Box(Modifier.animateItem(fadeInSpec = arrive, placementSpec = glide, fadeOutSpec = leave)) { Misses(ui.misses) }
+                            }
                         }
                     }
                 }
@@ -206,6 +214,34 @@ private fun SearchLine(ui: PickerUi) {
         }
     }
 }
+
+/** Under the copies: each server that had none, its logo, and the reason. Not focusable. */
+@Composable
+private fun Misses(misses: List<com.wholphinplus.sources.Miss>) {
+    Column(Modifier.padding(start = 20.dp, top = 18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Text("NO COPY FROM", color = InkDim, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+        misses.forEach { m ->
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp), verticalAlignment = Alignment.CenterVertically) {
+                val brand by androidx.compose.runtime.produceState(com.wholphinplus.sources.ServerBrands.known(m.kind, m.url), m.url) {
+                    value = com.wholphinplus.sources.ServerBrands.check(m.kind, m.url)
+                }
+                brand?.let { b ->
+                    androidx.compose.foundation.Image(
+                        painter = androidx.compose.ui.res.painterResource(com.wholphinplus.sources.ServerBrands.logo(b)),
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                        modifier = Modifier.height(if (b == com.wholphinplus.sources.ServerBrands.Brand.PLEX) 11.dp else 15.dp).graphicsLayer { alpha = 0.75f },
+                    )
+                }
+                Text(m.label, color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                // Trouble stands out a little; "not on this server" stays quiet
+                Text("·  ${m.reason}", color = if (m.trouble == null) InkDim else MissTrouble, fontSize = 14.sp)
+            }
+        }
+    }
+}
+
+private val MissTrouble = Color(0xFFE6B566)
 
 private val RowShape = RoundedCornerShape(10.dp)
 private val RowHeight = 78.dp
@@ -262,7 +298,21 @@ private fun CopyRow(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     val own = r.connectionId == com.wholphinplus.sources.SourceHook.JELLYFIN_ROW
-                    Text(if (own) "Your server" else r.serverLabel, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    // The server's logo and its own name (never "Your server")
+                    val brandUrl = if (own) com.wholphinplus.sources.ServerBrands.mainUrl() else r.url
+                    val brandKind = if (own) com.wholphinplus.sources.core.ServerKind.JELLYFIN else r.serverKind
+                    val brand by androidx.compose.runtime.produceState(com.wholphinplus.sources.ServerBrands.known(brandKind, brandUrl), brandUrl) {
+                        value = com.wholphinplus.sources.ServerBrands.check(brandKind, brandUrl)
+                    }
+                    brand?.let { b ->
+                        androidx.compose.foundation.Image(
+                            painter = androidx.compose.ui.res.painterResource(com.wholphinplus.sources.ServerBrands.logo(b)),
+                            contentDescription = null,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                            modifier = Modifier.height(if (b == com.wholphinplus.sources.ServerBrands.Brand.PLEX) 14.dp else 20.dp),
+                        )
+                    }
+                    Text(if (own) com.wholphinplus.sources.ServerBrands.mainName() else r.serverLabel, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     if (best) {
                         Text(
                             "BEST MATCH",

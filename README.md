@@ -215,12 +215,12 @@ Orca+ works out of the box. Everything else is in **Settings**, organised by wha
 
 | | Where | You'll need |
 |---|---|---|
-| **Your home** | Home &amp; Look → Rows, Poster tags | Nothing |
-| **Extra servers** | Servers &amp; Search → Extra servers → *+ Add server* | The server address. Emby/Jellyfin: username and password, or Quick Connect. Plex: a code entered at plex.tv/link. |
+| **Your home** | Home &amp; Look → Rows, Poster tags, Description tags | Nothing |
+| **Extra servers** | Servers &amp; Copies → Extra servers → *+ Add a server* | Your phone (scan the code and type it there), or Emby Connect, a Plex code at plex.tv/link, Jellyfin Quick Connect, or the address and sign-in. |
 | **Your own lists** | Home &amp; Look → Your lists | A public MDBList or Trakt list link (Trakt also needs a free Client ID), or a Top Streaming account. |
-| **Review scores** | Home &amp; Look → Poster tags → Score sources | TMDB scores work as is. IMDb, Rotten Tomatoes and more need a free MDBList key. |
-| **Your Orca+ account** | Account &amp; Cloud → Cloud sync | An Orca+ name and a six-digit PIN you pick. |
-| **This TV** | About &amp; Help → This TV | Nothing: Auto picks Full, Balanced or Light for your box. |
+| **Keys** | Keys &amp; Services | Optional: TMDB, MDBList (IMDb, Rotten Tomatoes and more), Trakt, Top Streaming. Add them from your phone. |
+| **Your Orca+ account** | Account | An Orca+ name and a six-digit PIN you pick. |
+| **This TV** | This TV | Nothing: Auto picks Full, Balanced or Light for your box. |
 
 <br>
 

@@ -535,6 +535,7 @@ internal fun TitleGrid(
                 }
             }
         }
+        BottomFade()
     }
 }
 

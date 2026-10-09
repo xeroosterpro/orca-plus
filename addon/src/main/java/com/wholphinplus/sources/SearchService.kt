@@ -101,7 +101,8 @@ class SearchService
             item: TmdbItem,
             season: Int? = null,
             episode: Int? = null,
-            progress: ((found: List<ExternalSource>, done: Int, total: Int) -> Unit)? = null,
+            // misses: the servers with nothing, and why ([Miss]), for the picker's footer
+            progress: ((found: List<ExternalSource>, done: Int, total: Int, misses: List<Miss>) -> Unit)? = null,
         ): List<ExternalSource> =
             withContext(Dispatchers.IO) {
                 val ids = runCatching { tmdb.externalIds(item) }.getOrNull()
@@ -118,17 +119,24 @@ class SearchService
                 val connections = hook.searchableConnections()
                 val found = java.util.concurrent.atomic.AtomicReference<List<ExternalSource>>(emptyList())
                 val done = java.util.concurrent.atomic.AtomicInteger()
-                progress?.invoke(emptyList(), 0, connections.size)
+                val misses = java.util.concurrent.atomic.AtomicReference<List<Miss>>(emptyList())
+                progress?.invoke(emptyList(), 0, connections.size, emptyList())
                 coroutineScope {
                     connections
                         .map { c ->
                             async {
-                                val more = hook.findOn(c, request)
+                                val (more, trouble) = hook.findChecked(c, request)
                                 val now = found.updateAndGet { (it + more).withoutRepeats() }
-                                progress?.invoke(now, done.incrementAndGet(), connections.size)
+                                val missed =
+                                    misses.updateAndGet { m ->
+                                        if (more.isNotEmpty()) m else (m + Miss(c.connectionId, c.label, c.serverKind, c.serverUrl, trouble)).sortedBy { x -> connections.indexOfFirst { it.connectionId == x.connectionId } }
+                                    }
+                                progress?.invoke(now, done.incrementAndGet(), connections.size, missed)
                             }
                         }.awaitAll()
                 }
+                // Callbacks from several servers can land out of order: the final word last
+                progress?.invoke(found.get(), done.get(), connections.size, misses.get())
                 found.get().sortedWith(stableRanking(connections.map { it.connectionId }))
             }
 

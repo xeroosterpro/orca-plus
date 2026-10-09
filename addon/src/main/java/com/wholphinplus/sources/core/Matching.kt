@@ -286,7 +286,7 @@ val sourceRanking: Comparator<ExternalSource>
     get() = ranking(copyFit).thenByDescending { it.sizeBytes }
 
 /**
- * How the owner tunes the picker (Settings → Servers & Search): your server's copy first when
+ * How the owner tunes the picker (Settings → Servers & Copies): your server's copy first when
  * copies are the same size, one server put first, and playing the top copy without the list.
  */
 @kotlinx.serialization.Serializable
@@ -301,8 +301,17 @@ data class PickerPrefs(
     }
 }
 
-/** Sizes this close (the 0.1 GB the picker shows) count as the same file for [PickerPrefs.preferMain]. */
-fun sizeBucket(bytes: Long): Long = Math.round(bytes / 100_000_000.0)
+/**
+ * Copies whose sizes read the same in the picker ("5.3 GB") count as the same file. It used to round
+ * decimal gigabytes while the picker shows 1024-based ones, so two "5.3 GB" copies could fall either
+ * side of a step and not tie.
+ */
+fun sizeBucket(bytes: Long): Long {
+    val shown = formatBytes(bytes)
+    val n = shown.substringBefore(' ').toDoubleOrNull() ?: return 0L
+    // GB above every MB value, so bigger still sorts first
+    return if (shown.endsWith("GB")) 1_000_000L + Math.round(n * 10) else Math.round(n)
+}
 
 /**
  * [stableRanking] with the owner's tuning: the server put first comes first (its best copy at
@@ -321,15 +330,14 @@ fun tunedRanking(
             PickerPrefs.MAIN -> mainId
             else -> prefs.first
         }
+    // Your server's copy first among copies just as good (owner, 2026-10-09: "if all the top files
+    // are tied and your main is one of the tied it should put it first"); always, no longer a choice.
+    // [PickerPrefs.preferMain] stays only so saved and synced settings still read.
     val quality =
-        if (prefs.preferMain) {
-            ranking(copyFit)
-                .thenByDescending { sizeBucket(it.sizeBytes) }
-                .thenBy { if (it.connectionId == mainId) 0 else 1 }
-                .thenByDescending { it.sizeBytes }
-        } else {
-            sourceRanking
-        }
+        ranking(copyFit)
+            .thenByDescending { sizeBucket(it.sizeBytes) }
+            .thenBy { if (it.connectionId == mainId) 0 else 1 }
+            .thenByDescending { it.sizeBytes }
     return compareBy<ExternalSource> { if (firstId != null && it.connectionId == firstId) 0 else 1 }
         .then(quality)
         .thenBy { place[it.connectionId] ?: Int.MAX_VALUE }

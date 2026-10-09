@@ -139,7 +139,7 @@ internal fun NameSignInStep(
                             PillButton("Use my server instead", primary = false, onClick = onServer)
                         }
                         Text(
-                            "No Orca+ name yet? Sign in with your server and PIN this time, then pick one in Settings → Account & Cloud → Cloud sync.",
+                            "No Orca+ name yet? Sign in with your server and PIN this time, then pick one in Settings → Account.",
                             color = InkDim,
                             fontSize = 12.sp,
                             lineHeight = 17.sp,

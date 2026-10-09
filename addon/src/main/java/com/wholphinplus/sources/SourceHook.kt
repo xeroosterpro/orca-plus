@@ -266,17 +266,50 @@ class SourceHook
         internal suspend fun findOn(
             connection: ServerConnection,
             request: PlayRequest,
-        ): List<ExternalSource> {
+        ): List<ExternalSource> = findChecked(connection, request).first
+
+        /**
+         * [findOn], and why it found nothing when the server is in trouble ([ServerHealth]). A
+         * resting server isn't asked at all: its remembered trouble comes back at once.
+         */
+        internal suspend fun findChecked(
+            connection: ServerConnection,
+            request: PlayRequest,
+        ): Pair<List<ExternalSource>, ServerHealth.Trouble?> {
+            health.resting(connection)?.let { return emptyList<ExternalSource>() to it.trouble }
             val key = "${connection.connectionId}|${connection.lastConnectedAt}|$request"
-            cache[key]?.let { if (System.currentTimeMillis() - it.at < CACHE_MS) return it.sources }
+            cache[key]?.let { if (System.currentTimeMillis() - it.at < CACHE_MS) return it.sources to null }
+            val started = System.currentTimeMillis()
             val lookup =
                 inflight.computeIfAbsent(key) {
                     background.async {
                         client.findSourcesOrNull(connection, request)?.also { cache[key] = Cached(it, System.currentTimeMillis()) }
                     }.also { d -> d.invokeOnCompletion { inflight.remove(key, d) } }
                 }
-            return withTimeoutOrNull(SERVER_TIMEOUT_MS) { lookup.await() }.orEmpty()
+            // Wrapped: a lookup that failed (null) and one still running (timeout) mean different things
+            val done = withTimeoutOrNull(SERVER_TIMEOUT_MS) { listOf(lookup.await()) }
+            val sources = done?.single()
+            val trouble =
+                when {
+                    done == null -> ServerHealth.Trouble.SLOW
+                    sources != null -> null
+                    else ->
+                        when (client.troubleSince(connection, started)) {
+                            401, 403 -> ServerHealth.Trouble.SIGN_IN
+                            -1 -> ServerHealth.Trouble.OFFLINE
+                            else -> ServerHealth.Trouble.ERROR
+                        }
+                }
+            if (trouble == null) health.ok(connection) else health.failed(connection, trouble)
+            return sources.orEmpty() to trouble
         }
+
+        /** How each extra server answered its last lookup (no requests of its own). */
+        val health =
+            ServerHealth(context).also { h ->
+                val main = android.os.Handler(android.os.Looper.getMainLooper())
+                h.notify = { text -> main.post { android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_LONG).show() } }
+            }
 
         fun clearCache() = cache.clear()
 
@@ -296,7 +329,8 @@ class SourceHook
     }
 
 /** Same copy, same key: the picker marks failed rows by it. */
-fun copyKey(s: ExternalSource): String = s.connectionId + "|" + s.url
+// The main server's versions have no URL of their own: their media source tells them apart
+fun copyKey(s: ExternalSource): String = s.connectionId + "|" + s.url.ifBlank { s.mediaSourceId }
 
 /** How the trouble screen plays a failed title again (see [PickSession.prepareRetry]). */
 sealed interface Retry {
@@ -314,6 +348,11 @@ sealed interface Retry {
 
 sealed interface Pick {
     data object Jellyfin : Pick
+
+    /** One version of the main server's item (it has several: 4K, 1080p…); Wholphin plays that one. */
+    data class JellyfinSource(
+        val mediaSourceId: String,
+    ) : Pick
 
     data class External(
         val source: ExternalSource,
@@ -338,7 +377,26 @@ data class PickerUi(
     val backdrop: String? = null,
     // Copies that failed to play just now ([PickSession.copyKey]): marked, and ranked last
     val failed: Set<String> = emptySet(),
+    // Servers with no copy of this, and why (listed under the copies)
+    val misses: List<Miss> = emptyList(),
 )
+
+/** A server the picker found nothing on: [trouble] null means it answered, it just hasn't this title. */
+data class Miss(
+    val connectionId: String,
+    val label: String,
+    val kind: ServerKind,
+    val url: String,
+    val trouble: ServerHealth.Trouble?,
+) {
+    val reason: String
+        get() =
+            when (trouble) {
+                null -> "not on this server"
+                ServerHealth.Trouble.SIGN_IN -> "sign-in expired · sign in again in Settings → Servers & Copies"
+                else -> trouble.reason
+            }
+}
 
 /**
  * One playback screen's worth of choices. The first item asks; later items in the same
@@ -545,6 +603,7 @@ class PickSession internal constructor(
         eligible: Boolean,
     ): Pick {
         chosen.remove(item.id)
+        chosenMain.remove(item.id)
         if (lastBase?.id != item.id) lastError = null
         lastBase = item
         if (!eligible) return Pick.Jellyfin
@@ -555,7 +614,7 @@ class PickSession internal constructor(
             asked = true
             stickyConnectionId = copy.connectionId.takeUnless { it == SourceHook.JELLYFIN_ROW }
             sticky = copy.takeUnless { it.connectionId == SourceHook.JELLYFIN_ROW }
-            if (sticky == null) return Pick.Jellyfin
+            if (sticky == null) return mainPick(item, copy)
             chosen[item.id] = copy
             return Pick.External(copy)
         }
@@ -600,8 +659,7 @@ class PickSession internal constructor(
         val list = showList.also { showList = false }
         if (prefs.autoPlay && !list) return autoPick(item, connections, request, ranking)
         val decision = CompletableDeferred<Pick>()
-        val jellyfinRow = jellyfinRow(item)
-        val found = MutableStateFlow(listOf(jellyfinRow))
+        val found = MutableStateFlow(jellyfinRows(item))
         val title =
             if (request.isEpisode) {
                 "${request.title} S%02dE%02d".format(request.season, request.episode)
@@ -616,7 +674,7 @@ class PickSession internal constructor(
                 serversTotal = connections.size,
                 serversDone = 0,
                 onSelect = { row ->
-                    decision.complete(if (row.connectionId == SourceHook.JELLYFIN_ROW) Pick.Jellyfin else Pick.External(row))
+                    decision.complete(if (row.connectionId == SourceHook.JELLYFIN_ROW) mainPick(item, row) else Pick.External(row))
                 },
                 onCancel = { decision.complete(Pick.Cancelled) },
                 itemId = item.id.toString(),
@@ -632,9 +690,16 @@ class PickSession internal constructor(
                 connections
                     .map { connection ->
                         async {
-                            val sources = hook.findOn(connection, request)
+                            val (sources, trouble) = hook.findChecked(connection, request)
                             found.update { (it + sources).withoutRepeats() }
-                            _ui.update { ui -> ui?.copy(serversDone = ui.serversDone + 1) }
+                            val miss = if (sources.isEmpty()) Miss(connection.connectionId, connection.label, connection.serverKind, connection.serverUrl, trouble) else null
+                            _ui.update { ui ->
+                                ui?.copy(
+                                    serversDone = ui.serversDone + 1,
+                                    // In the Settings order of servers, whatever answers first
+                                    misses = (ui.misses + listOfNotNull(miss)).sortedBy { m -> connections.indexOfFirst { it.connectionId == m.connectionId } },
+                                )
+                            }
                         }
                     }.awaitAll()
                 // Rank only once everything is in, so rows never jump under the cursor.
@@ -677,7 +742,7 @@ class PickSession internal constructor(
 
     /** The copy [itemId] plays from failed: the countdown never offers it again. */
     private fun markFailed(itemId: UUID) {
-        val copy = chosen[itemId] ?: lastBase?.takeIf { it.id == itemId }?.let(::jellyfinRow) ?: return
+        val copy = chosen[itemId] ?: mainCopy(itemId) ?: return
         lastFailed = copy
         failedCopies.getOrPut(itemId) { ConcurrentHashMap.newKeySet() } += copyKey(copy)
     }
@@ -692,14 +757,14 @@ class PickSession internal constructor(
         itemId?.let(::markFailed)
         // The fallback's "no URL" carries no error of its own: the failure before it counts too
         val signals = PlaybackTrouble.signalsOf(listOfNotNull(exception, lastError).distinct(), message, StreamHealth.recent())
-        val server = lastFailed?.takeUnless { it.connectionId == SourceHook.JELLYFIN_ROW }?.serverLabel ?: PlaybackTrouble.MAIN
+        val server = lastFailed?.takeUnless { it.connectionId == SourceHook.JELLYFIN_ROW }?.serverLabel ?: ServerBrands.mainName()
         return PlaybackTrouble.explain(signals, server)
     }
 
     /** The copy [itemId] plays from (null when unknown), and whether it's the main server's. */
     fun playingCopy(itemId: UUID): Pair<ExternalSource?, Boolean> {
         chosen[itemId]?.let { return it to false }
-        return lastBase?.takeIf { it.id == itemId }?.let(::jellyfinRow) to true
+        return mainCopy(itemId) to true
     }
 
     /** Extra servers to choose from. */
@@ -722,7 +787,7 @@ class PickSession internal constructor(
             } ?: return null
         val found = kotlinx.coroutines.coroutineScope { connections.map { async { hook.findOn(it, request) } }.awaitAll().flatten() }
         val failed = failedCopies[itemId].orEmpty()
-        return (listOf(jellyfinRow(base)) + found)
+        return (jellyfinRows(base) + found)
             .withoutRepeats()
             .sortedWith(tunedRanking(connections.map { it.connectionId }, hook.store.pickerPrefs.value, SourceHook.JELLYFIN_ROW))
             .firstOrNull { copyKey(it) !in failed }
@@ -765,7 +830,7 @@ class PickSession internal constructor(
         }
         val failed = failedCopies[item.id].orEmpty()
         val best =
-            (listOf(jellyfinRow(item)) + found)
+            (jellyfinRows(item) + found)
                 .withoutRepeats()
                 .sortedWith(ranking)
                 .firstOrNull { copyKey(it) !in failed }
@@ -774,11 +839,40 @@ class PickSession internal constructor(
         stickyConnectionId = external?.connectionId
         sticky = external
         Timber.i("Source auto-picked for %s: %s", item.id, best?.serverLabel ?: "Jellyfin")
-        return external?.let { Pick.External(it) } ?: Pick.Jellyfin
+        return external?.let { Pick.External(it) } ?: best?.let { mainPick(item, it) } ?: Pick.Jellyfin
     }
 
-    private fun jellyfinRow(item: BaseItemDto): ExternalSource {
-        val source = item.mediaSources?.firstOrNull()
+    /**
+     * The main server's copies: one row per version of the item (sweep 2026-10-09: the main server
+     * keeps 4K and 1080p versions in one item, and only the first was offered). Identical files
+     * collapse in [withoutRepeats].
+     */
+    private fun jellyfinRows(item: BaseItemDto): List<ExternalSource> {
+        val sources = item.mediaSources.orEmpty()
+        if (sources.isEmpty()) return listOf(jellyfinRow(item, null))
+        // The same file twice (the movie in two libraries: "4K HEVC 71.7 GB" listed twice) is one row
+        return sources.map { jellyfinRow(item, it) }.distinctBy { listOf(it.quality, it.videoCodec, it.hdr, it.audio, it.container, it.sizeBytes) }
+    }
+
+    /** Which main-server version a row stands for: a version of its own only when there's a choice. */
+    private fun mainPick(
+        item: BaseItemDto,
+        row: ExternalSource,
+    ): Pick {
+        chosenMain[item.id] = row
+        return row.mediaSourceId.takeIf { it.isNotBlank() && item.mediaSources.orEmpty().size > 1 }?.let { Pick.JellyfinSource(it) } ?: Pick.Jellyfin
+    }
+
+    /** The main-server version [pick] chose, per item (its failure marks only that version). */
+    private val chosenMain = ConcurrentHashMap<UUID, ExternalSource>()
+
+    /** The main-server copy [itemId] plays: the version chosen, else its first. */
+    private fun mainCopy(itemId: UUID): ExternalSource? = chosenMain[itemId] ?: lastBase?.takeIf { it.id == itemId }?.let { jellyfinRows(it).first() }
+
+    private fun jellyfinRow(
+        item: BaseItemDto,
+        source: org.jellyfin.sdk.model.api.MediaSourceInfo?,
+    ): ExternalSource {
         val streams = source?.mediaStreams.orEmpty()
         val video = streams.firstOrNull { it.type == MediaStreamType.VIDEO }
         val audio = streams.filter { it.type == MediaStreamType.AUDIO }.let { a -> a.firstOrNull { it.isDefault } ?: a.firstOrNull() }
@@ -793,7 +887,7 @@ class PickSession internal constructor(
             }
         return ExternalSource(
             connectionId = SourceHook.JELLYFIN_ROW,
-            serverLabel = "Jellyfin (this server)",
+            serverLabel = ServerBrands.mainName(),
             serverKind = ServerKind.JELLYFIN,
             url = "",
             quality = quality.ifBlank { "?" },
@@ -813,7 +907,8 @@ class PickSession internal constructor(
                     }.orEmpty(),
             container = source?.container?.substringBefore(',')?.uppercase().orEmpty(),
             sizeBytes = source?.size ?: 0L,
-            fileName = source?.name.orEmpty(),
+            fileName = source?.path?.substringAfterLast('/')?.ifBlank { null } ?: source?.name.orEmpty(),
+            mediaSourceId = source?.id.orEmpty(),
         )
     }
 }

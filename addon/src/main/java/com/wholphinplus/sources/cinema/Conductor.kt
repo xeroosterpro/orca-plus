@@ -94,14 +94,25 @@ internal object Conductor {
  * all but a quarter of the decoded images (the disk cache refills them quickly), so Android is
  * less likely to close the app; at the edge of being closed, everything.
  */
-internal class MemoryTrim(
+class MemoryTrim(
     private val context: Context,
 ) : ComponentCallbacks2 {
+    companion object {
+        /**
+         * Wholphin has set the app's image loader (its CoilConfig, marked hook). Until then a trim
+         * must not touch it: asking for it made Coil's default one, and Wholphin's setup then
+         * crashed the app ("The singleton image loader has already been created"). A Shield short
+         * of memory sends trims early, even in a process started in the background after an install.
+         */
+        @Volatile var loaderSet = false
+    }
+
     override fun onTrimMemory(level: Int) {
         // RUNNING_MODERATE: nothing yet (the system's own first warning)
         if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
         // Pages and title pages only when it's serious (Back from the player keeps its instant page)
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) CinemaCaches.trim()
+        if (!loaderSet) return
         runCatching {
             val images = SingletonImageLoader.get(context).memoryCache ?: return@runCatching
             when {

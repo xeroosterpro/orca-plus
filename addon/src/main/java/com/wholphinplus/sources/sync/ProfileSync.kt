@@ -161,7 +161,10 @@ class ProfileSync
 
         suspend fun pairCollect(p: PairStart): Map<String, String>? = withContext(Dispatchers.IO) { client.pairCollect(p) }
 
-        suspend fun setupStart(pub: String): SetupStart = withContext(Dispatchers.IO) { client.setupStart(pub) }
+        suspend fun setupStart(
+            pub: String,
+            mode: String? = null,
+        ): SetupStart = withContext(Dispatchers.IO) { client.setupStart(pub, mode) }
 
         suspend fun setupCollect(s: SetupStart): SetupBox? = withContext(Dispatchers.IO) { client.setupCollect(s) }
 
@@ -507,7 +510,7 @@ class ProfileSync
                     e is CloudException && e.error == "slow_down" -> "The cloud is busy. Trying again in ${minutes(e.retryAfterSec ?: 60)}"
                     e is CloudException && e.error == "kept_recently" ->
                         "A TV that syncs kept this setup recently, so it can't be reset again for ${days(e.retryAfterSec)}. " +
-                            "On a TV that still syncs, change the PIN instead: Settings → Account & Cloud → Cloud sync → Change PIN."
+                            "On a TV that still syncs, change the PIN instead: Settings → Account → Name & PIN → Change PIN."
                     e is CloudException && e.error == "full" -> "The Orca+ cloud is full right now, so nothing new can be saved. Your setup here is unchanged; try again later."
                     e is CloudException -> "The cloud answered ${e.error}"
                     e is java.io.IOException -> "Can't reach the Orca+ cloud"

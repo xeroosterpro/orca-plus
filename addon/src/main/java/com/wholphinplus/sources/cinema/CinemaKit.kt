@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.key
 import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -97,6 +98,21 @@ internal val CinemaFade = CubicBezierEasing(0.42f, 0f, 0.58f, 1f)
  * speed when the next press lands mid-move, so quick presses glide on instead of restarting.
  */
 internal val CinemaGlide = androidx.compose.animation.core.spring<Float>(dampingRatio = 1f, stiffness = 110f)
+
+/**
+ * The page's lower edge fading into the stage, so a row or grid peeking in from below fades out
+ * instead of being sliced through its text (sweep 2026-10-09). One gradient drawn on top: no layer.
+ */
+@Composable
+internal fun androidx.compose.foundation.layout.BoxScope.BottomFade(height: Dp = 56.dp) {
+    Box(
+        Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            .height(height)
+            .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Stage.copy(alpha = 0f), Stage))),
+    )
+}
 
 /** Whether the row a card sits in is the one the remote rests on (its pictures start at once). */
 internal val LocalRowRested = androidx.compose.runtime.staticCompositionLocalOf<androidx.compose.runtime.State<Boolean>?> { null }
@@ -874,12 +890,60 @@ internal fun request(
 internal fun Wordmark(
     modifier: Modifier = Modifier,
     size: Int = 22,
+    // The top bar's: a band of light sweeps across the letters every few seconds (owner,
+    // 2026-10-09: "shimmer… light way animation that looks smooth"). Between sweeps nothing redraws;
+    // a sweep waits while anything glides, and Light boxes skip it.
+    shine: Boolean = false,
 ) {
-    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+    val sweep = remember { Animatable(-1f) }
+    if (shine && !com.wholphinplus.sources.DeviceClass.light) {
+        LaunchedEffect(Unit) {
+            while (true) {
+                kotlinx.coroutines.delay(SHINE_EVERY_MS)
+                snapshotFlow { CardFill.anyBusy }.first { !it }
+                sweep.snapTo(0f)
+                sweep.animateTo(1f, tween(SHINE_MS, easing = CinemaFade))
+                sweep.snapTo(-1f)
+            }
+        }
+    }
+    val shining =
+        if (!shine) {
+            Modifier
+        } else {
+            Modifier
+                // Its own small layer, so the light lands on the letters only (SrcAtop)
+                .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                .drawWithContent {
+                    drawContent()
+                    val p = sweep.value
+                    if (p >= 0f) {
+                        val band = this.size.width * 0.45f
+                        val x = -band + p * (this.size.width + band * 2)
+                        drawRect(
+                            androidx.compose.ui.graphics.Brush.linearGradient(
+                                // A lavender light: white on the white letters wouldn't show
+                                0f to SHINE.copy(alpha = 0f),
+                                0.5f to SHINE.copy(alpha = 0.9f),
+                                1f to SHINE.copy(alpha = 0f),
+                                start = androidx.compose.ui.geometry.Offset(x - band / 2, 0f),
+                                end = androidx.compose.ui.geometry.Offset(x + band / 2, this.size.height),
+                            ),
+                            blendMode = androidx.compose.ui.graphics.BlendMode.SrcAtop,
+                        )
+                    }
+                }
+        }
+    Row(modifier.then(shining), verticalAlignment = Alignment.CenterVertically) {
         Text("ORCA", color = Ink, fontSize = size.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (size * 0.06).sp)
         Text("+", color = Plus, fontSize = size.sp, fontWeight = FontWeight.ExtraBold)
     }
 }
+
+/** How often the top bar's logo shines, and how long a sweep takes. */
+private const val SHINE_EVERY_MS = 6_500L
+private const val SHINE_MS = 1_400
+private val SHINE = Color(0xFFB9A3FF)
 
 @Immutable
 internal data class Meta(

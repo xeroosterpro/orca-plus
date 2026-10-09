@@ -81,7 +81,7 @@ internal fun NoProfileStep(
             if (offline) "CLOUD OUT OF REACH" else "NO SAVED SETUP YET",
             "Let's set this TV up",
             if (offline) {
-                "The Orca+ cloud can't be reached right now, so your saved setup can't come over. Set this TV up with a short tour; once the cloud is back, Settings → Account & Cloud → Cloud sync brings your setup here with your PIN."
+                "The Orca+ cloud can't be reached right now, so your saved setup can't come over. Set this TV up with a short tour; once the cloud is back, Settings → Account brings your setup here with your PIN."
             } else {
                 "This account doesn't have an Orca+ setup in the cloud yet. A short tour sets everything up, and at the end you can save it with a PIN for your other TVs."
             },
@@ -240,7 +240,7 @@ internal fun PowerUpsStep(
         } else {
             // No cloud in this build, so no phone pairing: keys go in by hand later
             androidx.tv.material3.Text(
-                "Add your keys any time in Settings → Home & Look → Your lists, and Settings → Servers & Search.",
+                "Add your keys any time in Settings → Keys & Services.",
                 color = com.wholphinplus.sources.cinema.InkDim,
                 fontSize = 18.sp,
                 modifier = Modifier.weight(0.66f),

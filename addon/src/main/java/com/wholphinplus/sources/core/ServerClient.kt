@@ -557,6 +557,18 @@ class ServerClient(
         return found
     }
 
+    /** Each server's last failed request since [since] (status, or -1 for no answer): why a lookup came back empty. */
+    fun troubleSince(
+        connection: ServerConnection,
+        since: Long,
+    ): Int? {
+        val host = hostKey(connection.serverUrl)
+        val (code, at) = troubleAt[host] ?: return null
+        return code.takeIf { at >= since && (answeredAt[host] ?: 0L) <= at }
+    }
+
+    private val troubleAt = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
+
     /** When each server (scheme, host, port) last answered a request successfully. */
     private val answeredAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -1484,13 +1496,26 @@ class ServerClient(
 
     private fun connectRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url).header("X-Application", "$clientName/$clientVersion")
 
-    private fun call(request: Request): String =
-        http.newCall(request).execute().use { response ->
-            val body = response.body.string()
-            if (!response.isSuccessful) throw ServerRequestException(response.code, httpError(response.code))
-            answeredAt[hostKey(request.url)] = System.currentTimeMillis()
+    private fun call(request: Request): String {
+        val host = hostKey(request.url)
+        val response =
+            try {
+                http.newCall(request).execute()
+            } catch (e: IOException) {
+                troubleAt[host] = -1 to System.currentTimeMillis()
+                throw e
+            }
+        return response.use {
+            val body = it.body.string()
+            if (!it.isSuccessful) {
+                // Read only when a lookup failed as a whole (a single missing item doesn't count)
+                troubleAt[host] = it.code to System.currentTimeMillis()
+                throw ServerRequestException(it.code, httpError(it.code))
+            }
+            answeredAt[host] = System.currentTimeMillis()
             body
         }
+    }
 
     private fun httpError(code: Int): String {
         val hint =

@@ -1184,7 +1184,7 @@ private fun TopNav(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Wordmark(Modifier.padding(end = 18.dp))
+        Wordmark(Modifier.padding(end = 18.dp), shine = true)
         CinemaTab.entries.filter { it != CinemaTab.KIDS || kidsTab }.forEach { t ->
             NavPill(t.label, selected = t == tab, modifier = if (t == tab) Modifier.focusRequester(selected) else Modifier) { onTab(t) }
         }
@@ -1566,6 +1566,10 @@ private fun CinemaRowView(
         val menuScope = rememberCoroutineScope()
         val continueRepo = rememberContinueRepo()
         val shownItems = if (row.continueWatching) state.items.filterNot { ContinueEdits.hides(it, continueRepo.first.overlay) } else state.items
+        // Left and Right move by position ([RowSteps])
+        val steps = remember { RowSteps() }
+        val stepKeys = (if (row.ranked) row.items else shownItems).map { it.key }
+        val focusedHere: (CinemaItem) -> Unit = { steps.at = it.key; onItemFocused(it) }
         // Nearing the end asks for more: a row goes on as long as its list
         if (actions != null && !row.ranked) LoadNearEnd({ state.more(actions.load) }) { rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index to rowState.layoutInfo.totalItemsCount }
         DisposableEffect(state, rowState, controls) {
@@ -1575,18 +1579,28 @@ private fun CinemaRowView(
             }
             onDispose { state.reveal = null }
         }
-        CompositionLocalProvider(LocalBringIntoViewSpec provides cardSpec.gliding(rowState), LocalRowRested provides rested) {
+        // The row reaches one card past the screen's left edge ([LeftReach]): the card before the
+        // focused one is placed there, out of sight, so Left finds it like Right finds the next
+        val reach = with(LocalDensity.current) { LeftReach.roundToPx() }
+        val reachSpec = remember(cardSpec, reach) { cardSpec.reaching(reach.toFloat()) }
+        CompositionLocalProvider(LocalBringIntoViewSpec provides reachSpec.gliding(rowState), LocalRowRested provides rested) {
             LazyRow(
                 state = rowState,
                 // Right after the last card (a Top 10's #10) stays there; it used to reach the top menu
-                modifier = Modifier.staysInRow(),
+                modifier =
+                    Modifier
+                        .layout { m, c ->
+                            val p = m.measure(c.copy(minWidth = c.minWidth + reach, maxWidth = if (c.hasBoundedWidth) c.maxWidth + reach else c.maxWidth))
+                            layout((p.width - reach).coerceAtLeast(0), p.height) { p.place(-reach, 0) }
+                        }.staysInRow()
+                        .onPreviewKeyEvent { steps.step(it, stepKeys, rowState) },
                 horizontalArrangement = Arrangement.spacedBy(if (row.ranked) 4.dp else 10.dp),
-                contentPadding = PaddingValues(start = if (controls) 4.dp else 48.dp, end = 400.dp, top = 8.dp, bottom = 8.dp),
+                contentPadding = PaddingValues(start = (if (controls) 4.dp else 48.dp) + LeftReach, end = 400.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.Top,
             ) {
                 if (row.ranked) {
                     items(row.items, key = { it.key }, contentType = { "top10" }) { item ->
-                        Top10Card(item, item.rank ?: (row.items.indexOf(item) + 1), onItemFocused, onItemClick, if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier)
+                        Top10Card(item, item.rank ?: (row.items.indexOf(item) + 1), focusedHere, onItemClick, if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier)
                     }
                 } else {
                     // Above the cards, so a button's label can show over the first one
@@ -1595,7 +1609,7 @@ private fun CinemaRowView(
                         // Held OK opens its menu: Remove / Mark as watched; cards then glide closed
                         items(shownItems, key = { it.key }, contentType = { "card" }) { item ->
                             Box(Modifier.animateItem(fadeInSpec = tween(420, easing = CinemaFade), placementSpec = CardsClose, fadeOutSpec = tween(280, easing = CinemaFade))) {
-                                CinemaCard(item, onItemFocused, onItemClick, modifier = if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier, onLongClick = openMenu)
+                                CinemaCard(item, focusedHere, onItemClick, modifier = if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier, onLongClick = openMenu)
                                 if (menuFor?.key == item.key) {
                                     ContinueMenu(item, onClose = { menuFor = null }) { action ->
                                         menuFor = null
@@ -1608,12 +1622,54 @@ private fun CinemaRowView(
                     } else {
                         val items = state.items
                         items(items, key = { it.key }, contentType = { "card" }) { item ->
-                            CinemaCard(item, onItemFocused, onItemClick, modifier = if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier)
+                            CinemaCard(item, focusedHere, onItemClick, modifier = if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier)
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/** How far a card row reaches past the screen's left edge: two wide cards (a held Left outruns the glide by about that). */
+private val LeftReach = 560.dp
+
+/** [this] for a list whose viewport starts [reachPx] left of the screen: the pivot measured from the screen's edge. */
+private fun BringIntoViewSpec.reaching(reachPx: Float): BringIntoViewSpec {
+    val inner = this
+    return object : BringIntoViewSpec {
+        override fun calculateScrollDistance(
+            offset: Float,
+            size: Float,
+            containerSize: Float,
+        ): Float = inner.calculateScrollDistance(offset - reachPx, size, containerSize - reachPx)
+    }
+}
+
+/**
+ * Held Left along a row: a press whose card isn't on screen yet waits (owner, 2026-10-09: "going
+ * reverse horizontal on a row it's not smooth and bugging out"). The glide trails the focus; going
+ * right the next card is always on screen, going left it was still past the left edge, so
+ * Compose's focus search laid the row out ~10 times, found nothing and lost the press: two of three
+ * held Left presses, the costliest key work on the Shield. Asking that card for focus directly
+ * moved it but made the glide jump back ~70 px; skipping the press is cheap, and the next repeat,
+ * once the glide has brought the card in, moves as usual.
+ */
+private class RowSteps {
+    var at: Any? = null
+
+    fun step(
+        e: androidx.compose.ui.input.key.KeyEvent,
+        keys: List<Any>,
+        list: androidx.compose.foundation.lazy.LazyListState,
+    ): Boolean {
+        if (e.type != KeyEventType.KeyDown || e.key != androidx.compose.ui.input.key.Key.DirectionLeft) return false
+        // Only a held key's repeat waits: a single press always goes through
+        if (e.nativeKeyEvent.repeatCount == 0) return false
+        val i = keys.indexOf(at)
+        if (i <= 0) return false
+        val target = keys[i - 1]
+        return list.layoutInfo.visibleItemsInfo.none { it.key == target }
     }
 }
 

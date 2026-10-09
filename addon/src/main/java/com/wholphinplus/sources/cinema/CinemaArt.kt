@@ -49,6 +49,28 @@ class CinemaArt
 
         val enabled: Boolean get() = search.tmdb.available
 
+        // Description tags' facts (budget, box office, studio…), per session: asked only when a
+        // title page or the editor's preview shows one of them
+        private val facts = ConcurrentHashMap<String, com.wholphinplus.sources.core.TitleFacts>()
+
+        fun cachedFacts(
+            tv: Boolean,
+            tmdbId: Int,
+            director: Boolean,
+        ): com.wholphinplus.sources.core.TitleFacts? = facts["${key(tv, tmdbId)}|$director"] ?: if (!director) facts["${key(tv, tmdbId)}|true"] else null
+
+        suspend fun facts(
+            tv: Boolean,
+            tmdbId: Int,
+            director: Boolean,
+        ): com.wholphinplus.sources.core.TitleFacts? {
+            if (!enabled) return null
+            cachedFacts(tv, tmdbId, director)?.let { return it }
+            return withContext(Dispatchers.IO) {
+                gate.withPermit { runCatching { search.tmdb.facts(tv, tmdbId, director) }.getOrNull() }
+            }?.also { facts["${key(tv, tmdbId)}|$director"] = it }
+        }
+
         /** Already-known art, readable on the first frame (no flash from server art to TMDB art). */
         fun cached(
             tv: Boolean,

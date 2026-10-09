@@ -308,6 +308,7 @@ fun CinemaSearch(
                     // Room above the focused row for its group's label (Movies, TV Shows)
                     val spec = remember(density) { pivot(with(density) { 52.dp.toPx() }) }
                     val grid = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+                    Box(Modifier.fillMaxSize()) {
                     CompositionLocalProvider(LocalBringIntoViewSpec provides spec.gliding(grid), LocalArt provides art, LocalOverlays provides overlays, LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) {
                         LazyVerticalGrid(
                             state = grid,
@@ -347,6 +348,8 @@ fun CinemaSearch(
                                 }
                             }
                         }
+                    }
+                    BottomFade()
                     }
                 }
             }

@@ -324,8 +324,8 @@ internal fun TitleSheet(
             scope.launch {
                 val found =
                     runCatching {
-                        service.sourcesFor(item, ep?.season, ep?.number) { rows, done, total ->
-                            scope.launch { if (episode == ep && picker != null) picker = picker?.copy(rows = rows, serversDone = done, serversTotal = total) }
+                        service.sourcesFor(item, ep?.season, ep?.number) { rows, done, total, misses ->
+                            scope.launch { if (episode == ep && picker != null) picker = picker?.copy(rows = rows, serversDone = done, serversTotal = total, misses = misses) }
                         }
                     }.getOrElse {
                         if (it is CancellationException) throw it

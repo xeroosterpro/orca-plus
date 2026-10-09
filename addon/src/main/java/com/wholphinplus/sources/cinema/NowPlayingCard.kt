@@ -160,7 +160,7 @@ private fun PlayInfoCard(
                 Box(Modifier.size(6.dp).clip(CircleShape).background(Plus))
                 Spacer(Modifier.width(9.dp))
                 Text(
-                    if (i.server == com.wholphinplus.sources.PlaybackTrouble.MAIN) "From your server" else "From ${i.server}",
+                    "From ${i.server}",
                     color = InkDim,
                     fontSize = 13.sp,
                     maxLines = 1,

@@ -255,6 +255,12 @@ private fun ServerStep(
 ) {
     var typing by rememberSaveable { mutableStateOf(false) }
     var address by rememberSaveable { mutableStateOf("") }
+    // "Use my phone": the QR card over this step ([PhoneOverlay])
+    var phoneOpen by rememberSaveable { mutableStateOf(false) }
+    if (phoneOpen) {
+        PhoneOverlay(onClose = { phoneOpen = false })
+        return
+    }
     val softKeyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val hook = LocalContext.current.welcomeHook()
     // When the main-server connection fails, check whether the address is an Emby or Plex
@@ -333,8 +339,9 @@ private fun ServerStep(
                     }
                 } else {
                     WelcomeField(address, { address = it }, "Server address", keyboard = KeyboardType.Uri, imeAction = ImeAction.Go, focusRequester = field, onDone = { if (address.isNotBlank()) connect(address.trim()) })
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         PillButton(if (connecting) "Connecting…" else "Connect", enabled = address.isNotBlank() && !connecting, onClick = { connect(address.trim()) })
+                        if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) PillButton("Use my phone", primary = false, onClick = { phoneOpen = true })
                         PillButton("Back", primary = false, onClick = { typing = false })
                     }
                 }
@@ -377,6 +384,11 @@ fun WelcomeSignIn(
     /** A user picked from the list (a user already signed in on this TV can switch straight in). */
     onPickUser: (String) -> Unit = {},
 ) {
+    var phoneOpen by rememberSaveable { mutableStateOf(false) }
+    if (phoneOpen) {
+        PhoneOverlay(onClose = { phoneOpen = false })
+        return
+    }
     var username by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     val userField = remember { FocusRequester() }
@@ -424,8 +436,9 @@ fun WelcomeSignIn(
                         WelcomeField(username, { username = it }, "Username", focusRequester = userField, onDone = { runCatching { passField.requestFocus() } })
                     }
                     WelcomeField(password, { password = it }, "Password", password = true, imeAction = ImeAction.Done, focusRequester = passField, onDone = { if (username.isNotBlank()) onPassword(username, password) })
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         PillButton(if (busy) "Signing in…" else "Sign in", enabled = username.isNotBlank() && !busy, onClick = { onPassword(username, password) })
+                        if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) PillButton("Use my phone", primary = false, onClick = { phoneOpen = true })
                         PillButton("Change server", primary = false, onClick = onBack)
                     }
                     error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 14.sp) }
@@ -537,7 +550,7 @@ fun WelcomeFinish(
             step =
                 when (step) {
                     FinishStep.CHECKING, FinishStep.LIBRARIES -> step
-                    FinishStep.SAVE -> FinishStep.POWERUPS
+                    FinishStep.SAVE -> FinishStep.TAGS
                     // One look now: no "pick your home screen" stop between libraries and tags
                     FinishStep.POWERUPS -> FinishStep.PAGES
                     FinishStep.PAGES -> FinishStep.TAGS
@@ -549,7 +562,9 @@ fun WelcomeFinish(
                     else -> FinishStep.LIBRARIES
                 }
         }
-        val stops = TourStop.entries - TourStop.LOOK
+        // Two stops that only explained things (your pages, power-ups) left the tour 2026-10-09:
+        // Home shows the pages, Settings → Keys & Services takes keys (from the phone too)
+        val stops = TourStop.entries - TourStop.LOOK - TourStop.PAGES - TourStop.POWERUPS
         androidx.compose.runtime.CompositionLocalProvider(LocalTourStops provides stops) {
             AnimatedContent(
                 targetState = step,
@@ -577,7 +592,7 @@ fun WelcomeFinish(
                             modifier = Modifier.fillMaxSize().background(Stage.copy(alpha = 0.82f)),
                         )
                     FinishStep.NO_PROFILE -> NoProfileStep(offline = cloudHas == null, onNew = { step = FinishStep.LIBRARIES })
-                    FinishStep.TAGS -> TagsStep(hook, onNext = { step = FinishStep.PAGES })
+                    FinishStep.TAGS -> TagsStep(hook, onNext = { step = if (cloudHas == false && !hook.profileSync.status.value.on) FinishStep.SAVE else FinishStep.OUTRO })
                     FinishStep.PAGES -> PagesStep(hook, onNext = { step = FinishStep.POWERUPS })
                     FinishStep.POWERUPS -> PowerUpsStep(hook, onNext = { step = if (cloudHas == false && !hook.profileSync.status.value.on) FinishStep.SAVE else FinishStep.OUTRO })
                     FinishStep.SAVE ->
@@ -712,7 +727,7 @@ private fun LibrariesStep(
 
 /** A code to approve elsewhere (Plex, Emby, Quick Connect), polled until it's approved. */
 @Composable
-private fun <T> CodeStep(
+internal fun <T> CodeStep(
     title: String,
     start: suspend () -> CodeLogin,
     poll: suspend (CodeLogin) -> T?,
@@ -759,12 +774,12 @@ private fun <T> CodeStep(
 }
 
 // Emby Connect keeps its account between the PIN and the server picker
-private object EmbySession {
+internal object EmbySession {
     var account: EmbyConnectAccount? = null
 }
 
 @Composable
-private fun EmbyStep(
+internal fun EmbyStep(
     onAccount: () -> Unit,
     onCancel: () -> Unit,
     onError: (String) -> Unit,
@@ -784,7 +799,7 @@ private fun EmbyStep(
 }
 
 @Composable
-private fun EmbyPickStep(
+internal fun EmbyPickStep(
     onAdded: (List<ServerConnection>) -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -858,7 +873,7 @@ private fun EmbyPickStep(
 
 /** Two ways to add a server: a code to approve elsewhere, or its address and sign-in. */
 @Composable
-private fun ChooseStep(
+internal fun ChooseStep(
     title: String,
     body: String,
     codeTitle: String,
@@ -893,7 +908,7 @@ private fun ChooseStep(
 
 /** A server by address, username and password (Emby, Jellyfin or Silo). */
 @Composable
-private fun AddressStep(
+internal fun AddressStep(
     title: String,
     example: String,
     defaultKind: ServerKind,
@@ -907,6 +922,12 @@ private fun AddressStep(
     var password by rememberSaveable { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    // "Use my phone": the extra-server QR step instead ([PhoneServerStep])
+    var phone by rememberSaveable { mutableStateOf(false) }
+    if (phone) {
+        PhoneServerStep(onConnected = onConnected, onCancel = { phone = false })
+        return
+    }
     val addressField = remember { FocusRequester() }
     val userField = remember { FocusRequester() }
     val passField = remember { FocusRequester() }
@@ -942,8 +963,9 @@ private fun AddressStep(
                 WelcomeField(address, { address = it }, "Server address", keyboard = KeyboardType.Uri, focusRequester = addressField, onDone = { runCatching { userField.requestFocus() } })
                 WelcomeField(username, { username = it }, "Username", focusRequester = userField, onDone = { runCatching { passField.requestFocus() } })
                 WelcomeField(password, { password = it }, "Password", password = true, imeAction = ImeAction.Done, focusRequester = passField, onDone = { add() })
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     PillButton(if (busy) "Signing in…" else "Add server", enabled = address.isNotBlank() && username.isNotBlank() && !busy, onClick = { add() })
+                    if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) PillButton("Use my phone", primary = false, onClick = { phone = true })
                     PillButton("Back", primary = false, onClick = onCancel)
                 }
                 error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 14.sp) }
@@ -953,7 +975,7 @@ private fun AddressStep(
 }
 
 @Composable
-private fun JellyfinStep(
+internal fun JellyfinStep(
     onConnected: (ServerConnection) -> Unit,
     onCancel: () -> Unit,
     silo: Boolean = false,
@@ -1150,6 +1172,8 @@ fun WelcomeServerChoice(
     onPick: (SavedServer) -> Unit,
     onAdd: () -> Unit,
     modifier: Modifier = Modifier,
+    // "I have an Orca+ account": the welcome's doors (name and PIN, the phone's QR code)
+    onAccount: (() -> Unit)? = null,
 ) {
     val first = remember { FocusRequester() }
     LaunchedEffect(servers.isNotEmpty()) { runCatching { first.requestFocus() } }
@@ -1189,6 +1213,15 @@ fun WelcomeServerChoice(
                         modifier = if (servers.isEmpty()) Modifier.focusRequester(first) else Modifier,
                         onClick = onAdd,
                     )
+                    onAccount?.let {
+                        ChoiceCard(
+                            title = "I have an Orca+ account",
+                            subtitle = "Your Orca+ name and PIN, or set up from your phone",
+                            glyph = "O",
+                            accent = Violet,
+                            onClick = it,
+                        )
+                    }
                 }
             }
         }

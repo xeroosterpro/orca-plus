@@ -9,6 +9,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -119,5 +121,26 @@ internal fun PhoneSetupBanner(modifier: Modifier = Modifier) {
                 )
             }
         }
+    }
+}
+
+/**
+ * "Use my phone" from a step that asks for an address or a password (owner, 2026-10-09: always
+ * offer the phone there): the first screen's QR card over the step. What the phone sends goes
+ * through the welcome's usual phone handling (server, then sign-in); Back closes it.
+ */
+@Composable
+internal fun PhoneOverlay(onClose: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(Unit) { PhoneSetup.ensureStarted(context.welcomeHook()) }
+    androidx.activity.compose.BackHandler { onClose() }
+    val back = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+    androidx.compose.runtime.LaunchedEffect(Unit) { runCatching { back.requestFocus() } }
+    Box(Modifier.fillMaxSize().background(Color(0xE6070709)), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(22.dp)) {
+            PhoneSetupCard()
+            PillButton("Back", primary = false, modifier = Modifier.focusRequester(back), onClick = onClose)
+        }
+        PhoneSetupBanner(Modifier.align(Alignment.TopEnd).padding(top = 14.dp, end = 40.dp))
     }
 }

@@ -1,5 +1,12 @@
 package com.wholphinplus.sources.ui
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.border
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -123,7 +131,7 @@ fun ExtraSourcesEntry(modifier: Modifier = Modifier) {
 
 /** Settings topics that start with Orca+ items (names of Wholphin's OrcaSection). */
 object OrcaTopics {
-    fun has(topic: String): Boolean = topic in setOf("APPEARANCE", "SOURCES", "PLAYBACK", "PROFILE", "ABOUT")
+    fun has(topic: String): Boolean = topic in setOf("ACCOUNT", "APPEARANCE", "SOURCES", "PLAYBACK", "KEYS", "DEVICE", "ABOUT")
 }
 
 /** The now-playing card (owner, 2026-10-08): on or off, and each of its parts. */
@@ -166,63 +174,98 @@ private fun NowPlayingSettings(
 }
 
 /**
- * How the copy picker orders and chooses (owner, 2026-10-08): your server first on a tie, one
- * server put first, and the top copy playing without the list.
+ * How a copy is chosen (Settings → Servers & Copies), as two plain questions (owner, 2026-10-09:
+ * "the settings for source picker is so confusing": three switches that worked together).
  */
 @Composable
 private fun PickerTuning(hook: SourceHook) {
     val prefs by hook.store.pickerPrefs.collectAsState()
     val connections by hook.store.connections.collectAsState()
     val servers = connections.filter { it.enabled }
+    val main = com.wholphinplus.sources.ServerBrands.mainName()
+    val MAIN = com.wholphinplus.sources.core.PickerPrefs.MAIN
     SettingsHeader("Choosing a copy")
-    PlusListItem(
-        onClick = { hook.store.setPickerPrefs(prefs.copy(preferMain = !prefs.preferMain)) },
-        headlineContent = { Text("Your server first on a tie", style = MaterialTheme.typography.titleMedium) },
-        supportingContent = {
-            Text(
-                if (prefs.preferMain) {
-                    "On: when copies are the same quality and size, your server's comes first"
-                } else {
-                    "Off: copies of the same quality and size follow the order of your servers"
-                },
-            )
-        },
-        trailingContent = { androidx.tv.material3.Switch(checked = prefs.preferMain, onCheckedChange = null, colors = plusSwitchColors()) },
-        
+    Text(
+        "Copies this TV plays well come first, then 4K before 1080p and HDR before SDR, then the bigger file.",
+        color = com.wholphinplus.sources.cinema.InkDim,
+        fontSize = 14.sp,
+        modifier = Modifier.padding(horizontal = 16.dp).widthIn(max = 820.dp),
     )
-    // OK steps Best match → Your server → each extra server
-    val choices = listOf("" to "Best match", com.wholphinplus.sources.core.PickerPrefs.MAIN to "Your server") + servers.map { it.connectionId to it.label }
-    val current = choices.indexOfFirst { it.first == prefs.first }.coerceAtLeast(0)
+    OptionRow(
+        "When you press Play",
+        listOf(
+            Option("list", "Show me the copies", "Pick from the list every time"),
+            Option("auto", "Play the best copy", "No list; if it won't play, you're offered the next one"),
+        ),
+        selected = if (prefs.autoPlay) "auto" else "list",
+    ) { hook.store.setPickerPrefs(prefs.copy(autoPlay = it == "auto")) }
+    val preferOptions =
+        listOf(
+            // Your server on a tie is always the rule now (owner, 2026-10-09)
+            Option("tie", "Best quality", "The best copy wins; when copies are just as good, $main's comes first"),
+            Option(MAIN, "$main first", "$main's best copy is on top whenever it has one"),
+        ) + servers.map { Option(it.connectionId, "${it.label} first", "${it.label}'s best copy is on top whenever it has one") }
+    val preferNow =
+        when {
+            prefs.first.isNotBlank() && preferOptions.any { it.key == prefs.first } -> prefs.first
+            else -> "tie"
+        }
+    OptionRow("Prefer", preferOptions, selected = preferNow) { key ->
+        hook.store.setPickerPrefs(
+            when (key) {
+                "tie" -> prefs.copy(first = "", preferMain = true)
+                else -> prefs.copy(first = key, preferMain = false)
+            },
+        )
+    }
+}
+
+private data class Option(
+    val key: String,
+    val label: String,
+    val detail: String,
+)
+
+/**
+ * A setting with a few named answers: the question and its answer; OK opens the answers under it,
+ * each with what it means, the current one ticked (cycling through them on OK hid what was coming).
+ */
+@Composable
+private fun OptionRow(
+    title: String,
+    options: List<Option>,
+    selected: String,
+    modifier: Modifier = Modifier,
+    onSelect: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val current = options.firstOrNull { it.key == selected } ?: options.first()
+    val firstOption = remember { FocusRequester() }
     PlusListItem(
-        onClick = { hook.store.setPickerPrefs(prefs.copy(first = choices[(current + 1) % choices.size].first)) },
-        headlineContent = { Text("Put first", style = MaterialTheme.typography.titleMedium) },
-        supportingContent = {
-            Text(
-                if (current == 0) {
-                    "The best copy is at the top, from any server"
-                } else {
-                    "${choices[current].second}'s best copy is at the top when it has one"
-                },
-            )
-        },
-        trailingContent = { Text(choices[current].second, style = MaterialTheme.typography.titleMedium) },
-        
+        onClick = { open = !open },
+        headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
+        supportingContent = { Text(if (open) "Choose one" else current.label) },
+        trailingContent = { Text(if (open) "⌃" else "›", style = MaterialTheme.typography.titleLarge, color = com.wholphinplus.sources.cinema.InkDim) },
+        modifier = modifier,
     )
-    PlusListItem(
-        onClick = { hook.store.setPickerPrefs(prefs.copy(autoPlay = !prefs.autoPlay)) },
-        headlineContent = { Text("Play the top copy without asking", style = MaterialTheme.typography.titleMedium) },
-        supportingContent = {
-            Text(
-                if (prefs.autoPlay) {
-                    "On: the list is skipped; if that copy won't play, you're offered another"
-                } else {
-                    "Off: the list of copies shows each time you press Play"
-                },
-            )
-        },
-        trailingContent = { androidx.tv.material3.Switch(checked = prefs.autoPlay, onCheckedChange = null, colors = plusSwitchColors()) },
-        
-    )
+    if (open) {
+        LaunchedEffect(Unit) { runCatching { firstOption.requestFocus() } }
+        Column(Modifier.padding(start = 28.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            options.forEachIndexed { i, o ->
+                val on = o.key == current.key
+                PlusListItem(
+                    onClick = {
+                        onSelect(o.key)
+                        open = false
+                    },
+                    headlineContent = { Text(o.label, style = MaterialTheme.typography.titleMedium) },
+                    supportingContent = { Text(o.detail) },
+                    trailingContent = { if (on) Text("✓", style = MaterialTheme.typography.titleLarge, color = SettingsAccent) },
+                    modifier = if (on || (i == 0 && options.none { it.key == current.key })) Modifier.focusRequester(firstOption) else Modifier,
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -279,6 +322,16 @@ fun OrcaTopicItems(
                             overlays.captions to "Titles",
                         ).filter { it.first }.map { it.second }
                     MenuItem("Poster tags", if (on.isEmpty()) "Pictures only" else on.joinToString(" · ")) { open = Screen.Overlays }
+                    val dt by hook.store.descriptionTags.collectAsState()
+                    val dtOn =
+                        listOf(
+                            (dt.resolution || dt.hdr || dt.audio) to "Quality",
+                            dt.genres to "Genres",
+                            dt.tagline to "Tagline",
+                            (dt.makers || dt.studio) to "Who made it",
+                            (dt.budget || dt.boxOffice) to "Money",
+                        ).filter { it.first }.map { it.second }
+                    MenuItem("Description tags", "What a title page shows by its story: " + (if (dtOn.isEmpty()) "the basics" else dtOn.joinToString(" · "))) { open = Screen.DescriptionTags }
                     // OK steps Auto → Sharp → Fast
                     val posterSize by hook.store.posterSize.collectAsState()
                     val sizes = com.wholphinplus.sources.cinema.PosterSize
@@ -326,31 +379,19 @@ fun OrcaTopicItems(
             }
             "SOURCES" -> {
                 val connections by hook.store.connections.collectAsState()
-                val tmdb by hook.store.tmdbKey.collectAsState()
                 SettingsHeader("Your servers")
                 MenuItem(
                     "Extra servers",
                     if (connections.isEmpty()) "Play from your Plex, Emby and other Jellyfin servers" else "${connections.count { it.enabled }} of ${connections.size} servers on",
                     firstModifier,
                 ) { open = Screen.List }
-                MenuItem("Search", if (tmdb.isBlank()) "Smart search is on  ·  your own TMDB key is optional" else "Smart search is on, with your TMDB key") { open = Screen.TmdbKey }
+                // The TMDB key (search) lives in Keys & Services with every other key
                 if (connections.any { it.enabled }) PickerTuning(hook)
             }
             "PLAYBACK" -> NowPlayingSettings(hook, firstModifier)
-            "PROFILE" -> {
-                val cloud by hook.profileSync.status.collectAsState()
-                SettingsHeader("Cloud")
-                MenuItem(
-                    "Cloud sync",
-                    when {
-                        !com.wholphinplus.sources.sync.ProfileSync.AVAILABLE -> "Not available in this build"
-                        !cloud.on -> "Off: keep your whole setup in the cloud and bring it to any TV"
-                        cloud.problem != null -> "On  ·  ${cloud.problem}"
-                        else -> "On  ·  synced ${ago(cloud.lastSync)}"
-                    },
-                    firstModifier,
-                ) { if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) open = Screen.Cloud }
-            }
+            "ACCOUNT" -> AccountCard(hook, firstModifier, openCloud = { open = Screen.Cloud })
+            "KEYS" -> KeysAndServices(hook, firstModifier, open = { open = it })
+            "DEVICE" -> ThisTvPage(hook, firstModifier)
             "ABOUT" -> {
                 var credits by remember { mutableStateOf(false) }
                 SettingsHeader("Orca+")
@@ -364,7 +405,6 @@ fun OrcaTopicItems(
                         modifier = Modifier.width(720.dp).padding(horizontal = 16.dp),
                     )
                 }
-                ThisTv(hook)
             }
         }
     }
@@ -387,37 +427,278 @@ fun OrcaTopicItems(
 }
 
 /**
- * What [com.wholphinplus.sources.DeviceClass] found on this box, and the class it runs as. OK steps
- * Auto → Full → Balanced → Light; the change applies from the next start (lists keep their
- * cache windows while they're on screen).
+ * Settings → Account (owner, 2026-10-09: "a proper Account tab with all the info they need"): who
+ * is signed in and where, the Orca+ name and cloud sync at a glance, and the actions as buttons
+ * under it. The PIN is never kept on the TV, so it says "PIN set" and offers to change it.
  */
 @Composable
-private fun ThisTv(hook: SourceHook) {
-    val device = com.wholphinplus.sources.DeviceClass
-    val mode by hook.store.deviceMode.collectAsState()
-    val steps = listOf(device.AUTO) + com.wholphinplus.sources.DeviceClass.Tier.entries.map { it.name }
-    val shown = if (mode == device.AUTO) "Auto (${device.detected.label})" else device.tier.label
-    SettingsHeader("This TV")
-    PlusListItem(
-        onClick = { hook.store.setDeviceMode(steps[(steps.indexOf(mode).coerceAtLeast(0) + 1) % steps.size]) },
-        headlineContent = { Text("Performance", style = MaterialTheme.typography.titleMedium) },
-        supportingContent = {
+private fun AccountCard(
+    hook: SourceHook,
+    firstModifier: Modifier,
+    openCloud: () -> Unit,
+) {
+    val sync by hook.profileSync.status.collectAsState()
+    val who = remember { com.wholphinplus.sources.AccountActions.who() }
+    val scope = rememberCoroutineScope()
+    var message by remember { mutableStateOf<String?>(null) }
+    var confirmOut by remember { mutableStateOf(false) }
+    val cloud = com.wholphinplus.sources.sync.ProfileSync.AVAILABLE
+    val name = sync.name
+    SettingsHeader("Your account")
+    Row(
+        Modifier
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .widthIn(max = 820.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.05f))
+            .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 22.dp, vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        Box(
+            Modifier.size(64.dp).clip(CircleShape).background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color(0xFF8A6CF0), Color(0xFF5D3FD3)))),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text((name ?: who?.user ?: "?").take(1).uppercase(), color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(
-                when (device.tier) {
-                    com.wholphinplus.sources.DeviceClass.Tier.FULL -> "Full: every effect, the most built ahead for smooth browsing"
-                    com.wholphinplus.sources.DeviceClass.Tier.BALANCED -> "Balanced: a little less built ahead, for mid-range boxes"
-                    com.wholphinplus.sources.DeviceClass.Tier.LIGHT -> "Light: smaller pictures, no backdrop zoom, less held in memory"
-                } + if (mode == device.AUTO) "" else "  ·  fully applies after a restart",
+                name ?: if (sync.on) "No Orca+ name yet" else "No Orca+ account on this TV",
+                color = SettingsInk,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
             )
-        },
-        trailingContent = { Text(shown, style = MaterialTheme.typography.titleMedium) },
-    )
+            who?.let { w ->
+                val server = w.server.ifBlank { w.url.substringAfter("://").substringBefore("/") }
+                Text("Signed in to $server as ${w.user}", color = com.wholphinplus.sources.cinema.InkDim, fontSize = 14.sp)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusChip(
+                    when {
+                        !cloud -> "Cloud sync isn't in this build"
+                        !sync.on -> "Cloud sync off"
+                        sync.busy -> "Syncing…"
+                        sync.problem != null -> "Sync needs attention"
+                        else -> "Cloud sync on  ·  synced ${ago(sync.lastSync)}"
+                    },
+                    good = sync.on && sync.problem == null,
+                )
+                if (sync.on) StatusChip("PIN set", good = false)
+            }
+            sync.problem?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
+        }
+    }
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        var first = firstModifier
+        fun take(): Modifier = first.also { first = Modifier }
+        if (cloud && sync.on) {
+            Button(
+                onClick = {
+                    message = "Syncing…"
+                    scope.launch {
+                        message = runCatching { hook.profileSync.syncNow(hook) }.fold({ "Synced just now." }, { com.wholphinplus.sources.sync.ProfileSync.describe(it) })
+                    }
+                },
+                modifier = take(),
+            ) { Text("Sync now") }
+            Button(onClick = openCloud) { Text(if (name == null) "Pick a name" else "Name & PIN") }
+        } else if (cloud) {
+            Button(onClick = openCloud, modifier = take()) { Text("Create an account or sign in") }
+        }
+        com.wholphinplus.sources.AccountActions.switchUser?.let { sw -> Button(onClick = sw, modifier = take()) { Text("Switch user") } }
+        com.wholphinplus.sources.AccountActions.signOut?.let { out ->
+            Button(
+                onClick = {
+                    if (!confirmOut) {
+                        confirmOut = true
+                        message = "Press again to sign this TV out. Your server, your Orca+ account and everything saved in the cloud stay as they are."
+                    } else {
+                        hook.profileSync.turnOff()
+                        // Signed out: the welcome comes back (Orca+ name and PIN, the phone's QR)
+                        hook.store.setOnboarding(com.wholphinplus.sources.welcome.Onboarding.STARTED)
+                        out()
+                    }
+                },
+                modifier = take(),
+            ) { Text(if (confirmOut) "Yes, sign out" else "Sign out of this TV") }
+        }
+    }
+    message?.let { Text(it, color = com.wholphinplus.sources.cinema.InkDim, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 16.dp)) }
+}
+
+/** A small pill with a state in it: green when all is well. */
+@Composable
+private fun StatusChip(
+    text: String,
+    good: Boolean,
+) {
     Text(
-        device.summary().ifBlank { "Still reading this TV's hardware" } +
-            "\nCopies this TV can't decode are marked and listed after the ones it plays.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.width(720.dp).padding(horizontal = 16.dp),
+        text,
+        color = if (good) Color(0xFF7BD88F) else com.wholphinplus.sources.cinema.InkDim,
+        fontSize = 12.5.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier =
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(if (good) Color(0xFF4CC38A).copy(alpha = 0.15f) else Color.White.copy(alpha = 0.07f))
+                .padding(horizontal = 10.dp, vertical = 3.dp),
+    )
+}
+
+/**
+ * Settings → Keys & Services: every outside account in one list, with what it does for you and
+ * whether it's set (they were spread over Search, Poster tags → Score sources and Your lists).
+ * Keys can come from a phone, as in the first run.
+ */
+@Composable
+private fun KeysAndServices(
+    hook: SourceHook,
+    firstModifier: Modifier,
+    open: (Screen) -> Unit,
+) {
+    val tmdb by hook.store.tmdbKey.collectAsState()
+    val mdb by hook.store.mdblistKey.collectAsState()
+    val trakt by hook.collections.traktClientId.collectAsState()
+    val topStreaming by hook.collections.topStreamingAccount.collectAsState()
+    val cloud = com.wholphinplus.sources.sync.ProfileSync.AVAILABLE
+    var phone by remember { mutableStateOf(false) }
+    if (cloud) {
+        SettingsHeader("Add keys")
+        MenuItem("Add keys from your phone", "Scan a code, paste your keys on your phone: no typing with the remote", firstModifier) { phone = true }
+    }
+    SettingsHeader("Services")
+    KeyRow(
+        "TMDB",
+        "Title art, smart search and More Like This",
+        when {
+            tmdb.isNotBlank() -> "Your key" to true
+            cloud -> "Built in" to true
+            else -> "Not set" to false
+        },
+        if (cloud) Modifier else firstModifier,
+    ) { open(Screen.TmdbKey) }
+    KeyRow("MDBList", "IMDb, Rotten Tomatoes, Metacritic and Letterboxd scores", if (mdb.isNotBlank()) "Added" to true else "Not set" to false) { open(Screen.MdblistKey) }
+    KeyRow("Trakt", "Your Trakt lists as rows on Home", if (trakt.isNotBlank()) "Added" to true else "Not set" to false) { open(Screen.TraktKey) }
+    KeyRow("Top Streaming", "Your countries' streaming Top 10s", if (topStreaming.isNotBlank()) "Added" to true else "Not set" to false) { open(Screen.TopStreaming) }
+    if (phone) {
+        PadDialog(onClose = { phone = false }) {
+            Column(Modifier.fillMaxSize().padding(horizontal = 96.dp, vertical = 64.dp), verticalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterVertically)) {
+                Text("Add keys from your phone", color = SettingsInk, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
+                Text("Scan the code, or open the address and type the code. Keys you send appear here as they arrive. Back when you're done.", color = com.wholphinplus.sources.cinema.InkDim, fontSize = 16.sp)
+                com.wholphinplus.sources.welcome.KeysFromPhone(hook, Modifier.widthIn(max = 980.dp))
+            }
+        }
+    }
+}
+
+/** One service: what it does, and whether it's set. */
+@Composable
+private fun KeyRow(
+    name: String,
+    does: String,
+    status: Pair<String, Boolean>,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    PlusListItem(
+        onClick = onClick,
+        headlineContent = { Text(name, style = MaterialTheme.typography.titleMedium) },
+        supportingContent = { Text(does) },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.size(9.dp).clip(CircleShape).background(if (status.second) Color(0xFF4CC38A) else Color(0xFF6F6A7E)))
+                Text(status.first, style = MaterialTheme.typography.titleSmall)
+            }
+        },
+        modifier = modifier,
+    )
+}
+
+/**
+ * Settings → This TV: what [com.wholphinplus.sources.DeviceClass] found on this box, in plain
+ * words, and the performance class as four buttons (it cycled through one row). Language, the
+ * image cache and the screensaver follow (Wholphin's settings, below these).
+ */
+@Composable
+private fun ThisTvPage(
+    hook: SourceHook,
+    firstModifier: Modifier,
+) {
+    val device = com.wholphinplus.sources.DeviceClass
+    val f = device.facts
+    val mode by hook.store.deviceMode.collectAsState()
+    SettingsHeader("This box")
+    val screen =
+        listOfNotNull(
+            when {
+                f.screenHeight >= 2160 -> "4K"
+                f.screenHeight > 0 -> "${f.screenHeight}p"
+                else -> null
+            },
+        ) + listOf("Dolby Vision", "HDR10+", "HDR10", "HLG").filter { it in f.screenHdr }
+    val specs =
+        listOf(
+            "Device" to listOf(f.maker.replaceFirstChar { it.titlecase() }, f.model).filter { it.isNotBlank() }.distinct().joinToString(" ").ifBlank { "Unknown" },
+            "Chip  ·  memory" to listOfNotNull(f.soc.takeIf { it.isNotBlank() }, f.ramMb.takeIf { it > 0 }?.let { "%.1f GB".format(it / 1024f) }).joinToString("  ·  ").ifBlank { "Unknown" },
+            "Screen" to screen.joinToString("  ·  ").ifBlank { "Reading…" },
+            "Plays in hardware" to
+                when {
+                    f.decoders.isNotEmpty() -> f.decoders.keys.sorted().joinToString("  ·  ")
+                    // The scan reads the screen too: done and nothing found
+                    f.screenHeight > 0 -> "Software only"
+                    else -> "Reading…"
+                },
+            "Card pictures" to if (com.wholphinplus.sources.cinema.PosterSize.small) "Smaller, they load faster here" else "Sharp",
+            "Runs as" to device.tier.label + if (mode == device.AUTO) "  ·  auto" else "  ·  your pick",
+        )
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp).widthIn(max = 900.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        specs.chunked(3).forEach { line ->
+            // Equal heights: a value that wraps grows its whole line, not one box
+            Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                line.forEach { (label, value) ->
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White.copy(alpha = 0.05f))
+                            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                    ) {
+                        Text(label.uppercase(), color = com.wholphinplus.sources.cinema.InkDim, fontSize = 10.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Bold)
+                        Text(value, color = SettingsInk, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                    }
+                }
+            }
+        }
+    }
+    SettingsHeader("Performance")
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        val choices = listOf(device.AUTO to "Auto (${device.detected.label})") + com.wholphinplus.sources.DeviceClass.Tier.entries.map { it.name to it.label }
+        choices.forEachIndexed { i, (key, label) ->
+            val on = mode == key
+            Button(
+                onClick = { hook.store.setDeviceMode(key) },
+                colors =
+                    androidx.tv.material3.ButtonDefaults.colors(
+                        containerColor = if (on) SettingsAccent else Color.White.copy(alpha = 0.08f),
+                        contentColor = Color.White,
+                    ),
+                modifier = if (i == 0) firstModifier else Modifier,
+            ) { Text(label) }
+        }
+    }
+    Text(
+        when (device.tier) {
+            com.wholphinplus.sources.DeviceClass.Tier.FULL -> "Full: every effect, and the most loaded ahead for smooth browsing."
+            com.wholphinplus.sources.DeviceClass.Tier.BALANCED -> "Balanced: a little less loaded ahead, for mid-range boxes."
+            com.wholphinplus.sources.DeviceClass.Tier.LIGHT -> "Light: gentler loading, smaller pictures, less held in memory. The same smooth motion."
+        } + (if (mode == device.AUTO) "" else " Fully applies after a restart.") +
+            " Copies this TV can't decode are marked when you choose a copy.",
+        color = com.wholphinplus.sources.cinema.InkDim,
+        fontSize = 14.sp,
+        modifier = Modifier.padding(horizontal = 16.dp).widthIn(max = 820.dp),
     )
 }
 
@@ -501,6 +782,9 @@ private sealed interface Screen {
     /** Cinema mode's poster overlays. */
     data object Overlays : Screen
 
+    /** Title pages: what shows around the description. */
+    data object DescriptionTags : Screen
+
     /** Review scores: which, where, and the MDBList key. */
     data object Ratings : Screen
 
@@ -514,6 +798,7 @@ private fun ExtraSourcesScreen(
     start: Screen = Screen.Menu,
 ) {
     val connections by hook.store.connections.collectAsState()
+    val health by hook.health.checks.collectAsState()
     var screen by remember { mutableStateOf(start) }
     // Back walks up: server pages → Extra sources → menu → close. As a page of its own (no
     // [onClose]), Back on the first screen is the app's own: it leaves the page
@@ -524,7 +809,7 @@ private fun ExtraSourcesScreen(
             when (val s = screen) {
                 start -> return@BackHandler onClose?.invoke() ?: Unit
                 is Screen.HomeRows -> if (atStart(s)) return@BackHandler onClose?.invoke() ?: Unit else Screen.Menu
-                Screen.List, Screen.TmdbKey, Screen.Collections, Screen.Overlays, Screen.Cloud -> Screen.Menu
+                Screen.List, Screen.TmdbKey, Screen.Collections, Screen.Overlays, Screen.DescriptionTags, Screen.Cloud -> Screen.Menu
                 Screen.Ratings -> Screen.Overlays
                 Screen.MdblistKey -> Screen.Ratings
                 is Screen.RenameRow -> Screen.HomeRows(s.page)
@@ -542,6 +827,8 @@ private fun ExtraSourcesScreen(
     // The request a screen started, and that screen: Cancel or Back leaves it, and its answer
     // must not pull the screen back (a sign-in form after Cancel, a server added after Cancel)
     val running = remember { arrayOfNulls<Pair<Screen, kotlinx.coroutines.Job>>(1) }
+    // The server being signed in to again (Sign in again on its page), until the new sign-in saves
+    val signingInAgain = remember { arrayOfNulls<ServerConnection>(1) }
     LaunchedEffect(screen) {
         running[0]?.let { (from, job) -> if (from != screen) job.cancel() }
     }
@@ -571,9 +858,23 @@ private fun ExtraSourcesScreen(
     }
 
     fun saved(connection: ServerConnection) {
-        hook.store.save(connection)
+        // Signed in again ([signingInAgain]): the same entry, its on/off and library switches kept
+        val again = signingInAgain[0]?.takeIf { it.serverUrl == connection.serverUrl || (it.serverId.isNotBlank() && it.serverId == connection.serverId) }
+        signingInAgain[0] = null
+        if (again != null) {
+            val switches = again.collections.associate { it.id to it.enabled }
+            hook.store.replace(
+                connection.copy(
+                    connectionId = again.connectionId,
+                    enabled = again.enabled,
+                    collections = connection.collections.map { c -> switches[c.id]?.let { c.copy(enabled = it) } ?: c },
+                ),
+            )
+        } else {
+            hook.store.save(connection)
+        }
         hook.clearCache()
-        message = "Added ${connection.label}"
+        message = if (again != null) "Signed in to ${connection.label} again" else "Added ${connection.label}"
         screen = Screen.List
     }
 
@@ -581,16 +882,19 @@ private fun ExtraSourcesScreen(
         val (title, about) =
             when (screen) {
                 Screen.Menu -> "Orca+" to "Everything Orca+ can do. Press Back to leave."
-                Screen.TmdbKey -> "Search" to "Finds a title on every server you have."
-                Screen.Ratings, Screen.MdblistKey -> "Score sources" to "Review scores on cards and title pages, in the order you turn them on."
+                Screen.TmdbKey -> "TMDB" to "Title art, smart search and More Like This."
+                Screen.MdblistKey -> "MDBList" to "IMDb, Rotten Tomatoes, Metacritic and Letterboxd scores."
+                Screen.Ratings -> "Score sources" to "Review scores on cards and title pages, in the order you turn them on."
                 Screen.Overlays -> "Poster tags" to "Everything a card on Home can show. The preview changes as you go."
+                Screen.DescriptionTags -> "Description tags" to "What a title page shows around its story. The preview changes as you go."
                 is Screen.HomeRows, is Screen.RenameRow -> "Rows" to "The rows on each page, in the order they show. Changes show the next time you open the page."
                 Screen.Cloud ->
                     "Cloud sync" to "Your whole setup on every TV: settings, rows, lists, keys, extra servers and where you left off. " +
                         "It's encrypted on this TV with your sync PIN before it's sent, so nobody else can read it."
                 Screen.TopStreaming ->
                     "Top Streaming" to "Today's Top 10 from each streaming service, as rows on your home. Pick countries and services at top-streaming.stream; Orca+ follows your picks."
-                Screen.Collections, is Screen.AddCollection, is Screen.Collection, Screen.TraktKey ->
+                Screen.TraktKey -> "Trakt" to "Your Trakt lists as rows on Home. Trakt needs a free Client ID of your own."
+                Screen.Collections, is Screen.AddCollection, is Screen.Collection ->
                     "Your lists" to "MDBList, Trakt and Top Streaming lists as rows on your home screen. They follow the list as it changes " +
                         "(checked every 6 hours) and show the titles you have on your Jellyfin server."
                 else ->
@@ -607,10 +911,11 @@ private fun ExtraSourcesScreen(
             Screen.Collections -> CollectionsScreen(hook) { screen = it }
 
             Screen.Overlays -> OverlaysScreen(hook) { screen = it }
+            Screen.DescriptionTags -> DescriptionTagsScreen(hook) { screen = it }
 
             Screen.Ratings -> RatingsScreen(hook) { screen = it }
 
-            Screen.MdblistKey -> MdblistKeyScreen(hook, onDone = { screen = Screen.Ratings })
+            Screen.MdblistKey -> MdblistKeyScreen(hook, onDone = { if (start == Screen.MdblistKey) onClose?.invoke() else screen = Screen.Ratings })
 
             is Screen.AddCollection -> AddCollectionScreen(hook, onDone = { screen = s.back })
 
@@ -627,31 +932,48 @@ private fun ExtraSourcesScreen(
 
             is Screen.Collection -> CollectionScreen(hook, s.id, onDone = { screen = Screen.Collections })
 
-            Screen.TraktKey -> TraktKeyScreen(hook, onDone = { screen = Screen.Collections })
+            Screen.TraktKey -> TraktKeyScreen(hook, onDone = { if (start == Screen.TraktKey) onClose?.invoke() else screen = Screen.Collections })
 
-            Screen.TopStreaming -> TopStreamingScreen(hook, onDone = { screen = Screen.Collections })
+            Screen.TopStreaming -> TopStreamingScreen(hook, onDone = { if (start == Screen.TopStreaming) onClose?.invoke() else screen = Screen.Collections })
 
             Screen.Cloud -> CloudScreen(hook)
 
             Screen.List -> {
                 val first = remember { FocusRequester() }
                 LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
+                // The tour's sign-ins plus the phone, full screen (it was one address box)
+                var adding by remember { mutableStateOf(false) }
+                if (adding) {
+                    com.wholphinplus.sources.welcome.AddServerDialog(
+                        save = { c ->
+                            hook.store.save(c)
+                            hook.clearCache()
+                            message = "Added ${c.label}"
+                        },
+                        onClose = {
+                            adding = false
+                            runCatching { first.requestFocus() }
+                        },
+                    )
+                }
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
                     item {
                         PlusListItem(
-                            onClick = { screen = Screen.AddUrl },
-                            headlineContent = { Text("+ Add server") },
-                            supportingContent = { Text("Plex, Emby or Jellyfin") },
+                            onClick = { adding = true },
+                            headlineContent = { Text("+ Add a server") },
+                            supportingContent = { Text("From your phone, Emby Connect, a Plex code, Quick Connect, or its address") },
                             modifier = Modifier.focusRequester(first),
                         )
                     }
                     items(connections, key = { it.connectionId }) { c ->
+                        // How it answered its last lookup (nothing asked from here)
+                        val trouble = health[c.connectionId]?.takeIf { it.signIn == c.lastConnectedAt.toString() }?.trouble
                         PlusListItem(
                             onClick = { screen = Screen.Server(c) },
                             headlineContent = { Text((if (c.enabled) "● " else "○ ") + c.label) },
                             supportingContent = {
                                 Text(
-                                    listOf(c.serverKind.label, c.userName, "${c.collections.count { it.enabled }} libraries", c.serverUrl)
+                                    listOfNotNull(trouble?.let { "⚠ " + it.reason }, c.serverKind.label, c.userName, "${c.collections.count { it.enabled }} libraries", c.serverUrl)
                                         .filter { it.isNotBlank() }
                                         .joinToString("  ·  "),
                                 )
@@ -674,9 +996,24 @@ private fun ExtraSourcesScreen(
                             val fresh = withContext(Dispatchers.IO) { hook.client.refresh(c) }
                             hook.store.replace(fresh.copy(connectionId = c.connectionId))
                             hook.clearCache()
+                            // It answers again: lookups ask it at once instead of waiting out its rest
+                            hook.health.ok(fresh.copy(connectionId = c.connectionId))
                             message = "OK: ${fresh.serverName}, ${fresh.collections.size} libraries"
                         }
                     }) { Text("Test") }
+                    // A new token when the old one stopped working (password changed, signed out on the server)
+                    Button(onClick = {
+                        run("Contacting ${c.label}") {
+                            signingInAgain[0] = c
+                            screen =
+                                if (c.serverKind == ServerKind.PLEX) {
+                                    Screen.PlexToken(c.serverUrl, c.displayName)
+                                } else {
+                                    val info = withContext(Dispatchers.IO) { hook.client.fetchPublicInfo(c.serverUrl) }
+                                    Screen.Password(c.serverUrl, c.displayName, info)
+                                }
+                        }
+                    }) { Text("Sign in again") }
                     Button(onClick = {
                         hook.store.remove(c.connectionId)
                         hook.clearCache()
@@ -739,6 +1076,16 @@ private fun ExtraSourcesScreen(
             is Screen.Password -> {
                 val user = rememberTextFieldState()
                 val pass = rememberTextFieldState()
+                // "Use my phone": the address, username and password typed there (owner, 2026-10-09)
+                var phone by remember { mutableStateOf(false) }
+                if (phone) {
+                    PadDialog(onClose = { phone = false }) {
+                        com.wholphinplus.sources.welcome.PhoneServerStep(onConnected = { c ->
+                            phone = false
+                            saved(c)
+                        }, onCancel = { phone = false })
+                    }
+                }
                 val focus = remember { FocusRequester() }
                 LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
                 Text("${s.info.serverKind.label} server “${s.info.serverName}” at ${s.url}")
@@ -754,6 +1101,7 @@ private fun ExtraSourcesScreen(
                             saved(c)
                         }
                     }) { Text("Sign in") }
+                    if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) Button(onClick = { phone = true }) { Text("Use my phone") }
                     if (s.info.serverKind == ServerKind.JELLYFIN) {
                         Button(onClick = {
                             run("Starting Quick Connect") {
@@ -1280,7 +1628,7 @@ private fun CloudScreen(hook: SourceHook) {
 
     when (pad) {
         "on" -> PadDialog(onClose = { pad = null }) {
-            CloudPinFlow(hook, exists == true, onDone = { pad = null }, onSkip = { pad = null }, skipLabel = "Cancel", modifier = Modifier.fillMaxSize())
+            CloudPinFlow(hook, exists == true, onDone = { pad = null }, onSkip = { pad = null }, skipLabel = "Cancel", modifier = Modifier.fillMaxSize(), nameFirst = exists != true)
         }
         "pin" -> PadDialog(onClose = { pad = null }) {
             var busy by remember { mutableStateOf(false) }
@@ -1522,7 +1870,7 @@ private fun OverlaysScreen(
                     "Scores on cards",
                     when {
                         r.sources.isEmpty() -> "No score sources picked"
-                        r.sources.all { it.needsKey } && mdb.isBlank() -> "Waiting for an MDBList key (see Score sources)"
+                        r.sources.all { it.needsKey } && mdb.isBlank() -> "Waiting for an MDBList key (Settings → Keys & Services)"
                         else -> "The first two of " + r.sources.filter { !it.needsKey || mdb.isNotBlank() }.joinToString(", ") { it.label }
                     },
                     r.onCards,
@@ -1547,6 +1895,68 @@ private fun OverlaysScreen(
         Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
             Text("Preview", style = MaterialTheme.typography.titleMedium)
             com.wholphinplus.sources.cinema.PosterTagsPreview(o, r, art, ratings)
+        }
+    }
+}
+
+/**
+ * Settings → Home & Look → Description tags (owner, 2026-10-09): like Poster tags, for the title
+ * page's description: presets, a switch per tag, and the page's own block as the preview.
+ */
+@Composable
+private fun DescriptionTagsScreen(
+    hook: SourceHook,
+    go: (Screen) -> Unit,
+) {
+    val t by hook.store.descriptionTags.collectAsState()
+    val r by hook.store.ratingPrefs.collectAsState()
+    val context = LocalContext.current
+    val entry = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java) }
+    val art = remember { entry.cinemaArt() }
+    val ratings = remember { entry.ratings() }
+    val first = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
+    val set = { n: com.wholphinplus.sources.cinema.DescriptionTags -> hook.store.setDescriptionTags(n) }
+    val preset = { p: com.wholphinplus.sources.cinema.DescriptionTags, scores: Boolean ->
+        set(p)
+        hook.store.setRatingPrefs(r.copy(onTitlePage = scores))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(36.dp)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(top = 4.dp, bottom = 48.dp), modifier = Modifier.width(470.dp)) {
+            item { Section("Quick start", "Set every tag at once, then fine-tune below") }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(bottom = 6.dp)) {
+                    PresetButton("Clean", Modifier.focusRequester(first)) { preset(com.wholphinplus.sources.cinema.DescriptionTags.CLEAN, false) }
+                    PresetButton("Standard") { preset(com.wholphinplus.sources.cinema.DescriptionTags.STANDARD, true) }
+                    PresetButton("Everything") { preset(com.wholphinplus.sources.cinema.DescriptionTags.EVERYTHING, true) }
+                }
+            }
+            item { Section("Top line", "Under the title") }
+            item { Toggle("Year", "When it came out", t.year) { set(t.copy(year = it)) } }
+            item { Toggle("Length", "2h 14m, or a show's seasons", t.length) { set(t.copy(length = it)) } }
+            item { Toggle("Ends at", "When it would end if you started now", t.endsAt) { set(t.copy(endsAt = it)) } }
+            item { Toggle("Age rating", "PG-13, TV-MA…", t.ageRating) { set(t.copy(ageRating = it)) } }
+            item { Section("Quality", "Boxed on the top line, from your server's file") }
+            item { Toggle("Resolution", "4K or HD", t.resolution) { set(t.copy(resolution = it)) } }
+            item { Toggle("HDR", "Dolby Vision, HDR10+ or HDR", t.hdr) { set(t.copy(hdr = it)) } }
+            item { Toggle("Audio", "Dolby Atmos, 7.1 or 5.1", t.audio) { set(t.copy(audio = it)) } }
+            item { Section("Under it", null) }
+            item { Toggle("Genres", "Up to four", t.genres) { set(t.copy(genres = it)) } }
+            item { Toggle("Review scores", "IMDb, Rotten Tomatoes and the other sources you picked", r.onTitlePage) { hook.store.setRatingPrefs(r.copy(onTitlePage = it)) } }
+            item { MenuItem("Score sources", "Which scores, in which order; the MDBList key") { go(Screen.Ratings) } }
+            item { Toggle("Streaming services", "Where it streams, by the scores", t.services) { set(t.copy(services = it)) } }
+            item { Toggle("Tagline", "The poster's one line, above the story", t.tagline) { set(t.copy(tagline = it)) } }
+            item { Section("About it", "Below the story, from TMDB") }
+            item { Toggle("Director", "Directed by…, or a show's creators", t.makers) { set(t.copy(makers = it)) } }
+            item { Toggle("Studio or network", "Who made it, or the channel a show is on", t.studio) { set(t.copy(studio = it)) } }
+            item { Toggle("Budget", "What it cost to make", t.budget) { set(t.copy(budget = it)) } }
+            item { Toggle("Box office", "What it made in cinemas worldwide", t.boxOffice) { set(t.copy(boxOffice = it)) } }
+            item { Toggle("Original language", "When it isn't English", t.language) { set(t.copy(language = it)) } }
+            item { Toggle("Show status", "Returning or ended, seasons and episodes", t.status) { set(t.copy(status = it)) } }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
+            Text("Preview", style = MaterialTheme.typography.titleMedium)
+            com.wholphinplus.sources.cinema.DescriptionTagsPreview(t, r, art, ratings)
         }
     }
 }

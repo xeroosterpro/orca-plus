@@ -156,13 +156,27 @@ class ConnectionStore
             _overlays.value = o
         }
 
+        private val _descriptionTags =
+            MutableStateFlow(
+                runCatching { json.decodeFromString<com.wholphinplus.sources.cinema.DescriptionTags>(prefs.getString(DESCRIPTION_TAGS_KEY, null)!!) }
+                    .getOrDefault(com.wholphinplus.sources.cinema.DescriptionTags()),
+            )
+
+        /** What title pages show around the description (Settings → Home & Look → Description tags). Synced. */
+        val descriptionTags: StateFlow<com.wholphinplus.sources.cinema.DescriptionTags> = _descriptionTags.asStateFlow()
+
+        fun setDescriptionTags(t: com.wholphinplus.sources.cinema.DescriptionTags) {
+            prefs.edit().putString(DESCRIPTION_TAGS_KEY, fullJson.encodeToString(t)).apply()
+            _descriptionTags.value = t
+        }
+
         private val _pickerPrefs =
             MutableStateFlow(
                 runCatching { json.decodeFromString<com.wholphinplus.sources.core.PickerPrefs>(prefs.getString(PICKER_KEY, null)!!) }
                     .getOrDefault(com.wholphinplus.sources.core.PickerPrefs()),
             )
 
-        /** How the copy picker orders and chooses (Settings → Servers & Search). Synced. */
+        /** How the copy picker orders and chooses (Settings → Servers & Copies). Synced. */
         val pickerPrefs: StateFlow<com.wholphinplus.sources.core.PickerPrefs> = _pickerPrefs.asStateFlow()
 
         fun setPickerPrefs(p: com.wholphinplus.sources.core.PickerPrefs) {
@@ -290,6 +304,7 @@ class ConnectionStore
                 kidsTab = _kidsTab.value,
                 picker = _pickerPrefs.value,
                 playInfo = _playInfoPrefs.value,
+                descriptionTags = _descriptionTags.value,
             )
 
         /** A cloud profile's settings, through the usual setters so every screen follows. */
@@ -304,6 +319,7 @@ class ConnectionStore
             if (s.kidsTab != _kidsTab.value) setKidsTab(s.kidsTab)
             if (s.picker != _pickerPrefs.value) setPickerPrefs(s.picker)
             if (s.playInfo != _playInfoPrefs.value) setPlayInfoPrefs(s.playInfo)
+            if (s.descriptionTags != _descriptionTags.value) setDescriptionTags(s.descriptionTags)
             if (s.overlays != _overlays.value) setOverlays(s.overlays)
             if (s.ratings != _ratingPrefs.value) setRatingPrefs(s.ratings)
             com.wholphinplus.sources.cinema.RowsPage.entries.forEach { page -> if (s.layouts[page] != _pageLayouts.value[page]) setPageLayout(page, s.layouts[page]) }
@@ -367,6 +383,7 @@ class ConnectionStore
             const val ONBOARDING_KEY = "onboarding_stage"
 
             const val OVERLAYS_KEY = "poster_overlays"
+            const val DESCRIPTION_TAGS_KEY = "description_tags"
             const val RATINGS_KEY = "rating_prefs"
             const val HOME_LAYOUT_KEY = "home_layout_v1"
             const val MDBLIST_KEY = "mdblist_key_v1"

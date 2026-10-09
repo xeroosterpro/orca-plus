@@ -42,7 +42,7 @@ class NowPlayingTest {
         assertEquals("1080p", i.quality)
         assertEquals("H.264", i.videoCodec)
         assertEquals("AAC 2.0", i.audio)
-        assertEquals(PlaybackTrouble.MAIN, i.server)
+        assertEquals(ServerBrands.mainName(), i.server)
     }
 
     @Test fun `formats the player reports read as people know them`() {

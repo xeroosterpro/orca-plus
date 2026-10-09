@@ -926,11 +926,16 @@ internal class CinemaRepository(
         list: com.wholphinplus.sources.HomeCollection? = null,
     ): CinemaRow {
         if (!isTopList(name) || items.size < 3) return CinemaRow(name, items.map(::toItem))
-        // A Top 10 keeps the chart's own numbers: a title not in the library leaves its number
-        // out rather than moving the rest up (rows matched before ranks were kept count 1, 2, 3)
+        // The chart's top 10 in its own order, numbered 1, 2, 3 among the titles you have (owner,
+        // 2026-10-09: a title not in the library left a gap, "1, 2, 4, 5" read as a mistake)
         val ranks = list?.rankById().orEmpty()
-        val top = items.map { it to ranks[it.id.toString().replace("-", "").lowercase()] }.filter { (_, r) -> r == null || r <= 10 }.take(10)
-        return CinemaRow(name, top.map { (d, r) -> toItem(d).copy(rank = r) }, ranked = true)
+        val top =
+            items
+                .map { it to ranks[it.id.toString().replace("-", "").lowercase()] }
+                .filter { (_, r) -> r == null || r <= 10 }
+                .sortedBy { (_, r) -> r ?: Int.MAX_VALUE }
+                .take(10)
+        return CinemaRow(name, top.mapIndexed { i, (d, _) -> toItem(d).copy(rank = i + 1) }, ranked = true)
     }
 
     /**
@@ -1271,7 +1276,13 @@ internal class CinemaRepository(
                         }
                     }
                 tmdbOf(d)?.let { if (series) seriesTmdb[d.id] = it }
-                val base = toItem(d)
+                // Quality, HDR and audio from the file's streams (a server may list them only on
+                // its media source), for Description tags
+                val base =
+                    toItem(d).let { b ->
+                        val t = streamTags(d.mediaStreams?.takeIf { it.isNotEmpty() } ?: d.mediaSources?.firstOrNull()?.mediaStreams)
+                        b.copy(resolution = b.resolution ?: t.resolution, hdr = b.hdr ?: t.hdr, audio = b.audio ?: t.audio)
+                    }
                 val video = d.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO }
                     ?: d.mediaSources?.firstOrNull()?.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO }
                 val quality =
@@ -1318,6 +1329,14 @@ internal class CinemaRepository(
                     makersLabel = if (series) "Created by" else "Director",
                     people = castOf(d),
                     quality = quality,
+                    year = d.productionYear?.toString(),
+                    length =
+                        if (series) {
+                            d.childCount?.let { if (it == 1) "1 Season" else "$it Seasons" }
+                        } else {
+                            d.runTimeTicks?.let { t -> (t / 600_000_000L).let { m -> if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m" } }
+                        },
+                    minutesLeft = if (series) null else d.runTimeTicks?.let { ((it - (d.userData?.playbackPositionTicks ?: 0L)) / 600_000_000L).toInt() },
                     favorite = d.userData?.isFavorite == true,
                     series = series,
                     seasons = seasons.await(),
@@ -1904,6 +1923,10 @@ data class CinemaDetailsData(
     val startSeason: Int?,
     /** The cast row: the server's people (photos completed from TMDB once the row shows). */
     val people: List<CastMember> = emptyList(),
+    // For Description tags: "2026", "2h 14m" or "3 Seasons", minutes left to watch (movies)
+    val year: String? = null,
+    val length: String? = null,
+    val minutesLeft: Int? = null,
 )
 
 /**

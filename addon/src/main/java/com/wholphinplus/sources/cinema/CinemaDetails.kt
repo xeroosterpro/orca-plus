@@ -121,6 +121,7 @@ fun CinemaDetails(
     // With TMDB: episode stills when the server's pictures are missing
     val repo = remember { CinemaRepository(hook, hook.collections, search.tmdb) }
     val overlays by hook.store.overlays.collectAsState()
+    val descriptionTags by hook.store.descriptionTags.collectAsState()
     val ratingPrefs by hook.store.ratingPrefs.collectAsState()
     val ratings = remember { entry.ratings() }
     remember { StreamCache.attach(context) }
@@ -186,8 +187,11 @@ fun CinemaDetails(
             // A card's preview of a show can't play (its episode never came): show the error
             failed != null && (d == null || d.play?.pending == true) ->
                 LoadError(failed, onRetry = { attempt++ }, onClassic = null, modifier = Modifier.align(Alignment.Center))
-            d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf), LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) { DetailsScreen(d, repo, onPlay, onOpen) }
+            d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalDescriptionTags provides descriptionTags, LocalStreamLookup provides StreamLookup(repo::streamTagsOf), LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) { DetailsScreen(d, repo, onPlay, onOpen) }
         }
+        // The lower edge fades into the stage: a row peeking in from below (the season tabs
+        // under Episodes) was sliced through its text. One gradient on top, no layer.
+        if (d != null) BottomFade()
     }
 }
 
@@ -466,22 +470,11 @@ private fun Hero(
         }
     }
     Spacer(Modifier.height(18.dp))
-    MetaLine(Meta(item.meta, item.rating, d.quality))
-    // Always takes its line, so the overview doesn't jump when the genres arrive
-    Spacer(Modifier.height(6.dp))
-    Text(d.genres.joinToString("  •  ").ifEmpty { " " }, color = InkDim, fontSize = 13.sp, maxLines = 1)
-    // Review scores (Settings → Orca+ → Ratings); takes no room when there are none
-    Box(Modifier.padding(top = 10.dp)) { TitleRatings(item) }
-    Spacer(Modifier.height(14.dp))
-    Text(
-        item.overview.trim().replace(Regex("\\s+"), " "),
-        color = Ink,
-        fontSize = 15.sp,
-        lineHeight = 22.sp,
-        maxLines = 4,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.widthIn(max = 580.dp),
-    )
+    // Meta line, genres, scores, tagline, description and facts, as Description tags has them
+    DescriptionBlock(
+        Described(item, d.year, d.length, d.minutesLeft, d.genres, d.makers, d.series),
+        LocalDescriptionTags.current,
+    ) { services -> TitleRatings(item, services) }
     Spacer(Modifier.height(22.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
         val play = d.play
@@ -522,7 +515,8 @@ private fun Hero(
     }
     Spacer(Modifier.height(20.dp))
     Credit("Starring", d.cast)
-    Credit(d.makersLabel, d.makers)
+    // Description tags' Director line says it already, above
+    if (!LocalDescriptionTags.current.makers) Credit(d.makersLabel, d.makers)
 }
 
 @Composable

@@ -40,12 +40,20 @@ class PickerTuningTest {
 
     private fun ranked(p: PickerPrefs) = all.sortedWith(tunedRanking(order, p, "main-row")).map { "${it.connectionId} ${it.quality}" }
 
-    @Test fun `by default the biggest copy of the best quality leads`() {
-        assertEquals(listOf("alpha 4K", "beta 4K", "main-row 4K", "alpha 1080p"), ranked(PickerPrefs()))
+    @Test fun `your server first on a tie of quality and size, by default`() {
+        assertEquals(listOf("main-row 4K", "alpha 4K", "beta 4K", "alpha 1080p"), ranked(PickerPrefs()))
+        // The old switch, off in a saved setting, no longer changes it
+        assertEquals(ranked(PickerPrefs()), ranked(PickerPrefs(preferMain = false)))
     }
 
-    @Test fun `your server first on a tie of quality and size`() {
-        assertEquals(listOf("main-row 4K", "alpha 4K", "beta 4K", "alpha 1080p"), ranked(PickerPrefs(preferMain = true)))
+    @Test fun `copies that read the same size in the picker tie`() {
+        // Both show "5.3 GB" (1024-based); decimal rounding put them 5.7 and 5.8 apart and broke the tie
+        val gib = 1024L * 1024 * 1024
+        val other = copy("alpha", "1080p", 3, (5.34 * gib).toLong())
+        val mine = copy("main-row", "1080p", 3, (5.27 * gib).toLong())
+        assertEquals(other.size, mine.size)
+        val r = listOf(other, mine).sortedWith(tunedRanking(order, PickerPrefs(), "main-row"))
+        assertEquals("main-row", r.first().connectionId)
     }
 
     @Test fun `a real size difference still wins over your server`() {
@@ -55,7 +63,7 @@ class PickerTuningTest {
     }
 
     @Test fun `a server put first leads with its best copy`() {
-        assertEquals(listOf("beta 4K", "alpha 4K", "main-row 4K", "alpha 1080p"), ranked(PickerPrefs(first = "beta")))
+        assertEquals(listOf("beta 4K", "main-row 4K", "alpha 4K", "alpha 1080p"), ranked(PickerPrefs(first = "beta")))
         assertEquals("main-row 4K", ranked(PickerPrefs(first = PickerPrefs.MAIN)).first())
         // A server without this title changes nothing
         assertEquals(ranked(PickerPrefs()), ranked(PickerPrefs(first = "plex")))

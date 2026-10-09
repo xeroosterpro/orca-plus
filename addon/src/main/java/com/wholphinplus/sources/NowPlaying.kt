@@ -102,7 +102,7 @@ object NowPlaying {
         played: PlayedFormats,
     ): PlayInfo {
         val transcoding = playMethod == "TRANSCODE"
-        val server = if (isMain || copy == null) PlaybackTrouble.MAIN else copy.serverLabel
+        val server = if (isMain || copy == null) ServerBrands.mainName() else copy.serverLabel
         if (copy != null && !transcoding) {
             return PlayInfo(
                 method = methodLabel(playMethod),

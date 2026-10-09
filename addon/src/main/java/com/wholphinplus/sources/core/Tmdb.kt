@@ -88,6 +88,23 @@ data class TitleArt(
     fun serviceUrls(): List<String> = services.map { "${IMAGES}154$it" }
 }
 
+/**
+ * A title's facts for Description tags (Settings → Home & Look): TMDB's details, plus the director
+ * when asked for. Money in US dollars, 0 when TMDB doesn't know it.
+ */
+@kotlinx.serialization.Serializable
+data class TitleFacts(
+    val tagline: String = "",
+    val budget: Long = 0,
+    val revenue: Long = 0,
+    val studio: String = "",
+    val language: String = "",
+    val status: String = "",
+    val seasons: Int = 0,
+    val episodes: Int = 0,
+    val makers: List<String> = emptyList(),
+)
+
 /** One of a title's cast ([cast]). */
 data class TmdbCastMember(
     val id: Int,
@@ -324,6 +341,38 @@ class TmdbClient(
             services = services,
             tmdbScore = o.string("vote_average").toDoubleOrNull()?.takeIf { it > 0 && votes >= 10 },
             released = o.string(if (tv) "first_air_date" else "release_date").ifBlank { null },
+        )
+    }
+
+    /**
+     * [TitleFacts] in one request (a movie's director in a second, only when [director]): the
+     * plain details call, which the cloud's TMDB proxy allows without appends.
+     */
+    fun facts(
+        tv: Boolean,
+        id: Int,
+        director: Boolean,
+    ): TitleFacts {
+        val o = get("${if (tv) "tv" else "movie"}/$id")
+        val makers =
+            if (tv) {
+                o.objects("created_by").map { it.string("name") }.filter { it.isNotBlank() }.take(2)
+            } else if (director) {
+                runCatching { get("movie/$id/credits").objects("crew").filter { it.string("job") == "Director" }.map { it.string("name") }.distinct().take(2) }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+        return TitleFacts(
+            tagline = o.string("tagline").trim(),
+            budget = o.long("budget") ?: 0,
+            revenue = o.long("revenue") ?: 0,
+            // A show's own network, else the studio that made it
+            studio = (if (tv) o.objects("networks").firstOrNull()?.string("name") else null)?.ifBlank { null } ?: o.objects("production_companies").firstOrNull()?.string("name").orEmpty(),
+            language = o.string("original_language"),
+            status = o.string("status"),
+            seasons = o.int("number_of_seasons") ?: 0,
+            episodes = o.int("number_of_episodes") ?: 0,
+            makers = makers,
         )
     }
 
@@ -609,6 +658,8 @@ internal data class SmartQuery(
                 "drama" to "18",
                 "thriller" to "53",
                 "sci-fi" to "878",
+                "sci fi" to "878",
+                "scifi" to "878",
                 "science fiction" to "878",
                 "romance" to "10749",
                 "animation" to "16",
@@ -629,6 +680,13 @@ internal data class SmartQuery(
                 "(?:top(?:\\s+\\d+)?(?:\\s+rated)?|best|popular|trending|new|latest)" +
                     "(?:\\s+(?:" + GENRES.joinToString("|") { Regex.escape(it.first) } + "))?" +
                     "\\s+(?:movies|movie|tv shows|tv show|shows|series|films|film|anime)",
+            )
+        // A lead and a genre with no kind ("best sci-fi", "new horror"): movies and series both
+        // (owner's sweep 2026-10-09: "best sci-fi" found nothing, "best sci-fi movies" worked)
+        private val browseGenre =
+            Regex(
+                "(?:top(?:\\s+\\d+)?(?:\\s+rated)?|best|popular|trending|new|latest)" +
+                    "\\s+(?:" + GENRES.joinToString("|") { Regex.escape(it.first) } + ")",
             )
         private val topCount = Regex("top\\s+(\\d+)")
 
@@ -652,7 +710,7 @@ internal data class SmartQuery(
                 )
             }
 
-            if (!browse.matches(q)) return null
+            if (!browse.matches(q) && !browseGenre.matches(q)) return null
             val genre = GENRES.firstOrNull { it.first in q }
             val anime = "anime" in q
             val isTv = "show" in q || "series" in q

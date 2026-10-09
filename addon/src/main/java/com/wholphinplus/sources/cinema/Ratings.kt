@@ -329,10 +329,14 @@ internal fun BoxScope.CardRatings(
 
 /** The title page's line of scores, then where it streams (the cards' white wordmarks). */
 @Composable
-internal fun TitleRatings(item: CinemaItem) {
+internal fun TitleRatings(
+    item: CinemaItem,
+    // Streaming logos on a title page follow Description tags; elsewhere the poster tags
+    showServices: Boolean = LocalOverlays.current.services,
+) {
     val scores = if (LocalRatingPrefs.current.onTitlePage) rememberScores(item) else emptyList()
     val context = androidx.compose.ui.platform.LocalContext.current
-    val services = if (LocalOverlays.current.services) rememberArt(item)?.serviceUrls().orEmpty() else emptyList()
+    val services = if (showServices) rememberArt(item)?.serviceUrls().orEmpty() else emptyList()
     if (scores.isEmpty() && services.isEmpty()) return
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
         scores.forEach { ScoreChip(it, small = false) }

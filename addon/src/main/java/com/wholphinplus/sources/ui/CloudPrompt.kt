@@ -223,7 +223,7 @@ internal fun CloudPinFlow(
                     }
                     if (exists) {
                         Text(
-                            "A TV that still syncs can change the PIN without the old one: Settings → Account & Cloud → Cloud sync → Change PIN.",
+                            "A TV that still syncs can change the PIN without the old one: Settings → Account → Name & PIN → Change PIN.",
                             color = Color(0xFF8C8C8C),
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center,
@@ -345,7 +345,7 @@ private fun NamePick(
     Column(Modifier.widthIn(max = 640.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Pick an Orca+ name", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
         Text(
-            "Your PIN is set. With a name too, a new TV needs only the name and the PIN: it signs in to your server by itself. You can pick one later in Settings → Account & Cloud → Cloud sync.",
+            "Your PIN is set. With a name too, a new TV needs only the name and the PIN: it signs in to your server by itself. You can pick one later in Settings → Account.",
             color = Color(0xFFB3B3B3),
             fontSize = 16.sp,
             lineHeight = 23.sp,
@@ -397,7 +397,7 @@ private fun ForgotPin(
         Text(
             if (asked) {
                 "The setup saved for this account goes $whenText. Any TV that still syncs can stop it until then. " +
-                    "After that, set a new PIN in Settings → Account & Cloud → Cloud sync. This TV works as normal meanwhile."
+                    "After that, set a new PIN in Settings → Account. This TV works as normal meanwhile."
             } else {
                 "Without the PIN, the saved setup can't be opened: it's encrypted with it. Orca+ can delete it so you can start " +
                     "fresh with a new PIN. To keep anyone else from doing this to you, it waits 24 hours, and any TV that still " +
@@ -487,7 +487,7 @@ private fun AllSet(
 /**
  * The one-time offer, a few seconds after the app opens on a TV that doesn't sync yet: "welcome
  * back" when the signed-in account has a cloud profile, else "keep your setup safe". Either
- * answer (or "Not now") is remembered; Settings → Account & Cloud → Cloud sync is always there.
+ * answer (or "Not now") is remembered; Settings → Account is always there.
  */
 @Composable
 fun CloudPrompt() {
@@ -551,7 +551,7 @@ private fun ResetWarning(
                 Text("Someone wants to reset your Orca+ cloud setup", color = Color(0xFFF2F2F2), fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center)
                 Text(
                     "\"Forgot PIN\" was used on another TV. The setup saved for this account will be deleted ${resetTime(context, status.resetAt)} " +
-                        "unless you keep it. If that was you, you can change the PIN here instead: Settings → Account & Cloud → Cloud sync → Change PIN.",
+                        "unless you keep it. If that was you, you can change the PIN here instead: Settings → Account → Name & PIN → Change PIN.",
                     color = Color(0xFFB3B3B3),
                     fontSize = 16.sp,
                     lineHeight = 23.sp,

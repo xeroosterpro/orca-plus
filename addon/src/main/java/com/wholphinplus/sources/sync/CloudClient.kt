@@ -187,8 +187,16 @@ internal class CloudClient(
     }
 
     /** Starts a phone setup for this TV's public key (base64, 65 bytes). */
-    fun setupStart(pub: String): SetupStart {
-        val body = buildJsonObject { put("pub", pub) }.toString()
+    /** A phone setup code; [mode] "server": for an extra server (the phone's page asks no PIN). */
+    fun setupStart(
+        pub: String,
+        mode: String? = null,
+    ): SetupStart {
+        val body =
+            buildJsonObject {
+                put("pub", pub)
+                mode?.let { put("mode", it) }
+            }.toString()
         val o = request(Request.Builder().url("$base/v1/setup").post(body.toRequestBody("application/json".toMediaType())))
         return SetupStart(text(o, "code"), text(o, "secret"), text(o, "url"), text(o, "qr"))
     }

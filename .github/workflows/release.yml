@@ -1,0 +1,230 @@
+# Builds Orca+ on the pinned Wholphin release (UPSTREAM: tag + commit) and publishes it, so installed
+# copies get an in-app update prompt. Runs on every push to main, by hand, and every 6 hours.
+#
+# The scheduled run only WATCHES Wholphin: when it releases a newer tag, it opens an issue. Nothing
+# unreviewed is built or published: a maintainer checks the new release, bumps UPSTREAM in a commit,
+# and that push builds it.
+#
+# Jobs, least privilege first:
+#   check   read-only: is this commit's release already out?
+#   build   read-only, NO secrets: builds unsigned APKs and the source zip (runs Wholphin's whole
+#           Gradle build, i.e. third-party code, so it never sees the signing key or a write token)
+#   release signs (zipalign + apksigner only, with the key), checks the certificate against
+#           RELEASE_CERT, and publishes the release with the source zip.
+#   watch   (schedule / manual only) opens an issue when Wholphin has a newer release than UPSTREAM.
+name: Release
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# One publishing run at a time (push and manual share a group), and the 6-hourly watch in its own:
+# a group holds one running and one pending run, so a queued watch replaced a queued push's run
+# and that commit got no release
+concurrency:
+  group: release-${{ github.event_name == 'schedule' && 'watch' || 'publish' }}
+
+jobs:
+  check:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      tag: ${{ steps.check.outputs.tag }}
+      wholphin: ${{ steps.check.outputs.wholphin }}
+      wholphin_sha: ${{ steps.check.outputs.wholphin_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # build.sh numbers versions by commit count
+          persist-credentials: false
+      - name: Anything new?
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          read -r WHOLPHIN WHOLPHIN_SHA < UPSTREAM
+          # Release numbers: commits + REV_OFFSET (raised whenever the history is squashed)
+          TAG="${WHOLPHIN}-r$(( $(git rev-list --count HEAD) + $(cat REV_OFFSET) ))"
+          {
+            echo "tag=$TAG"
+            echo "wholphin=$WHOLPHIN"
+            echo "wholphin_sha=$WHOLPHIN_SHA"
+          } >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG is already released"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the pinned Wholphin
+        env:
+          WHOLPHIN: ${{ needs.check.outputs.wholphin }}
+          WHOLPHIN_SHA: ${{ needs.check.outputs.wholphin_sha }}
+        run: |
+          git clone -q https://github.com/damontecres/Wholphin upstream
+          test "$(git -C upstream rev-parse "$WHOLPHIN^{commit}")" = "$WHOLPHIN_SHA" \
+            || { echo "::error::Wholphin $WHOLPHIN no longer points at the pinned $WHOLPHIN_SHA"; exit 1; }
+
+      - name: Check Gradle wrapper
+        uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Build (unsigned)
+        env:
+          # The Orca+ cloud's address for the official build (forks build without one). It ships
+          # inside every APK, so it is a repository *variable*, not a secret: this job has none.
+          ORCA_CLOUD_URL: ${{ vars.ORCA_CLOUD_URL }}
+          PUBLIC: "1"
+          UNSIGNED: "1"
+          REPO: ${{ github.repository }}
+          SHIELD: ""
+          WHOLPHIN: ${{ needs.check.outputs.wholphin }}
+          WHOLPHIN_SHA: ${{ needs.check.outputs.wholphin_sha }}
+        run: |
+          if [ "$GITHUB_REPOSITORY" = xeroosterpro/orca-plus ] && [ -z "$ORCA_CLOUD_URL" ]; then
+            echo "::error::Repository variable ORCA_CLOUD_URL is not set; the official build needs it"; exit 1
+          fi
+          ./build.sh "$WHOLPHIN"
+
+      - name: Source zip and release notes
+        env:
+          WHOLPHIN: ${{ needs.check.outputs.wholphin }}
+        run: |
+          V=$(cat dist/release/VERSION)
+          # Complete corresponding source for this exact build (GPL): patched Wholphin + the addon
+          zip -qr "dist/release/Orca-plus-source-$V.zip" upstream addon hooks.patch hooks.files build.sh \
+            NOTICE LICENSE LICENSES README.md UPSTREAM REV_OFFSET \
+            -x 'upstream/.git/*' '*/build/*' '*/.gradle/*' '*/.kotlin/*' 'upstream/local.properties' 'addon/build/*'
+          {
+            echo "Orca+ built on Wholphin $WHOLPHIN."
+            echo
+            # A push publishes its own news: the commit's message
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              git log -1 --format=%B | sed '/^Co-Authored-By/d'
+              echo
+            fi
+            echo "**New install:** download Wholphin-release.apk on the TV (e.g. with the Downloader app) and install it."
+            echo "**Already installed:** Orca+ offers this update itself (Install update, at the top of Settings)."
+            echo
+            echo "Source: this repository at ${GITHUB_SHA::7}. Wholphin: https://github.com/damontecres/Wholphin/releases/tag/$WHOLPHIN"
+            echo
+            echo "**Source code:** the complete source for this build (Wholphin $WHOLPHIN with the Orca+ changes applied) is attached as Orca-plus-source-$V.zip."
+            echo "SHA-256 of every file: SHA256SUMS."
+          } > dist/release/notes.md
+          cp RELEASE_CERT dist/release/RELEASE_CERT
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned
+          path: dist/release/
+          retention-days: 3
+          if-no-files-found: error
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned
+          path: rel
+
+      - name: Sign
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+        run: |
+          set -euo pipefail
+          # Pinned: the newest build-tools on the runner changed under us (2026-10-09: apksigner
+          # printed no certificate at all). Falls back to the newest only if this one is gone.
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          [ -x "$BT/apksigner" ] || BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $BT"
+          KS=$(mktemp) PASSFILE=$(mktemp)
+          trap 'rm -f "$KS" "$PASSFILE"' EXIT
+          echo "$KEYSTORE_B64" | base64 -d > "$KS"
+          printf '%s' "$KEYSTORE_PASS" > "$PASSFILE"
+          WANT=$(tr -d ' \n' < rel/RELEASE_CERT)
+          for apk in rel/Wholphin-release*.apk; do
+            "$BT/zipalign" -f -p 4 "$apk" "$apk.aligned"
+            "$BT/apksigner" sign --ks "$KS" --ks-pass "file:$PASSFILE" --ks-key-alias wholphinplus --out "$apk" "$apk.aligned"
+            rm -f "$apk.aligned" "$apk.idsig"
+            CERTS=$("$BT/apksigner" verify --print-certs "$apk" 2>&1 || true)
+            GOT=$(printf '%s\n' "$CERTS" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1)
+            [ "$GOT" = "$WANT" ] || { printf '%s\n' "$CERTS"; echo "::error::$apk is signed by $GOT, expected $WANT (RELEASE_CERT)"; exit 1; }
+          done
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd rel
+          # The title is what Wholphin's updater compares (vX.Y.Z-<revision>-g<hash>)
+          V=$(cat VERSION)
+          sha256sum Wholphin-release*.apk "Orca-plus-source-$V.zip" > SHA256SUMS
+          gh release create "$TAG" Wholphin-release*.apk "Orca-plus-source-$V.zip" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$V" --notes-file notes.md
+
+  watch:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Newer Wholphin release?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          read -r PINNED _ < UPSTREAM
+          LATEST=$(git ls-remote --tags --refs https://github.com/damontecres/Wholphin 'v*' \
+            | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ "$LATEST" = "$PINNED" ] || [ "$(printf '%s\n%s\n' "$PINNED" "$LATEST" | sort -V | tail -1)" = "$PINNED" ]; then
+            echo "Wholphin $PINNED is the newest release"; exit 0
+          fi
+          SHA=$(git ls-remote https://github.com/damontecres/Wholphin "refs/tags/$LATEST^{}" | cut -f1)
+          [ -n "$SHA" ] || SHA=$(git ls-remote https://github.com/damontecres/Wholphin "refs/tags/$LATEST" | cut -f1)
+          TITLE="Wholphin $LATEST is out: review and bump UPSTREAM"
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" --json number --jq '.[].number' | grep -q .; then
+            echo "Issue already open"; exit 0
+          fi
+          printf '%s\n' \
+            "Wholphin released $LATEST (commit $SHA); Orca+ is pinned to $PINNED." \
+            "" \
+            "1. Read the release: https://github.com/damontecres/Wholphin/releases/tag/$LATEST" \
+            "2. Check hooks.patch still applies and the app works on it." \
+            "3. Commit \`UPSTREAM\` = \`$LATEST $SHA\`; that push builds and publishes the release." \
+            > body.md
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file body.md

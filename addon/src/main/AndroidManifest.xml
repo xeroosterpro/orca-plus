@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Lists that failed while the TV had no network are fetched again once it's back -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Sealed tokens and keys stay out of backups (res/xml/orca_backup_rules.xml) -->
+    <application
+        android:dataExtractionRules="@xml/orca_data_extraction_rules"
+        android:fullBackupContent="@xml/orca_backup_rules">
+        <!-- Lets `simpleperf` sample the app on a TV (frame-time work); it doesn't make it debuggable -->
+        <profileable android:shell="true" />
+        <!-- Plays titles that exist only on an extra server (opened from smart search) -->
+        <activity
+            android:name="com.wholphinplus.sources.ui.ExternalPlayerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+        <!-- Notes how the process started; reopens the app in a fresh process when Android
+             had started it in the background (see FreshStart.kt) -->
+        <provider
+            android:name="com.wholphinplus.sources.FreshStartProvider"
+            android:authorities="${applicationId}.freshstart"
+            android:exported="false"
+            android:initOrder="1000" />
+        <activity
+            android:name="com.wholphinplus.sources.FreshStartActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:process=":fresh"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+    </application>
+</manifest>

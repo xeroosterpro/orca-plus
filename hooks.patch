@@ -1,0 +1,2160 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index e005cb6f2..eb906ae1a 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -72,7 +72,7 @@ configure<ApplicationExtension> {
+     compileSdk = libs.versions.compileSdk.getInt()
+ 
+     defaultConfig {
+-        applicationId = "com.github.damontecres.wholphin"
++        applicationId = "io.github.xeroosterpro.orcaplus" // Orca+: its own app, installed next to Wholphin
+         minSdk = libs.versions.minSdk.getInt()
+         targetSdk = libs.versions.targetSdk.getInt()
+         versionCode = gitTags.trim().lines().size
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 582e000a2..4b93d14e5 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -37,10 +37,11 @@
+         </intent>
+     </queries>
+ 
++    <!-- Orca+: own icon and TV banner -->
+     <application
+         android:allowBackup="true"
+-        android:banner="@mipmap/ic_banner"
+-        android:icon="@mipmap/ic_launcher"
++        android:banner="@mipmap/orca_banner"
++        android:icon="@mipmap/orca_launcher"
+         android:label="@string/app_name"
+         android:supportsRtl="true"
+         android:theme="@style/Theme.Wholphin"
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
+index 62f0e39b4..f705abf84 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
+@@ -429,9 +429,22 @@ class MainActivityViewModel
+         private val backdropService: BackdropService,
+         private val appUpgradeHandler: AppUpgradeHandler,
+         private val intentService: IntentService,
++        private val sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
+     ) : ViewModel() {
+         private val mutex = Mutex()
+ 
++        // Orca+: cloud sync carries Wholphin's own settings too
++        init {
++            sourceHook.profileSync.appSettings =
++                object : com.wholphinplus.sources.sync.AppSettings {
++                    override suspend fun read() = (preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()).toByteArray()
++
++                    override suspend fun write(bytes: ByteArray) {
++                        preferences.updateData { AppPreferences.parseFrom(bytes) }
++                    }
++                }
++        }
++
+         fun appStart(intent: Intent?) {
+             viewModelScope.launchDefault {
+                 mutex.withLock {
+@@ -489,6 +502,7 @@ class MainActivityViewModel
+                     try {
+                         val needUpgrade = appUpgradeHandler.needUpgrade()
+                         if (needUpgrade) {
++                            if (com.wholphinplus.sources.welcome.Onboarding.announceUpdate(context)) // Orca+: not on a first install
+                             showToast(
+                                 context,
+                                 context.getString(
+@@ -499,6 +513,27 @@ class MainActivityViewModel
+                             appUpgradeHandler.run()
+                         }
+                         appUpgradeHandler.copySubfont(false)
++                        // Orca+: apply a one-time imported login, if one is waiting
++                        sourceHook.takeImportedLogin()?.let { login ->
++                            val serverId = login.serverId.toUUIDOrNull()
++                            val userId = login.userId.toUUIDOrNull()
++                            if (serverId != null && userId != null) {
++                                try {
++                                    serverRepository.changeUser(
++                                        com.github.damontecres.wholphin.data.model.JellyfinServer(serverId, null, login.url, null),
++                                        com.github.damontecres.wholphin.data.model.JellyfinUser(
++                                            id = userId,
++                                            name = login.userName,
++                                            serverId = serverId,
++                                            accessToken = login.token,
++                                        ),
++                                    )
++                                } catch (ex: Exception) {
++                                    Timber.e(ex, "Imported Jellyfin login failed")
++                                    showToast(context, "Imported login failed: ${ex.message}")
++                                }
++                            }
++                        }
+                         val prefs =
+                             preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()
+                         val profileProtected =
+@@ -507,10 +542,12 @@ class MainActivityViewModel
+                                 ?.isProtected == true
+                         if (prefs.signInAutomatically && !profileProtected) {
+                             val current =
+-                                serverRepository.restoreSession(
+-                                    prefs.currentServerId?.toUUIDOrNull(),
+-                                    prefs.currentUserId?.toUUIDOrNull(),
+-                                )
++                                com.wholphinplus.sources.OfflineStart.restore( // Orca+: the saved session opens without the network
++                                    online = { serverRepository.restoreSession(prefs.currentServerId?.toUUIDOrNull(), prefs.currentUserId?.toUUIDOrNull()) }, // Orca+
++                                    offline = { serverRepository.restoreOffline(prefs.currentServerId?.toUUIDOrNull(), prefs.currentUserId?.toUUIDOrNull()) }, // Orca+
++                                    recheck = { serverRepository.current.value?.let { serverRepository.changeUser(it.server, it.user) } }, // Orca+
++                                    onRefused = { serverRepository.current.value?.server?.let { s -> serverRepository.closeSession(); setupNavigationManager.navigateTo(SetupDestination.UserList(s)) } }, // Orca+: sign in again, same server
++                                ) // Orca+
+                             if (current != null) {
+                                 if (current.user.isProtected) {
+                                     setupNavigationManager.navigateTo(
+@@ -567,7 +604,8 @@ class MainActivityViewModel
+                 mutex.withLock {
+                     try {
+                         Timber.v("Updating userDto")
+-                        serverRepository.updateUserDto()
++                        // Orca+: a TV waking from sleep asks before its Wi-Fi is back: wait it out quietly
++                        com.wholphinplus.sources.OfflineStart.retryQuietly("appResume") { serverRepository.updateUserDto() }
+                     } catch (ex: Exception) {
+                         Timber.w(ex, "Error during appResume")
+                     }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt b/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt
+index 26dda9082..160187798 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/MainContent.kt
+@@ -86,17 +86,19 @@ fun MainContent(
+                             }
+ 
+                             SetupDestination.ServerList -> {
+-                                SwitchServerContent(Modifier.fillMaxSize())
++                                com.github.damontecres.wholphin.ui.setup.OrcaServerList(Modifier.fillMaxSize()) // Orca+: first-run welcome
+                             }
+ 
+                             is SetupDestination.UserList -> {
+-                                SwitchUserContent(
++                                com.github.damontecres.wholphin.ui.setup.OrcaUserList( // Orca+: first-run sign-in
+                                     server = key.server,
+                                     Modifier.fillMaxSize(),
+                                 )
+                             }
+ 
+-                            is SetupDestination.AppContent -> {
++                            is SetupDestination.AppContent -> if (com.github.damontecres.wholphin.ui.setup.orcaWelcomeOwnsScreen()) {
++                                com.github.damontecres.wholphin.ui.setup.OrcaWelcomeFinish() // Orca+: finish the welcome first
++                            } else {
+                                 LaunchedEffect(Unit) {
+                                     backdropService.clearBackdrop()
+                                 }
+@@ -118,6 +120,7 @@ fun MainContent(
+                                         preferences = preferences,
+                                         modifier = Modifier.fillMaxSize(),
+                                     )
++                                    com.wholphinplus.sources.ui.CloudPrompt() // Orca+: one-time cloud sync offer
+                                 } else {
+                                     Box(
+                                         modifier = Modifier.size(200.dp),
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt b/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt
+index bd25a2d45..0862edaf2 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt
+@@ -44,7 +44,7 @@ class WholphinApplication :
+                         message: String,
+                         t: Throwable?,
+                     ) {
+-                        Log.println(priority, tag ?: "Wholphin", message)
++                        Log.println(priority, tag ?: "Wholphin", com.wholphinplus.sources.LogScrub.text(message)) // Orca+: no tokens in logs (Send app logs uploads them)
+                     }
+                 },
+             )
+@@ -97,9 +97,9 @@ class WholphinApplication :
+                 )
+             dialog {
+                 text =
+-                    "Wholphin has crashed! Would you like to attempt to " +
++                    "Orca+ has crashed! Would you like to attempt to " + // Orca+
+                     "send a crash report to your Jellyfin server?"
+-                title = "Wholphin Crash Report"
++                title = "Orca+ Crash Report" // Orca+
+                 positiveButtonText = "Send"
+                 negativeButtonText = "Do not send"
+             }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt b/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt
+index e6d9c4684..25eae9ee4 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt
+@@ -171,6 +171,19 @@ class ServerRepository
+             return null
+         }
+ 
++        // Orca+: the saved server, user and token, opened without asking the server (offline start)
++        suspend fun restoreOffline(
++            serverId: UUID?,
++            userId: UUID?,
++        ): CurrentUser? {
++            val saved = withContext(ioDispatcher) { serverId?.let { serverDao.getServer(it) } } ?: return null
++            val user = saved.users.firstOrNull { it.id == userId } ?: return null
++            apiClient.update(baseUrl = saved.server.url, accessToken = user.accessToken)
++            val current = CurrentUser(saved.server, user)
++            withContext(WholphinDispatchers.Main) { _current.value = current }
++            return current
++        }
++
+         suspend fun fetchLastUsedServer(serverId: UUID?): JellyfinServer? =
+             withContext(ioDispatcher) {
+                 serverId?.let { serverDao.getServer(serverId)?.server }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
+index 43d2d53a7..d051a8165 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
+@@ -233,7 +233,7 @@ sealed interface AppPreference<Pref, T> {
+         val PlayThemeMusic =
+             AppChoicePreference<AppPreferences, ThemeSongVolume>(
+                 title = R.string.play_theme_music,
+-                defaultValue = ThemeSongVolume.MEDIUM,
++                defaultValue = ThemeSongVolume.DISABLED, // Orca+: title pages stay quiet (was MEDIUM)
+                 getter = { it.interfacePreferences.playThemeSongs },
+                 setter = { prefs, value ->
+                     prefs.updateInterfacePreferences { playThemeSongs = value }
+@@ -292,7 +292,7 @@ sealed interface AppPreference<Pref, T> {
+         val AutoPlayNextDelay =
+             AppSliderPreference<AppPreferences>(
+                 title = R.string.auto_play_next_delay,
+-                defaultValue = 15,
++                defaultValue = 5, // Orca+: 5 s countdown to the next episode (was 15)
+                 min = 0,
+                 max = 60,
+                 interval = 5,
+@@ -344,7 +344,7 @@ sealed interface AppPreference<Pref, T> {
+             )
+ 
+         const val MEGA_BIT = 1024 * 1024L
+-        const val DEFAULT_BITRATE = 100 * MEGA_BIT
++        const val DEFAULT_BITRATE = 200 * MEGA_BIT // Orca+: 4K remuxes play directly (was 100)
+         private val bitrateValues =
+             listOf(
+                 500 * 1024L,
+@@ -563,7 +563,7 @@ sealed interface AppPreference<Pref, T> {
+         val UpdateUrl =
+             AppStringPreference<AppPreferences>(
+                 title = R.string.update_url,
+-                defaultValue = "https://api.github.com/repos/damontecres/Wholphin/releases/latest",
++                defaultValue = com.wholphinplus.sources.BuildConfig.UPDATE_URL, // Orca+: update URL for Orca+ releases
+                 getter = { it.updateUrl },
+                 setter = { prefs, value ->
+                     prefs.update { updateUrl = value }
+@@ -645,7 +645,7 @@ sealed interface AppPreference<Pref, T> {
+         val SkipRecaps =
+             AppChoicePreference<AppPreferences, SkipSegmentBehavior>(
+                 title = R.string.skip_recap_behavior,
+-                defaultValue = SkipSegmentBehavior.IGNORE,
++                defaultValue = SkipSegmentBehavior.ASK_TO_SKIP, // Orca+: a Skip Recap button (was IGNORE)
+                 getter = { it.playbackPreferences.skipRecaps },
+                 setter = { prefs, value ->
+                     prefs.updatePlaybackPreferences { skipRecaps = value }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
+index e7b5db000..8277a7884 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
+@@ -97,7 +97,29 @@ class HomeSettingsService
+         private val imageUrlService: ImageUrlService,
+         private val suggestionService: SuggestionService,
+         private val displayPreferencesService: DisplayPreferencesService,
++        private val sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
+     ) {
++        // Orca+: Trakt/MDBList collection rows, placed right after the first row
++        private var addonRows: List<com.wholphinplus.sources.HomeRow> = emptyList()
++
++        private fun withAddonRows(settings: HomePageResolvedSettings): HomePageResolvedSettings {
++            val base =
++                settings.rows.filterNot { row ->
++                    (row.config as? HomeRowConfig.GetItems)?.let { sourceHook.isAddonRow(it.getItems) } == true
++                }
++            val extra =
++                addonRows.mapIndexed { i, r ->
++                    HomeRowConfigDisplay(100_000 + i, StringStringProvider(r.name), HomeRowConfig.GetItems(r.name, r.request))
++                }
++            return settings.copy(rows = base.take(1) + extra + base.drop(1))
++        }
++
++        init {
++            sourceHook.watchHomeRows { rows ->
++                addonRows = rows
++                currentSettings.update { withAddonRows(it) }
++            }
++        }
+         @OptIn(ExperimentalSerializationApi::class)
+         val jsonParser =
+             Json {
+@@ -251,6 +273,7 @@ class HomeSettingsService
+                 }
+ 
+             currentSettings.update { resolvedSettings }
++            currentSettings.update { withAddonRows(it) } // Orca+: merge in the collection rows (own line, so upgrades merge)
+         }
+ 
+         /**
+@@ -263,6 +286,7 @@ class HomeSettingsService
+                 }
+             val resolvedSettings = HomePageResolvedSettings(resolvedRows)
+             currentSettings.update { resolvedSettings }
++            currentSettings.update { withAddonRows(it) } // Orca+: merge in the collection rows (own line, so upgrades merge)
+         }
+ 
+         /**
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
+index 4ce6583fb..8a52a4943 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpService.kt
+@@ -45,6 +45,7 @@ class LatestNextUpService
+         private val datePlayedService: DatePlayedService,
+         private val displayPreferencesService: DisplayPreferencesService,
+         private val favoriteWatchManager: FavoriteWatchManager,
++        private val sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
+     ) {
+         /**
+          * Get resume (continue watching) items for a user
+@@ -55,6 +56,8 @@ class LatestNextUpService
+             includeEpisodes: Boolean,
+             useSeriesForPrimary: Boolean = true,
+         ): List<BaseItem> {
++            // Orca+: pull progress from the extra servers first, so this row includes it
++            sourceHook.syncWatchState()
+             val request =
+                 GetResumeItemsRequest(
+                     userId = userId,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpWorker.kt b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpWorker.kt
+index 01ed9dd28..c6951f2c7 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpWorker.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/LatestNextUpWorker.kt
+@@ -62,7 +62,7 @@ class LatestNextUpWorker
+                         return Result.failure()
+                     }
+                 }
+-                latestNextUpService.updateRemovedFromNextUp(userId)
++                com.wholphinplus.sources.OfflineStart.retryQuietly("Next Up check") { latestNextUpService.updateRemovedFromNextUp(userId) } ?: return Result.retry() // Orca+: no network yet (waking up)
+                 return Result.success()
+             } catch (ex: Exception) {
+                 Timber.e(ex, "Error during updateRemovedFromNextUp")
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt b/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt
+index cf4128fb0..32bfec5cc 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt
+@@ -101,7 +101,7 @@ class PlayerFactory
+                                 MediaExtensionStatus.MES_DISABLED -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF
+                                 else -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+                             }
+-                        val dataSourceFactory = DefaultDataSource.Factory(context)
++                        val dataSourceFactory = DefaultDataSource.Factory(context, com.wholphinplus.sources.RetryingDataSource.Factory(androidx.media3.datasource.DefaultHttpDataSource.Factory())) // Orca+: ride out a server's random 404s
+                         val extractorsFactory = createExtractorsFactory()
+                         var renderersFactory: RenderersFactory =
+                             WholphinRenderersFactory(context, decodeAv1)
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt b/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt
+index 708eb8b5b..955ac6aa5 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt
+@@ -59,6 +59,8 @@ class ServerEventListener
+         ) {
+             if (server != null && user != null && api.baseUrl != null && api.accessToken != null) {
+                 (context as AppCompatActivity).lifecycleScope.launchIO {
++                    // Orca+: on waking up the network can be seconds behind; failing here also skipped setupListeners
++                    com.wholphinplus.sources.OfflineStart.retryQuietly("capabilities") {
+                     api.sessionApi.postCapabilities(
+                         playableMediaTypes = listOf(MediaType.VIDEO),
+                         supportedCommands =
+@@ -68,6 +70,7 @@ class ServerEventListener
+                             ),
+                         supportsMediaControl = true,
+                     )
++                    } // Orca+
+                     setupListeners()
+                 }
+             }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
+index 8c2d84cbc..b62e37bd0 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
+@@ -64,7 +64,7 @@ class UpdateChecker
+ 
+             private val NOTE_REGEX = Regex("<!-- app-note:(.+) -->")
+ 
+-            val ACTIVE = BuildConfig.UPDATING_ENABLED
++            val ACTIVE = com.wholphinplus.sources.BuildConfig.UPDATES_ENABLED // Orca+: updater is active in public builds only
+         }
+ 
+         /**
+@@ -201,6 +201,7 @@ class UpdateChecker
+         ) {
+             withContext(WholphinDispatchers.IO) {
+                 cleanup()
++                if (!com.wholphinplus.sources.UpdateGuard.isAllowedUrl(release.downloadUrl)) { showToast(context, "Update refused: not a GitHub release download"); return@withContext } // Orca+
+                 val request =
+                     Request
+                         .Builder()
+@@ -213,6 +214,9 @@ class UpdateChecker
+                         withContext(WholphinDispatchers.Main) {
+                             callback.contentLength(it.body.contentLength())
+                         }
++                        // Orca+: download to a private file; install only this app, signed with this app's key
++                        val checked = File(context.cacheDir, APK_NAME).also { f -> f.outputStream().use { out -> it.body.byteStream().use { input -> copyTo(input, out, callback = callback) } } }
++                        if (!com.wholphinplus.sources.UpdateGuard.isAllowedUrl(it.request.url.toString()) || !com.wholphinplus.sources.UpdateGuard.isUpdateOfThisApp(context, checked)) { checked.delete(); showToast(context, "Update refused: it isn't this app signed with its own key"); return@use } // Orca+
+                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                             val contentValues =
+                                 ContentValues().apply {
+@@ -230,7 +234,7 @@ class UpdateChecker
+                                     contentValues,
+                                 )
+                             if (uri != null) {
+-                                it.body.byteStream().use { input ->
++                                checked.inputStream().use { input -> // Orca+: the checked copy
+                                     resolver.openOutputStream(uri).use { output ->
+                                         copyTo(input, output!!, callback = callback)
+                                     }
+@@ -243,7 +247,7 @@ class UpdateChecker
+                             } else {
+                                 Timber.e("Resolver URI is null, trying fallback")
+ //                                showToast(context, "Unable to download the apk")
+-                                val targetFile = fallbackDownload(it, callback)
++                                val targetFile = fallbackDownload(checked, callback) // Orca+: the checked copy
+                                 val intent = Intent(Intent.ACTION_INSTALL_PACKAGE)
+                                 intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                 intent.data =
+@@ -255,7 +259,7 @@ class UpdateChecker
+                                 context.startActivity(intent)
+                             }
+                         } else {
+-                            val targetFile = fallbackDownload(it, callback)
++                            val targetFile = fallbackDownload(checked, callback) // Orca+: the checked copy
+                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                 val intent = Intent(Intent.ACTION_INSTALL_PACKAGE)
+                                 intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+@@ -282,7 +286,7 @@ class UpdateChecker
+         }
+ 
+         private suspend fun fallbackDownload(
+-            response: Response,
++            response: File, // Orca+: the checked copy
+             callback: DownloadCallback,
+         ): File {
+             val downloadDir =
+@@ -290,7 +294,7 @@ class UpdateChecker
+             downloadDir.mkdirs()
+             val targetFile = File(downloadDir, APK_NAME)
+             targetFile.outputStream().use { output ->
+-                response.body.byteStream().use { input ->
++                response.inputStream().use { input -> // Orca+
+                     copyTo(input, output, callback = callback)
+                 }
+             }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
+index 06607cf98..aa4eda490 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
+@@ -94,6 +94,8 @@ object AppModule {
+             .Builder()
+             .apply {
+                 // TODO user agent, timeouts, logging, etc
++                // Orca+: a page asks for ~20 rows at once; OkHttp's 5 per server queued them for seconds
++                dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 12 })
+             }.build()
+ 
+     @AuthOkHttpClient
+@@ -106,10 +108,13 @@ object AppModule {
+         deviceInfo: DeviceInfo,
+     ) = okHttpClient
+         .newBuilder()
++        // Orca+: images (Coil) queue on their own, so a screen of posters doesn't hold up the rows; 30 s reads: on a slow link one HTTP/2 stream can wait >10 s
++        .dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 8 }).readTimeout(java.time.Duration.ofSeconds(30))
+         .addInterceptor {
+             val request = it.request()
+             val newRequest =
+-                serverRepository.current.value?.user?.accessToken?.let { token ->
++                // Orca+: the sign-in goes to the main server only (it went with every picture: TMDB's, other servers')
++                serverRepository.current.value?.takeIf { cur -> com.wholphinplus.sources.SameOrigin.matches(cur.server.url, request.url) }?.user?.accessToken?.let { token ->
+                     request
+                         .newBuilder()
+                         .addHeader(
+@@ -130,7 +135,11 @@ object AppModule {
+     @Singleton
+     fun okHttpFactory(
+         @StandardOkHttpClient okHttpClient: OkHttpClient,
+-    ) = CoroutineContextApiClientFactory(OkHttpFactory(okHttpClient))
++        progressOverlay: com.wholphinplus.sources.ProgressOverlay,
++    ) = CoroutineContextApiClientFactory(
++        // Orca+: merge progress from the extra servers into the main server's answers
++        OkHttpFactory(okHttpClient.newBuilder().addInterceptor(progressOverlay).build()),
++    )
+ 
+     @Provides
+     @Singleton
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/cards/ChapterCard.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/cards/ChapterCard.kt
+index 34966e436..d4ddbdef9 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/cards/ChapterCard.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/cards/ChapterCard.kt
+@@ -67,7 +67,8 @@ fun ChapterCard(
+     ) {
+         Box(modifier = Modifier.fillMaxSize()) {
+             AsyncImage(
+-                model = imageUrl,
++                // Orca+: a picture borrowed from another copy when the server has none
++                model = com.wholphinplus.sources.ui.rememberBorrowedChapter(chapter.itemId, chapter.position.inWholeMilliseconds, chapter.tag) ?: imageUrl,
+                 contentDescription = null,
+                 contentScale = ContentScale.Fit,
+                 modifier = Modifier.fillMaxSize(),
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/components/Dialogs.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/components/Dialogs.kt
+index d7bd99519..fc24620e3 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/components/Dialogs.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/components/Dialogs.kt
+@@ -4,6 +4,7 @@ import android.content.res.Resources
+ import android.view.KeyEvent
+ import androidx.annotation.StringRes
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.border
+ import androidx.compose.foundation.focusable
+ import androidx.compose.foundation.gestures.scrollBy
+ import androidx.compose.foundation.interaction.MutableInteractionSource
+@@ -267,8 +268,7 @@ fun DialogPopupContent(
+     dismissOnClick: Boolean = true,
+     elevation: Dp = 8.dp,
+ ) {
+-    val elevatedContainerColor =
+-        MaterialTheme.colorScheme.surfaceColorAtElevation(elevation)
++    val elevatedContainerColor = com.wholphinplus.sources.ui.SettingsDialogColor // Orca+: the app's raised panel
+     Column(
+         verticalArrangement = Arrangement.spacedBy(8.dp),
+         modifier =
+@@ -278,6 +278,7 @@ fun DialogPopupContent(
+                     this.clip = true
+                     this.shape = RoundedCornerShape(28.0.dp)
+                 }.drawBehind { drawRect(color = elevatedContainerColor) }
++                .border(1.dp, androidx.compose.ui.graphics.Color.White.copy(alpha = 0.08f), RoundedCornerShape(28.0.dp)) // Orca+
+                 .padding(PaddingValues(24.dp)),
+     ) {
+         Text(
+@@ -301,7 +302,7 @@ fun DialogPopupContent(
+                     is DialogItem -> {
+                         val interactionSource = remember { MutableInteractionSource() }
+                         val focused by interactionSource.collectIsFocusedAsState()
+-                        ListItem(
++                        com.wholphinplus.sources.ui.SettingsRow( // Orca+: the settings row, focus eased in
+                             selected = item.selected,
+                             enabled = !waiting && item.enabled,
+                             onClick = {
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
+index 0cf426226..fbc4a8912 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/ApplicationContent.kt
+@@ -66,9 +66,12 @@ fun ApplicationContent(
+             viewModel = viewModel,
+         )
+         val navDrawerListState = rememberLazyListState()
++        val cinemaMotion = com.wholphinplus.sources.cinema.cinemaModeOn() // Orca+
+         NavDisplay(
+             backStack = navigationManager.backStack,
+             onBack = { navigationManager.goBack() },
++            transitionSpec = { if (cinemaMotion) com.wholphinplus.sources.cinema.CinemaNavMotion.push() else com.wholphinplus.sources.cinema.CinemaNavMotion.classic() }, // Orca+
++            popTransitionSpec = { if (cinemaMotion) com.wholphinplus.sources.cinema.CinemaNavMotion.pop() else com.wholphinplus.sources.cinema.CinemaNavMotion.classic() }, // Orca+
+             entryDecorators =
+                 listOf(
+                     rememberSaveableStateHolderNavEntryDecorator(),
+@@ -78,7 +81,10 @@ fun ApplicationContent(
+                 key as Destination
+                 val contentKey = "${key}_${server?.id}_${user?.id}"
+                 NavEntry(key, contentKey = contentKey) {
+-                    if (key.fullScreen) {
++                    // Orca+: its own full-screen screens (top menu, no side drawer). Wholphin's other
++                    // pages (an episode, a box set, a person…) open full screen too: the classic side
++                    // menu is never shown, Back returns
++                    if (key.fullScreen || com.wholphinplus.sources.cinema.cinemaModeOn()) {
+                         DestinationContent(
+                             destination = key,
+                             preferences = preferences,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
+index 63789d6ce..ecb769f5e 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/nav/DestinationContent.kt
+@@ -70,14 +70,42 @@ fun DestinationContent(
+     }
+     when (destination) {
+         is Destination.Home -> {
+-            HomePage(
+-                preferences = preferences,
+-                modifier = modifier,
+-            )
++            // Orca+: Cinema mode home when it's switched on in Settings → Orca+
++            if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++                val nav: com.github.damontecres.wholphin.ui.search.SearchViewModel =
++                    androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++                com.wholphinplus.sources.cinema.CinemaHome(
++                    onOpen = { id, kind -> nav.navigateTo(Destination.MediaItem(id, kind)) },
++                    onPlay = { id, positionMs -> nav.navigateTo(Destination.Playback(id, positionMs)) },
++                    onNavigate = { target ->
++                        nav.navigateTo(
++                            when (target) {
++                                is com.wholphinplus.sources.cinema.CinemaNav.Library ->
++                                    Destination.MediaItem(target.id, target.kind, target.collectionType)
++                                com.wholphinplus.sources.cinema.CinemaNav.MyList -> Destination.Favorites
++                                com.wholphinplus.sources.cinema.CinemaNav.Search -> Destination.Search()
++                                com.wholphinplus.sources.cinema.CinemaNav.Settings ->
++                                    Destination.Settings(com.github.damontecres.wholphin.ui.preferences.PreferenceScreenOption.BASIC)
++                            },
++                        )
++                    },
++                    modifier = modifier,
++                )
++            } else {
++                HomePage(
++                    preferences = preferences,
++                    modifier = modifier,
++                )
++            }
+         }
+ 
+         is Destination.HomeSettings -> {
+-            HomeSettingsPage(preferences, modifier)
++            // Orca+: Cinema mode's home has its own rows editor
++            if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++                com.wholphinplus.sources.ui.CinemaHomeRowsPage(modifier)
++            } else {
++                HomeSettingsPage(preferences, modifier)
++            }
+         }
+ 
+         is Destination.Playback -> {
+@@ -144,6 +172,27 @@ fun DestinationContent(
+         }
+ 
+         is Destination.MediaItem -> {
++            // Orca+: an actor's page in the Cinema look (from a title page's Cast row)
++            if (com.wholphinplus.sources.cinema.cinemaModeOn() && destination.type == BaseItemKind.PERSON) {
++                val nav: com.github.damontecres.wholphin.ui.search.SearchViewModel = androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel() // Orca+
++                com.wholphinplus.sources.cinema.CinemaPerson(destination.itemId, onOpen = { id, kind -> nav.navigateTo(Destination.MediaItem(id, kind)) }, modifier = modifier) // Orca+
++                return
++            }
++            // Orca+: Cinema mode title page for movies and shows
++            if (com.wholphinplus.sources.cinema.cinemaModeOn() &&
++                (destination.type == BaseItemKind.MOVIE || destination.type == BaseItemKind.SERIES)
++            ) {
++                val nav: com.github.damontecres.wholphin.ui.search.SearchViewModel =
++                    androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++                com.wholphinplus.sources.cinema.CinemaDetails(
++                    itemId = destination.itemId,
++                    kind = destination.type,
++                    onPlay = { id, positionMs -> nav.navigateTo(Destination.Playback(id, positionMs)) },
++                    onOpen = { id, kind -> nav.navigateTo(Destination.MediaItem(id, kind)) },
++                    modifier = modifier,
++                )
++                return
++            }
+             when (destination.type) {
+                 BaseItemKind.SERIES -> {
+                     SeriesDetails(
+@@ -364,11 +413,38 @@ fun DestinationContent(
+ 
+         is Destination.Search -> {
+             LaunchedEffect(Unit) { onClearBackdrop.invoke() }
+-            SearchPage(
++            // Orca+: smart search when a TMDB key is set, else Wholphin's own page
++            val searchViewModel: com.github.damontecres.wholphin.ui.search.SearchViewModel =
++                androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
++            if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++                com.wholphinplus.sources.cinema.CinemaSearch(
++                    initialQuery = destination.query,
++                    onOpen = { id, kind -> searchViewModel.navigateTo(Destination.MediaItem(id, kind)) },
++                    modifier = modifier,
++                ) {
++                    SearchPage(
++                        initialQuery = destination.query,
++                        userPreferences = preferences,
++                        modifier = modifier,
++                        viewModel = searchViewModel,
++                    )
++                }
++                return
++            }
++            com.wholphinplus.sources.ui.SmartSearchPage(
+                 initialQuery = destination.query,
+-                userPreferences = preferences,
++                onOpenLibraryItem = { id, series ->
++                    searchViewModel.navigateTo(Destination.MediaItem(id, if (series) BaseItemKind.SERIES else BaseItemKind.MOVIE))
++                },
+                 modifier = modifier,
+-            )
++            ) {
++                SearchPage(
++                    initialQuery = destination.query,
++                    userPreferences = preferences,
++                    modifier = modifier,
++                    viewModel = searchViewModel,
++                )
++            }
+         }
+ 
+         Destination.Debug -> {
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
+index 6ed210a2d..5189c542d 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
+@@ -122,12 +122,16 @@ fun PlaybackPage(
+     LifecycleStartEffect(destination) {
+         onStopOrDispose {
+             viewModel.release()
++            viewModel.sourcePicker.close() // Orca+: the play ends here (the extra server hears it now)
+         }
+     }
+     val state by viewModel.state.collectAsState()
++    // Orca+: the source picker dialog
++    com.wholphinplus.sources.ui.SourcePickerOverlay(viewModel.sourcePicker)
+     when (val st = state.loading) {
+         is LoadingState.Error -> {
+-            ErrorMessage(st, modifier)
++            // Orca+: what went wrong in plain words, whose problem it is, another copy with a countdown
++            com.wholphinplus.sources.cinema.PlaybackTroubleScreen(viewModel.sourcePicker, runCatching { viewModel.itemId }.getOrNull(), st.message, st.exception, onRetry = viewModel::orcaRetry, onBack = { viewModel.navigationManager.goBack() })
+         }
+ 
+         LoadingState.Pending,
+@@ -138,13 +142,17 @@ fun PlaybackPage(
+ 
+         LoadingState.Success -> {
+             val playerState by viewModel.currentPlayer.collectAsState()
+-            PlaybackPageContent(
+-                playerInstance = playerState!!,
+-                preferences = preferences,
+-                destination = destination,
+-                viewModel = viewModel,
+-                modifier = modifier,
+-            )
++            androidx.compose.foundation.layout.Box(modifier) { // Orca+: room for the now-playing card
++                PlaybackPageContent(
++                    playerInstance = playerState!!,
++                    preferences = preferences,
++                    destination = destination,
++                    viewModel = viewModel,
++                    modifier = Modifier.fillMaxSize(),
++                )
++                // Orca+: how it's playing (direct or transcode, quality, sound, server), a moment after it starts
++                com.wholphinplus.sources.cinema.NowPlayingCard(viewModel.sourcePicker, playerState!!.player, runCatching { viewModel.itemId }.getOrNull(), state.currentPlayback?.playMethod?.name, Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(top = 40.dp, end = 48.dp))
++            }
+         }
+     }
+ }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
+index 79d2ae579..b3d914b6e 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
+@@ -152,6 +152,7 @@ class PlaybackViewModel
+         private val imageUrlService: ImageUrlService,
+         private val screensaverService: ScreensaverService,
+         private val musicService: MusicService,
++        sourceHook: com.wholphinplus.sources.SourceHook, // Orca+
+         @Assisted private val destination: Destination,
+     ) : ViewModel(),
+         Player.Listener,
+@@ -163,6 +164,9 @@ class PlaybackViewModel
+ 
+         val currentPlayer = MutableStateFlow<PlayerInstance?>(null)
+ 
++        // Orca+: one picker session per playback screen
++        val sourcePicker = sourceHook.newSession().also { addCloseable(it) }
++
+         internal lateinit var player: Player
+ 
+         private var mediaSession: MediaSession? = null
+@@ -465,6 +469,17 @@ class PlaybackViewModel
+ 
+                 val isLiveTv = item.type == BaseItemKind.TV_CHANNEL
+                 val base = item.data
++                // Orca+: ask the picker where to play this item from
++                val external =
++                    when (sourcePicker.pick(base, eligible = playlistItem is PlaylistItem.Media && !isLiveTv)) {
++                        com.wholphinplus.sources.Pick.Cancelled -> {
++                            withContext(WholphinDispatchers.Main) { navigationManager.goBack() }
++                            // Never "skipped": false would start the playlist's next item in the closing screen
++                            kotlinx.coroutines.awaitCancellation()
++                        }
++                        is com.wholphinplus.sources.Pick.External -> true
++                        com.wholphinplus.sources.Pick.Jellyfin -> false
++                    }
+ 
+                 // Use the provided playback parameters or else check if the database has some
+                 val itemPlayback =
+@@ -510,7 +525,7 @@ class PlaybackViewModel
+                         }
+ 
+                 // Create the correct player for the media
+-                createPlayer(videoStream?.hdr == true, videoStream?.is4k == true)
++                createPlayer(sourcePicker.isHdr(base.id) ?: (videoStream?.hdr == true), sourcePicker.is4k(base.id) ?: (videoStream?.is4k == true)) // Orca+: the picked file's
+ 
+                 val subtitleStreams = mediaSource?.let { getSubtitleStreams(mediaSource) }.orEmpty()
+                 val audioStreams = mediaSource?.let { getAudioStreams(mediaSource) }.orEmpty()
+@@ -584,17 +599,22 @@ class PlaybackViewModel
+                     )
+                 }
+                 withContext(WholphinDispatchers.Main) {
++                    sourcePicker.preferTracks(player, base.id, mediaSource, audioIndex, subtitleIndex) // Orca+: languages for an external file
+                     changeStreams(
+                         item = item,
+-                        audioIndex = audioIndex,
+-                        subtitleIndex = subtitleIndex,
++                        // Orca+: external files start at the player's default tracks
++                        audioIndex = audioIndex.takeUnless { external },
++                        subtitleIndex = subtitleIndex.takeUnless { external },
+                         positionMs = if (positionMs > 0) positionMs else C.TIME_UNSET,
+                         sourceId = mediaSource?.id,
+                         enableDirectPlay = !forceTranscoding,
+                         enableDirectStream = !forceTranscoding,
+                     )
+-                    player.prepare()
+-                    player.play()
++                    // Orca+: no stream (an error is on screen): an empty player "ends" at once and that closed the screen
++                    if (state.value.loading !is LoadingState.Error) {
++                        player.prepare()
++                        player.play()
++                    }
+                 }
+                 listenForSegments(item.id)
+                 return@withContext true
+@@ -684,7 +704,8 @@ class PlaybackViewModel
+                 val source = response.mediaSources.firstOrNull()
+                 source?.let { source ->
+                     val mediaUrl =
+-                        if (source.supportsDirectPlay) {
++                        // Orca+: play the picked source's own URL
++                        sourcePicker.urlFor(itemId) ?: if (source.supportsDirectPlay) {
+                             if (source.isRemote && source.path.isNotNullOrBlank()) {
+                                 Timber.i("Playback is remote for source: %s", source.id)
+                                 source.path
+@@ -715,6 +736,9 @@ class PlaybackViewModel
+                     }
+                     val transcodeType =
+                         when {
++                            // Orca+: external sources always direct-play
++                            sourcePicker.isExternal(itemId) -> PlayMethod.DIRECT_PLAY
++
+ //                        playerBackend == PlayerBackend.MPV -> PlayMethod.DIRECT_PLAY
+                             source.supportsDirectPlay -> PlayMethod.DIRECT_PLAY
+ 
+@@ -790,7 +814,7 @@ class PlaybackViewModel
+                             ?.firstOrNull { it.type == MediaStreamType.VIDEO }
+                             ?.let { stream ->
+                                 refreshRateService.changeRefreshRate(
+-                                    stream = stream,
++                                    stream = sourcePicker.videoStreamFor(itemId, stream), // Orca+: the picked file's
+                                     switchRefreshRate = prefs.refreshRateSwitching,
+                                     switchResolution = prefs.resolutionSwitching,
+                                 )
+@@ -812,6 +836,8 @@ class PlaybackViewModel
+                             )
+                         player.addListener(activityListener)
+                         this@PlaybackViewModel.activityListener = activityListener
++                        // Orca+: report progress to the picked server
++                        sourcePicker.track(player, itemId)
+ 
+                         _state.update {
+                             it.copy(
+@@ -1371,6 +1397,7 @@ class PlaybackViewModel
+ 
+         override fun onPlayerError(error: PlaybackException) {
+             Timber.e(error, "Playback error")
++            if (this::currentItem.isInitialized) sourcePicker.noteFailure(currentItem.item.id, error) // Orca+: which copy failed, and why
+             viewModelScope.launch(WholphinDispatchers.Main + ExceptionHandler()) {
+                 state.value.currentPlayback?.let {
+                     when (it.playMethod) {
+@@ -1388,6 +1415,9 @@ class PlaybackViewModel
+ 
+                         PlayMethod.DIRECT_STREAM, PlayMethod.DIRECT_PLAY -> {
+                             Timber.w("Playback error during ${it.playMethod}, falling back to transcoding")
++                            // Orca+: an external source failed, retry from Jellyfin starting with direct play
++                            val wasExternal = sourcePicker.dropExternal(currentItem.item.id)
++                            val mainTracks = if (wasExternal) sourcePicker.mainTrackChoice(currentItem.item.id) else null // Orca+
+                             val currentPlayback = state.value.currentPlayback
+                             if (currentPlayback == null) {
+                                 Timber.w("Playback error, currentPlayback is null")
+@@ -1395,12 +1425,14 @@ class PlaybackViewModel
+                             changeStreams(
+                                 item = currentItem.item,
+                                 sourceId = currentPlayback?.mediaSourceInfo?.id,
+-                                audioIndex = currentPlayback?.audioIndex,
+-                                subtitleIndex = currentPlayback?.subtitleIndex,
++                                audioIndex = if (mainTracks != null) mainTracks.first else currentPlayback?.audioIndex, // Orca+
++                                subtitleIndex = if (mainTracks != null) mainTracks.second else currentPlayback?.subtitleIndex, // Orca+
+                                 positionMs = player.currentPosition,
+-                                enableDirectPlay = false,
+-                                enableDirectStream = false,
++                                enableDirectPlay = wasExternal, // Orca+
++                                enableDirectStream = wasExternal, // Orca+
+                             )
++                            // Orca+: no new stream (an error is on screen): don't replay the broken one forever
++                            if (state.value.loading is LoadingState.Error) return@launch
+                             withContext(WholphinDispatchers.Main) {
+                                 player.prepare()
+                                 player.play()
+@@ -1411,6 +1443,22 @@ class PlaybackViewModel
+             }
+         }
+ 
++        /** Orca+: the trouble screen plays the title again where it stopped (that copy, another, or the picker). */
++        fun orcaRetry(retry: com.wholphinplus.sources.Retry) {
++            viewModelScope.launch(WholphinDispatchers.Main + ExceptionHandler()) {
++                _state.update { it.copy(loading = LoadingState.Loading) }
++                if (!this@PlaybackViewModel::currentItem.isInitialized) {
++                    withContext(WholphinDispatchers.IO) { init() } // failed before anything played: start over
++                    return@launch
++                }
++                val position =
++                    (if (this@PlaybackViewModel::player.isInitialized) player.currentPosition else 0L).takeIf { it > 0 }
++                        ?: (destination as? Destination.Playback)?.positionMs ?: 0L
++                sourcePicker.prepareRetry(currentItem.item.id, retry)
++                play(currentItem, position)
++            }
++        }
++
+         fun release() {
+             Timber.v("release")
+             disconnectPlayer()
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/ChapterRowOverlay.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/ChapterRowOverlay.kt
+index fa32950b5..e8b6ddbf0 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/ChapterRowOverlay.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/ChapterRowOverlay.kt
+@@ -73,6 +73,7 @@ fun ChapterRowOverlay(
+             index
+         }
+     val listState = rememberLazyListState(chapterIndex)
++    val movedOff = remember { androidx.compose.runtime.mutableStateOf(false) } // Orca+: left the chapter it opened on
+     val focusRequester = remember { FocusRequester() }
+     val hiddenFocusRequester = remember { FocusRequester() }
+     LaunchedEffect(Unit) {
+@@ -112,6 +113,12 @@ fun ChapterRowOverlay(
+                     interactionSource.collectIsFocusedAsState().value
+                 LaunchedEffect(isFocused) {
+                     if (isFocused) controllerViewState.pulseControls()
++                    // Orca+: resting on a chapter jumps there, no OK needed (OK still jumps and closes the row)
++                    if (isFocused && index != chapterIndex) movedOff.value = true
++                    if (isFocused && movedOff.value) {
++                        kotlinx.coroutines.delay(800L)
++                        player.seekTo(chapter.position.inWholeMilliseconds)
++                    }
+                 }
+                 ChapterCard(
+                     chapter = chapter,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/TrickplayPreview.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/TrickplayPreview.kt
+index 4871a77a1..bb2149cf6 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/TrickplayPreview.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/TrickplayPreview.kt
+@@ -44,6 +44,9 @@ fun TrickplayPreview(
+                     trickPlayInfo = trickplayInfo,
+                 )
+             }
++        } else {
++            // Orca+: thumbnails borrowed from another copy when the server has no trickplay
++            com.wholphinplus.sources.ui.BorrowedThumbnail(seekProgressMs)
+         }
+         val resources = LocalResources.current
+         val seekProgressSec = seekProgressMs / 1000L
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ClickPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ClickPreference.kt
+index 1b6c78701..367b634ff 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ClickPreference.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ClickPreference.kt
+@@ -15,7 +15,7 @@ fun ClickPreference(
+     onLongClick: (() -> Unit)? = null,
+     interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
+ ) {
+-    ListItem(
++    com.wholphinplus.sources.ui.SettingsRow( // Orca+: one row style for every setting
+         selected = false,
+         onClick = onClick,
+         onLongClick = onLongClick,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ComposablePreference.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ComposablePreference.kt
+index 4a7338e2c..6b629e6d2 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ComposablePreference.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/ComposablePreference.kt
+@@ -273,11 +273,11 @@ fun <T> ComposablePreference(
+ 
+ val PreferenceTitleStyle: TextStyle
+     @Composable @ReadOnlyComposable
+-    get() = MaterialTheme.typography.titleSmall
++    get() = MaterialTheme.typography.titleMedium // Orca+: readable from the sofa (was titleSmall)
+ 
+ val PreferenceSummaryStyle: TextStyle
+     @Composable @ReadOnlyComposable
+-    get() = MaterialTheme.typography.bodySmall
++    get() = MaterialTheme.typography.bodyMedium // Orca+ (was bodySmall)
+ 
+ @Composable
+ fun PreferenceTitle(
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
+new file mode 100644
+index 000000000..91010d11d
+--- /dev/null
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
+@@ -0,0 +1,384 @@
++package com.github.damontecres.wholphin.ui.preferences
++
++import androidx.activity.compose.BackHandler
++import androidx.compose.animation.togetherWith
++import androidx.annotation.StringRes
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxHeight
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.itemsIndexed
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.key
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.focus.FocusRequester
++import androidx.compose.ui.focus.focusProperties
++import androidx.compose.ui.focus.focusRequester
++import androidx.compose.ui.focus.onFocusChanged
++import androidx.compose.ui.input.key.Key
++import androidx.compose.ui.input.key.KeyEventType
++import androidx.compose.ui.input.key.key
++import androidx.compose.ui.input.key.onPreviewKeyEvent
++import androidx.compose.ui.input.key.type
++import kotlinx.coroutines.launch
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.tv.material3.ClickableSurfaceDefaults
++import androidx.tv.material3.MaterialTheme
++import androidx.tv.material3.Surface
++import androidx.tv.material3.Text
++import com.github.damontecres.wholphin.BuildConfig
++import com.github.damontecres.wholphin.R
++import com.github.damontecres.wholphin.preferences.AppPreference
++import com.github.damontecres.wholphin.preferences.AppPreferences
++import com.github.damontecres.wholphin.preferences.ExperimentalPreference
++import com.github.damontecres.wholphin.preferences.PlayerBackend
++import com.github.damontecres.wholphin.preferences.ScreensaverPreference
++import com.github.damontecres.wholphin.services.UpdateChecker
++import kotlinx.coroutines.delay
++
++/**
++ * Orca+: Wholphin's settings, reorganised. Wholphin splits them over a "basic" list and an
++ * "advanced" screen with repeated headings (Interface and Playback appear in both) and hides
++ * some behind sub-screens. Here every setting sits in one topic, picked from a menu on the left
++ * like a TV's own settings. The settings themselves (dialogs, validation, player-specific
++ * options) are Wholphin's own, drawn by [PreferencesContent].
++ */
++enum class OrcaSection(
++    @param:StringRes val title: Int,
++    @param:StringRes val hint: Int,
++) {
++    APPEARANCE(R.string.orca_settings_appearance, R.string.orca_settings_appearance_hint),
++    SOURCES(R.string.orca_settings_sources, R.string.orca_settings_sources_hint),
++    PLAYBACK(R.string.orca_settings_playback, R.string.orca_settings_playback_hint),
++    NEXT_UP(R.string.orca_settings_next_up, R.string.orca_settings_next_up_hint),
++    QUALITY(R.string.orca_settings_quality, R.string.orca_settings_quality_hint),
++    PROFILE(R.string.orca_settings_profile, R.string.orca_settings_profile_hint),
++    SCREENSAVER(R.string.orca_settings_screensaver, R.string.orca_settings_screensaver_hint),
++    ABOUT(R.string.orca_settings_about, R.string.orca_settings_about_hint),
++}
++
++private fun group(
++    @StringRes title: Int,
++    vararg prefs: AppPreference<AppPreferences, out Any?>,
++    conditional: List<ConditionalPreferences<AppPreferences>> = listOf(),
++) = PreferenceGroup(title, prefs.toList(), conditional)
++
++private val usesExoPlayer = { p: AppPreferences ->
++    p.playbackPreferences.playerBackend.let { it == PlayerBackend.EXO_PLAYER || it == PlayerBackend.PREFER_MPV }
++}
++
++/**
++ * Every setting, in the topic people would look for it under. Orca+'s own items (home style, rows,
++ * poster tags, lists, extra servers, search, cloud sync, credits) sit at the top of their topic,
++ * drawn by the addon ([com.wholphinplus.sources.ui.OrcaTopicItems]). With the Cinema home on, the
++ * two settings it replaces are left out: the app theme (Cinema has its own look) and Customize
++ * home (Rows does that).
++ */
++fun orcaGroups(
++    section: OrcaSection,
++    cinema: Boolean = false,
++): List<PreferenceGroup<AppPreferences>> =
++    when (section) {
++        OrcaSection.PLAYBACK ->
++            listOf(
++                group(
++                    R.string.orca_settings_controls,
++                    AppPreference.SkipForward,
++                    AppPreference.SkipBack,
++                    AppPreference.SkipBackOnResume,
++                    AppPreference.OneClickPause,
++                    AppPreference.DpadSeekModePref,
++                    AppPreference.ControllerTimeout,
++                    AppPreference.ShowClock,
++                ),
++                group(R.string.orca_settings_picture, AppPreference.GlobalContentScale, AppPreference.CinemaMode),
++            )
++
++        OrcaSection.NEXT_UP ->
++            listOf(
++                group(
++                    R.string.next_up,
++                    AppPreference.ShowNextUpTiming,
++                    AppPreference.AutoPlayNextUp,
++                    AppPreference.AutoPlayNextDelay,
++                    AppPreference.PassOutProtection,
++                ),
++                group(
++                    R.string.skip,
++                    AppPreference.SkipIntros,
++                    AppPreference.SkipOutros,
++                    AppPreference.SkipRecaps,
++                    AppPreference.SkipPreviews,
++                    AppPreference.SkipCommercials,
++                ),
++            )
++
++        OrcaSection.QUALITY ->
++            listOf(
++                group(
++                    R.string.orca_settings_streaming,
++                    AppPreference.MaxBitrate,
++                    AppPreference.ResolutionSwitching,
++                    AppPreference.RefreshRateSwitching,
++                ),
++                // These are the built-in player's; MPV and external players decide for themselves
++                group(
++                    R.string.orca_settings_audio_video,
++                    conditional = listOf(ConditionalPreferences(usesExoPlayer, listOf(AppPreference.Ac3Supported, AppPreference.DownMixStereo, AppPreference.DirectPlayDoviProfile7, AppPreference.DecodeAv1))),
++                ),
++                group(
++                    R.string.orca_settings_subtitles,
++                    AppPreference.SubtitleStyle,
++                    conditional = listOf(ConditionalPreferences(usesExoPlayer, listOf(AppPreference.AssSubtitleMode, AppPreference.DirectPlayPgs))),
++                ),
++                // The player itself (was a topic of its own with three settings)
++                group(
++                    R.string.orca_settings_engine,
++                    AppPreference.PlayerBackendPref,
++                    conditional =
++                        listOf(
++                            ConditionalPreferences(usesExoPlayer, listOf(AppPreference.FfmpegPreference)),
++                            ConditionalPreferences(
++                                { it.playbackPreferences.playerBackend.let { b -> b == PlayerBackend.MPV || b == PlayerBackend.PREFER_MPV } },
++                                listOf(AppPreference.MpvHardwareDecoding, AppPreference.MpvGpuNext, AppPreference.MpvConfFile),
++                            ),
++                            ConditionalPreferences(
++                                { it.playbackPreferences.playerBackend == PlayerBackend.EXTERNAL_PLAYER },
++                                listOf(AppPreference.ExternalPlayerApp),
++                            ),
++                        ),
++                ),
++                group(R.string.orca_settings_diagnostics, AppPreference.PlaybackDebugInfo),
++            ).filter { it.preferences.isNotEmpty() || it.conditionalPreferences.isNotEmpty() }
++
++        // Home & Look is Orca+'s own items only (ExtraSourcesSettings). Wholphin's look settings
++        // (app theme, title logos, backdrop style, nav drawer, tabs, ratings display, media
++        // management, theme music, photo slideshows) only changed its classic screens, which
++        // Orca+ no longer shows (one look since 2026-10-07). The clock is the player's: Playback.
++        OrcaSection.APPEARANCE -> emptyList()
++
++        // Orca+ items (extra servers, search, choosing a copy) first, then requests
++        OrcaSection.SOURCES ->
++            if (BuildConfig.DISCOVER_ENABLED) listOf(group(R.string.orca_settings_requests, AppPreference.SeerrIntegration)) else emptyList()
++
++        // Orca+ item (cloud sync) first, then signing in and this profile (sign-in sat under Servers)
++        OrcaSection.PROFILE ->
++            listOf(
++                group(R.string.orca_settings_signin, AppPreference.SignInAuto, AppPreference.QuickConnect),
++                group(R.string.orca_settings_your_profile, AppPreference.ProtectProfilePreference, AppPreference.UserInterfaceLanguage, AppPreference.UserProfileSettings),
++            )
++
++        OrcaSection.SCREENSAVER ->
++            listOf(
++                group(
++                    R.string.screensaver,
++                    ScreensaverPreference.Enabled,
++                    ScreensaverPreference.StartDelay,
++                    ScreensaverPreference.Duration,
++                    ScreensaverPreference.ShowClock,
++                    ScreensaverPreference.Animate,
++                    ScreensaverPreference.MaxAge,
++                    ScreensaverPreference.ItemTypes,
++                    ScreensaverPreference.Start,
++                ),
++                group(R.string.dim_screen, ScreensaverPreference.DimToggle, ScreensaverPreference.DimPercentage),
++            )
++
++        OrcaSection.ABOUT ->
++            listOf(
++                PreferenceGroup(
++                    R.string.about,
++                    buildList {
++                        add(AppPreference.InstalledVersion)
++                        if (UpdateChecker.ACTIVE) {
++                            add(AppPreference.Update)
++                            add(AppPreference.AutoCheckForUpdates)
++                            add(AppPreference.UpdateUrl)
++                        }
++                        add(AppPreference.OssLicenseInfo)
++                    },
++                ),
++                group(
++                    R.string.orca_settings_help,
++                    AppPreference.SendAppLogs,
++                    AppPreference.SendCrashReports,
++                    AppPreference.DebugLogging,
++                    AppPreference.ImageDiskCacheSize,
++                    AppPreference.ClearImageCache,
++                    ExperimentalPreference.Enable,
++                    conditional = listOf(ConditionalPreferences({ it.experimentalPreferences.enabled }, listOf(ExperimentalPreference.ExperimentalSettings))),
++                ),
++            )
++    }
++
++/**
++ * Settings as two panes: topics on the left; the focused topic's settings on the right. Moving
++ * through the topics previews each one; Right (or OK) goes into it, Back comes out to the topics.
++ */
++@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
++@Composable
++fun OrcaSettingsPage(
++    initialPreferences: AppPreferences,
++    modifier: Modifier = Modifier,
++) {
++    var section by rememberSaveable { mutableStateOf(OrcaSection.APPEARANCE) }
++    var focused by remember { mutableStateOf(OrcaSection.APPEARANCE) }
++    var inPane by remember { mutableStateOf(false) }
++    val railFocus = remember { OrcaSection.entries.associateWith { FocusRequester() } }
++    // Entering a topic (Right or OK from the list) lands on its first setting, not on whichever
++    // setting happens to sit level with the topic
++    // One per topic: while topics cross-fade both panes are composed, and a shared requester
++    // could hand focus to the one leaving (a topic with Orca+ items is entered on its first one)
++    val paneFocuses = remember { OrcaSection.entries.associateWith { FocusRequester() } }
++    val paneFocus = paneFocuses.getValue(section)
++    val currentPane by androidx.compose.runtime.rememberUpdatedState(paneFocus)
++    val scope = androidx.compose.runtime.rememberCoroutineScope()
++
++    // Follow the focused topic once it rests, so sweeping down the list doesn't rebuild every pane
++    LaunchedEffect(focused) {
++        if (focused != section) {
++            delay(140)
++            section = focused
++        }
++    }
++    LaunchedEffect(Unit) { runCatching { railFocus.getValue(section).requestFocus() } }
++
++    val backToRail = {
++        inPane = false
++        runCatching { railFocus.getValue(section).requestFocus() }
++        Unit
++    }
++    // Back inside a topic returns to the topic list (key route for Android 11, callback for 13+)
++    BackHandler(enabled = inPane) { backToRail() }
++
++    // Orca+'s look (2026-10-08 face lift): a darker topic panel, the stage beside it with a faint
++    // accent wash, the open topic's header, and topics that cross-fade instead of swapping
++    Row(modifier.fillMaxSize().background(com.wholphinplus.sources.ui.SettingsPageColor).background(com.wholphinplus.sources.ui.SettingsBackdrop)) {
++        Column(
++            Modifier.width(340.dp).fillMaxHeight().background(com.wholphinplus.sources.ui.SettingsRailColor.copy(alpha = 0.72f)).padding(start = 36.dp, end = 22.dp, top = 30.dp),
++            verticalArrangement = Arrangement.spacedBy(4.dp),
++        ) {
++            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, modifier = Modifier.padding(start = 18.dp)) {
++                Text("ORCA", color = com.wholphinplus.sources.ui.SettingsInk, fontSize = 13.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp)
++                Text("+", color = com.wholphinplus.sources.ui.SettingsAccent, fontSize = 13.sp, fontWeight = FontWeight.Black)
++            }
++            Text(stringResource(R.string.settings), fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = com.wholphinplus.sources.ui.SettingsInk, modifier = Modifier.padding(start = 18.dp))
++            Spacer(Modifier.height(14.dp))
++            // All eight topics fit on a 1080p TV without scrolling (Home & Look first: the most used)
++            LazyColumn(
++                // Left from a topic's settings comes back to that topic. It took the topic level
++                // with the setting, and the page switched to it (Extra servers -> Home & Look)
++                modifier =
++                    Modifier.focusProperties {
++                        onEnter = {
++                            if (requestedFocusDirection == androidx.compose.ui.focus.FocusDirection.Left) {
++                                runCatching { railFocus.getValue(section).requestFocus() }
++                            }
++                        }
++                    },
++                verticalArrangement = Arrangement.spacedBy(2.dp),
++            ) {
++                itemsIndexed(OrcaSection.entries) { _, s ->
++                    com.wholphinplus.sources.ui.SettingsRailItem(
++                        title = stringResource(s.title),
++                        hint = stringResource(s.hint),
++                        selected = s == section,
++                        modifier =
++                            Modifier.focusRequester(railFocus.getValue(s)).onFocusChanged {
++                                if (it.isFocused) {
++                                    focused = s
++                                    inPane = false
++                                }
++                            }.onPreviewKeyEvent { e ->
++                                // Right straight after Down (inside the 140 ms wait): this topic opens
++                                // now and is entered, not the one still shown (its pane was then
++                                // rebuilt under focus and focus was lost)
++                                if (e.key == Key.DirectionRight && s != section) {
++                                    if (e.type == KeyEventType.KeyDown) {
++                                        section = s
++                                        scope.launch {
++                                            for (i in 0 until 20) {
++                                                androidx.compose.runtime.withFrameNanos {}
++                                                if (runCatching { currentPane.requestFocus() }.getOrDefault(false)) break
++                                            }
++                                        }
++                                    }
++                                    true
++                                } else {
++                                    false
++                                }
++                            },
++                        onClick = {
++                            section = s
++                            focused = s
++                        },
++                    )
++                }
++            }
++        }
++        Box(
++            Modifier
++                .weight(1f)
++                .fillMaxHeight()
++                .focusProperties { enter = { paneFocus } }
++            .onFocusChanged { if (it.hasFocus) inPane = true }
++                .onPreviewKeyEvent { e ->
++                    if (inPane && (e.key == Key.Back || e.key == Key.Escape)) {
++                        if (e.type == KeyEventType.KeyUp) backToRail()
++                        true
++                    } else {
++                        false
++                    }
++                },
++        ) {
++            val cinema = com.wholphinplus.sources.cinema.cinemaModeOn()
++            // The next topic fades in a little from the right as the last one fades out
++            androidx.compose.animation.AnimatedContent(
++                targetState = section,
++                transitionSpec = {
++                    (
++                        androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(260, delayMillis = 60, easing = com.wholphinplus.sources.ui.SettingsFade)) +
++                            androidx.compose.animation.slideInHorizontally(androidx.compose.animation.core.tween(320, easing = com.wholphinplus.sources.ui.SettingsEase)) { it / 40 }
++                    ).togetherWith(androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140, easing = com.wholphinplus.sources.ui.SettingsFade)))
++                },
++                label = "topic",
++            ) { shown ->
++                Column(Modifier.fillMaxSize()) {
++                    com.wholphinplus.sources.ui.SettingsPaneHeader(stringResource(shown.title), stringResource(shown.hint))
++                    PreferencesContent(
++                        initialPreferences,
++                        PreferenceScreenOption.BASIC,
++                        // Rows scrolling up fade out under the header instead of being cut off
++                        Modifier.fillMaxSize().padding(start = 16.dp, end = 40.dp).then(com.wholphinplus.sources.ui.SettingsListFade),
++                        groupsOverride = orcaGroups(shown, cinema),
++                        titleOverride = stringResource(shown.title),
++                        grabFocus = false,
++                        animateIn = false,
++                        orcaTopic = shown.name,
++                        orcaFocusRequester = paneFocuses.getValue(shown).takeIf { com.wholphinplus.sources.ui.OrcaTopics.has(shown.name) },
++                        entryFocusRequester = paneFocuses.getValue(shown).takeUnless { com.wholphinplus.sources.ui.OrcaTopics.has(shown.name) },
++                    )
++                }
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
+index c97117b7d..3152db3b1 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
+@@ -96,10 +96,18 @@ fun PreferencesContent(
+     updateVM: UpdateViewModel = hiltViewModel(),
+     seerrVm: SwitchSeerrViewModel = hiltViewModel(),
+     onFocus: (Int, Int) -> Unit = { _, _ -> },
++    // Orca+: OrcaSettingsPage shows one topic at a time through these
++    groupsOverride: List<PreferenceGroup<AppPreferences>>? = null,
++    titleOverride: String? = null,
++    grabFocus: Boolean = true,
++    animateIn: Boolean = true,
++    orcaTopic: String? = null, // Orca+: draw this Settings topic's Orca+ items first
++    orcaFocusRequester: FocusRequester? = null, // Orca+: where entering such a topic lands
++    entryFocusRequester: FocusRequester? = null,
+ ) {
+     val context = LocalContext.current
+     val scope = rememberCoroutineScope()
+-    val focusRequester = remember { FocusRequester() }
++    val focusRequester = entryFocusRequester ?: remember { FocusRequester() } // Orca+: where entering a topic lands
+     val firstFocusRequester = remember { FocusRequester() }
+     val lastFocusRequester = remember { FocusRequester() }
+ 
+@@ -147,7 +155,7 @@ fun PreferencesContent(
+         }
+ 
+     val prefList =
+-        when (preferenceScreenOption) {
++        groupsOverride ?: when (preferenceScreenOption) { // Orca+: a topic's settings when given
+             PreferenceScreenOption.BASIC -> basicPreferences
+             PreferenceScreenOption.ADVANCED -> advancedPreferences
+             PreferenceScreenOption.EXO_PLAYER -> ExoPlayerPreferences
+@@ -167,7 +175,7 @@ fun PreferencesContent(
+             PreferenceScreenOption.EXPERIMENTAL -> R.string.experimental_settings
+         }
+ 
+-    var visible by remember { mutableStateOf(false) }
++    var visible by remember { mutableStateOf(!animateIn) } // Orca+
+     LaunchedEffect(Unit) {
+         // Forces the animated to trigger
+         visible = true
+@@ -192,6 +200,7 @@ fun PreferencesContent(
+     val showUpdate =
+         UpdateChecker.ACTIVE &&
+             preferenceScreenOption == PreferenceScreenOption.BASIC &&
++            (groupsOverride == null || orcaTopic == "ABOUT") && // Orca+: only About offers the update, not every topic
+             preferences.autoCheckForUpdates &&
+             updateAvailable
+ 
+@@ -202,21 +211,24 @@ fun PreferencesContent(
+         modifier = modifier,
+     ) {
+         LaunchedEffect(Unit) {
+-            focusRequester.tryRequestFocus()
++            if (grabFocus) focusRequester.tryRequestFocus() // Orca+: the topic list keeps focus
+         }
+         Column(
+-            modifier = Modifier.background(MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp)),
++            modifier = Modifier.background(if (orcaTopic != null) androidx.compose.ui.graphics.Color.Transparent else MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp)), // Orca+
+         ) {
+-            Text(
+-                text = stringResource(screenTitle),
+-                style = MaterialTheme.typography.headlineSmall,
+-                color = MaterialTheme.colorScheme.onSurface,
+-                textAlign = TextAlign.Center,
+-                modifier =
+-                    Modifier
+-                        .fillMaxWidth()
+-                        .padding(vertical = 8.dp),
+-            )
++            // Orca+: Settings draws the topic's header itself
++            if (orcaTopic == null) {
++                Text(
++                    text = titleOverride ?: stringResource(screenTitle), // Orca+
++                    style = MaterialTheme.typography.headlineSmall,
++                    color = MaterialTheme.colorScheme.onSurface,
++                    textAlign = TextAlign.Center,
++                    modifier =
++                        Modifier
++                            .fillMaxWidth()
++                            .padding(vertical = 8.dp),
++                )
++            }
+             LazyColumn(
+                 state = state,
+                 horizontalAlignment = Alignment.Start,
+@@ -248,19 +260,24 @@ fun PreferencesContent(
+                         )
+                     }
+                 }
+-                prefList.forEachIndexed { groupIndex, group ->
++                if (preferenceScreenOption == PreferenceScreenOption.BASIC && groupsOverride == null) {
++                    // Orca+: entry at the top of Settings; wrap-around focus from the last setting lands here
++                    item { com.wholphinplus.sources.ui.ExtraSourcesEntry(Modifier.focusRequester(firstFocusRequester)) }
++                } else if (orcaTopic != null && com.wholphinplus.sources.ui.OrcaTopics.has(orcaTopic)) {
++                    // Orca+: the topic's own items come first
+                     item {
+-                        Text(
+-                            text = stringResource(group.title),
+-                            style = MaterialTheme.typography.titleMedium,
+-                            color = MaterialTheme.colorScheme.onSurface,
+-                            textAlign = TextAlign.Start,
+-                            modifier =
+-                                Modifier
+-                                    .fillMaxWidth()
+-                                    .padding(top = 8.dp, bottom = 4.dp),
++                        com.wholphinplus.sources.ui.OrcaTopicItems(
++                            orcaTopic,
++                            Modifier.focusRequester(firstFocusRequester).let { m -> orcaFocusRequester?.let { m.focusRequester(it) } ?: m },
+                         )
+                     }
++                }
++                prefList.forEachIndexed { groupIndex, group ->
++                    // Orca+: a heading whose settings are all hidden (e.g. ExoPlayer-only ones under MPV) is left out
++                    if (groupsOverride != null && group.preferences.isEmpty() && group.conditionalPreferences.none { it.condition.invoke(preferences) }) return@forEachIndexed
++                    item {
++                        com.wholphinplus.sources.ui.SettingsHeader(stringResource(group.title)) // Orca+: the app's section heading
++                    }
+                     val groupPreferences =
+                         group.preferences +
+                             group.conditionalPreferences
+@@ -269,7 +286,9 @@ fun PreferencesContent(
+                                 .flatten()
+                     groupPreferences.forEachIndexed { prefIndex, pref ->
+                         pref as AppPreference<AppPreferences, Any>
+-                        val isFirst = groupIndex == 0 && prefIndex == 0 && !showUpdate
++                        val isFirst =
++                            groupIndex == 0 && prefIndex == 0 && !showUpdate &&
++                                !((preferenceScreenOption == PreferenceScreenOption.BASIC && groupsOverride == null) || (orcaTopic != null && com.wholphinplus.sources.ui.OrcaTopics.has(orcaTopic))) // Orca+: the entry above is first
+                         val isLast =
+                             groupIndex == prefList.lastIndex && prefIndex == groupPreferences.lastIndex
+                         item {
+@@ -816,6 +835,15 @@ fun PreferencesPage(
+     Box(
+         modifier = modifier.background(MaterialTheme.colorScheme.background),
+     ) {
++        // Orca+: the main settings screen is reorganised into topics (OrcaSettings.kt)
++        if (preferenceScreenOption == PreferenceScreenOption.BASIC) {
++            OrcaSettingsPage(initialPreferences, Modifier.fillMaxSize())
++            return@Box
++        }
++        // Orca+: Cinema mode fills the left side with the title art and a big heading
++        if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++            com.wholphinplus.sources.cinema.CinemaSettingsSide(Modifier.fillMaxWidth(.6f).fillMaxHeight().align(Alignment.TopStart))
++        }
+         when (preferenceScreenOption) {
+             PreferenceScreenOption.BASIC,
+             PreferenceScreenOption.ADVANCED,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SliderPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SliderPreference.kt
+index 459ec4793..73356d8d3 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SliderPreference.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SliderPreference.kt
+@@ -38,12 +38,7 @@ fun SliderPreference(
+     additionalSummary: @Composable (ColumnScope.() -> Unit)? = null,
+ ) {
+     val focused = interactionSource.collectIsFocusedAsState().value
+-    val background =
+-        if (focused) {
+-            MaterialTheme.colorScheme.inverseSurface
+-        } else {
+-            Color.Unspecified
+-        }
++    val background = Color.Unspecified // Orca+: focus drawn by settingsFocusFrame (was a white fill that snapped on)
+     val contentColor = contentColorFor(background)
+ 
+     Column(
+@@ -52,6 +47,7 @@ fun SliderPreference(
+             modifier
+                 .defaultMinSize(minHeight = 72.dp)
+                 .fillMaxWidth()
++                .then(com.wholphinplus.sources.ui.settingsFrame(interactionSource)) // Orca+
+                 .background(background, shape = RoundedCornerShape(8.dp))
+                 .padding(PaddingValues(horizontal = 16.dp, vertical = 12.dp)),
+     ) {
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
+index daf6fa077..dd7936814 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
+@@ -42,7 +42,7 @@ fun SwitchPreference(
+     onLongClick: (() -> Unit)? = null,
+     interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
+ ) {
+-    ListItem(
++    com.wholphinplus.sources.ui.SettingsRow( // Orca+: one row style for every setting
+         selected = false,
+         onClick = onClick,
+         onLongClick = onLongClick,
+@@ -50,7 +50,7 @@ fun SwitchPreference(
+             PreferenceTitle(title)
+         },
+         supportingContent = {
+-            PreferenceSummary(summary)
++            PreferenceSummary(com.wholphinplus.sources.ui.usefulSummary(summary)) // Orca+: the switch already says on/off
+         },
+         trailingContent = {
+             Switch(
+@@ -67,6 +67,14 @@ fun SwitchPreference(
+ @Composable
+ fun SwitchColors(): SwitchColors {
+     val theme = LocalTheme.current
++    // Orca+: Cinema mode's switch keeps a red track so it shows on a white focused row too
++    if (com.wholphinplus.sources.cinema.cinemaModeOn()) {
++        return SwitchDefaults.colors(
++            checkedThumbColor = androidx.compose.ui.graphics.Color.White,
++            checkedTrackColor = com.wholphinplus.sources.cinema.CinemaColors.toggle,
++            checkedBorderColor = com.wholphinplus.sources.cinema.CinemaColors.toggle,
++        )
++    }
+     return when (theme) {
+         AppThemeColors.UNRECOGNIZED,
+         AppThemeColors.PURPLE,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt
+index a96ab8fe2..db4ae70c6 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt
+@@ -95,6 +95,7 @@ fun SubtitleStylePage(
+                     .fillMaxSize()
+                     .weight(1f),
+         ) {
++            com.wholphinplus.sources.cinema.SubtitlePreviewBackdrop { // Orca+: the last title's art
+             Image(
+                 painter = painterResource(R.mipmap.eclipse),
+                 contentDescription = null,
+@@ -103,6 +104,7 @@ fun SubtitleStylePage(
+                     Modifier
+                         .fillMaxSize(),
+             )
++            } // Orca+
+             if (!focusedOnMargin && !focusedOnImageOpacity) {
+                 Column(
+                     verticalArrangement = Arrangement.SpaceBetween,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
+new file mode 100644
+index 000000000..3e72fc093
+--- /dev/null
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
+@@ -0,0 +1,278 @@
++package com.github.damontecres.wholphin.ui.setup
++
++import android.Manifest
++import android.os.Build
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import kotlinx.coroutines.launch
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalContext
++import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
++import com.github.damontecres.wholphin.data.model.JellyfinServer
++import com.github.damontecres.wholphin.services.SetupDestination
++import com.github.damontecres.wholphin.util.LoadingState
++import com.wholphinplus.sources.SourceHook
++import com.wholphinplus.sources.ui.SourcesEntryPoint
++import com.wholphinplus.sources.welcome.FoundServer
++import com.wholphinplus.sources.welcome.Onboarding
++import com.wholphinplus.sources.welcome.SavedServer
++import com.wholphinplus.sources.welcome.WelcomeFinish
++import com.wholphinplus.sources.welcome.WelcomeServerChoice
++import com.wholphinplus.sources.welcome.WelcomeServerFlow
++import com.wholphinplus.sources.welcome.WelcomeSignIn
++import com.wholphinplus.sources.welcome.WelcomeUser
++import dagger.hilt.android.EntryPointAccessors
++import org.jellyfin.sdk.api.client.extensions.quickConnectApi
++import org.jellyfin.sdk.api.client.extensions.userApi
++import org.jellyfin.sdk.model.serializer.toUUIDOrNull
++
++/*
++ * Orca+: the first-run welcome. The screens live in the addon (welcome/); this file connects them
++ * to Wholphin's own server and sign-in logic, so adding a server and signing in work exactly as
++ * in Wholphin. The first run gets the whole welcome; signing in again later (the sign-in ran out,
++ * or "Change server") gets the same look: saved servers, then the sign-in.
++ */
++
++@Composable
++private fun orcaHook(): SourceHook {
++    val context = LocalContext.current
++    return remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java).sourceHook() }
++}
++
++/** In place of Wholphin's server list: the welcome on a true first run, else Wholphin's list. */
++@Composable
++fun OrcaServerList(modifier: Modifier = Modifier) {
++    val hook = orcaHook()
++    val stage by hook.store.onboarding.collectAsState()
++    val viewModel: SwitchServerViewModel = hiltViewModel()
++    val state by viewModel.state.collectAsState()
++    LaunchedEffect(Unit) { viewModel.init() }
++
++    val firstRun = stage == Onboarding.STARTED || (stage == Onboarding.NEW && state.loading is LoadingState.Success && state.servers.isEmpty())
++    // Signing in again: "Add a server" opens the welcome's server step
++    var adding by rememberSaveable { mutableStateOf(false) }
++    when {
++        firstRun || adding -> {
++            LaunchedEffect(Unit) { if (hook.store.onboarding.value == Onboarding.NEW) hook.store.setOnboarding(Onboarding.STARTED) }
++            val permission =
++                rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
++                    if (granted) viewModel.discoverServers()
++                }
++            LaunchedEffect(Unit) {
++                viewModel.clearAddServerState()
++                if (viewModel.hasPermission) {
++                    viewModel.discoverServers()
++                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
++                    permission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
++                }
++            }
++            val found = state.discoveredServers.map { FoundServer(it.id.toString(), it.name.orEmpty(), it.url) }
++            // Set up from a phone: its server is added as if typed here; a server that can't be
++            // reached goes back to the phone to fix
++            val phone by com.wholphinplus.sources.welcome.PhoneSetup.details.collectAsState()
++            LaunchedEffect(phone?.attempt) {
++                val d = phone ?: return@LaunchedEffect
++                if (com.wholphinplus.sources.welcome.PhoneSetup.claimServer(d.attempt)) {
++                    viewModel.clearAddServerState()
++                    viewModel.addServer(d.server, false)
++                }
++            }
++            LaunchedEffect(state.addServerState) {
++                val e = state.addServerState as? LoadingState.Error ?: return@LaunchedEffect
++                if (com.wholphinplus.sources.welcome.PhoneSetup.phase.value == com.wholphinplus.sources.welcome.PhoneSetup.Phase.CONNECTING) {
++                    com.wholphinplus.sources.welcome.PhoneSetup.fail("Couldn't reach ${phone?.server}${e.localizedMessage?.let { ": $it" }.orEmpty()}")
++                }
++            }
++            WelcomeServerFlow(
++                found = found,
++                connecting = state.addServerState is LoadingState.Loading,
++                error = (state.addServerState as? LoadingState.Error)?.localizedMessage,
++                onPick = { picked -> state.discoveredServers.firstOrNull { it.id.toString() == picked.key }?.let(viewModel::switchServer) },
++                onAddress = { viewModel.addServer(it, false) },
++                onSearchAgain = { viewModel.discoverServers() },
++                modifier = modifier,
++                // Signing in again: straight to the server step; Back returns to the server list
++                startAtServer = adding,
++                onBack = { adding = false },
++                onCloudSignIn = { login -> orcaCloudSignIn(viewModel, login) },
++            )
++        }
++        // Still finding out whether servers are saved: a dark stage, not a flash of the old list
++        stage == Onboarding.NEW && state.loading !is LoadingState.Success && state.loading !is LoadingState.Error ->
++            Box(modifier.fillMaxSize().background(Color(0xFF0B0B0B)))
++        else ->
++            WelcomeServerChoice(
++                servers =
++                    state.servers.map {
++                        SavedServer(
++                            key = it.server.id.toString(),
++                            name = it.server.name.orEmpty(),
++                            address = it.server.url,
++                            reachable =
++                                when (it.status) {
++                                    is ServerConnectionStatus.Success -> true
++                                    is ServerConnectionStatus.Error -> false
++                                    else -> null
++                                },
++                        )
++                    },
++                onPick = { picked ->
++                    state.servers.firstOrNull { it.server.id.toString() == picked.key }?.let {
++                        if (it.status is ServerConnectionStatus.Success) viewModel.switchServer(it.server) else viewModel.testServer(it.server)
++                    }
++                },
++                onAdd = { adding = true },
++                modifier = modifier,
++            )
++    }
++}
++
++/**
++ * Orca+ name sign-in: Wholphin signs in with the main server sign-in the cloud profile holds.
++ * The TV gets a token of its own by approving its own Quick Connect request with the saved one
++ * (the saved one stays the other TV's); a server without Quick Connect uses the saved token.
++ * Throws with words for the screen.
++ */
++private suspend fun orcaCloudSignIn(
++    viewModel: SwitchServerViewModel,
++    login: com.wholphinplus.sources.sync.MainLogin,
++) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
++    val serverId = login.serverId.toUUIDOrNull() ?: error("Your setup's server sign-in is damaged. Sign in with your server instead.")
++    val userId = login.userId.toUUIDOrNull() ?: error("Your setup's server sign-in is damaged. Sign in with your server instead.")
++    val saved = viewModel.jellyfin.createApi(baseUrl = login.url, accessToken = login.token)
++    val me =
++        try {
++            saved.userApi.getCurrentUser().content
++        } catch (e: org.jellyfin.sdk.api.client.exception.InvalidStatusException) {
++            if (e.status == 401 || e.status == 403) error("Your saved server sign-in has run out. Sign in with your server instead; Orca+ then saves a fresh one.")
++            throw e
++        } catch (e: org.jellyfin.sdk.api.client.exception.ApiClientException) {
++            error("Couldn't reach your server at ${login.url}. Check this TV's internet, or sign in with your server instead.")
++        }
++    val own =
++        try {
++            val api = viewModel.jellyfin.createApi(baseUrl = login.url)
++            val qc = api.quickConnectApi.initiateQuickConnect().content
++            saved.quickConnectApi.authorizeQuickConnect(code = qc.code, userId = userId)
++            api.userApi.authenticateWithQuickConnect(org.jellyfin.sdk.model.api.QuickConnectDto(secret = qc.secret)).content
++        } catch (e: kotlinx.coroutines.CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            timber.log.Timber.i(e, "Orca+ name sign-in: no Quick Connect, using the saved sign-in")
++            null
++        }
++    val current =
++        if (own != null) {
++            viewModel.serverRepository.changeUser(login.url, own, null)
++        } else {
++            viewModel.serverRepository.changeUser(
++                JellyfinServer(serverId, null, login.url, null),
++                com.github.damontecres.wholphin.data.model.JellyfinUser(id = userId, name = me.name ?: login.userName, serverId = serverId, accessToken = login.token),
++            )
++        }
++    viewModel.navigationManager.navigateTo(SetupDestination.AppContent(current))
++}
++
++/** In place of Wholphin's user list: the welcome's sign-in during the first run. */
++@Composable
++fun OrcaUserList(
++    server: JellyfinServer,
++    modifier: Modifier = Modifier,
++) {
++    val hook = orcaHook()
++    val stage by hook.store.onboarding.collectAsState()
++    val viewModel = hiltViewModel<SwitchUserViewModel, SwitchUserViewModel.Factory>(creationCallback = { it.create(server) })
++    val state by viewModel.state.collectAsState()
++    // Users with a Wholphin PIN on this TV keep Wholphin's own screen (it asks for the PIN)
++    if (stage != Onboarding.STARTED && state.users.any { it.known && it.user.pin != null }) {
++        SwitchUserContent(server = server, modifier)
++        return
++    }
++    val scope = rememberCoroutineScope()
++    var submitted by remember { mutableStateOf(false) }
++    var switchError by remember { mutableStateOf<String?>(null) }
++    LaunchedEffect(Unit) { viewModel.init() }
++    val error = switchError ?: (state.switchUserState as? LoadingState.Error)?.localizedMessage
++    LaunchedEffect(error) { if (error != null) submitted = false }
++    // Set up from a phone: its username and password, or (another server sent) back to the servers
++    val phoneSetup = com.wholphinplus.sources.welcome.PhoneSetup
++    val phone by phoneSetup.details.collectAsState()
++    LaunchedEffect(phone?.attempt) {
++        val d = phone ?: return@LaunchedEffect
++        if (!phoneSetup.sameServer(d.server, server.url)) {
++            viewModel.setupNavigationManager.navigateTo(SetupDestination.ServerList)
++            return@LaunchedEffect
++        }
++        if (phoneSetup.claimLogin(d.attempt)) {
++            switchError = null
++            submitted = true
++            viewModel.clearSwitchUserState()
++            viewModel.login(server, null, d.username, d.password)
++        }
++    }
++    LaunchedEffect(error) {
++        if (error != null && phoneSetup.phase.value == com.wholphinplus.sources.welcome.PhoneSetup.Phase.SIGNING_IN) phoneSetup.fail(phoneSetup.loginProblem(error))
++    }
++    WelcomeSignIn(
++        eyebrow = if (stage == Onboarding.STARTED) "SIGN IN  ·  2 OF 2" else "SIGN IN",
++        // Someone already signed in on this TV switches straight in; if that sign-in has run
++        // out, the password box is waiting
++        onPickUser = { name ->
++            switchError = null
++            state.users.firstOrNull { it.known && it.user.name == name && it.user.accessToken != null }?.let { u ->
++                scope.launch {
++                    val r = viewModel.trySwitchUser(u.user).await()
++                    if (r is SwitchUserResult.Error) switchError = r.errorMessage
++                }
++            }
++        },
++        serverName = server.name.orEmpty(),
++        quickEnabled = state.quickConnectEnabled,
++        quickCode = state.quickConnectStatus?.code,
++        users = state.users.map { WelcomeUser(it.user.name.orEmpty(), it.imageUrl) }.filter { it.name.isNotBlank() },
++        busy = submitted,
++        error = error,
++        onQuickConnect = { viewModel.initiateQuickConnect(server, null) },
++        onPassword = { user, password ->
++            switchError = null
++            submitted = true
++            viewModel.clearSwitchUserState()
++            viewModel.login(server, null, user, password)
++        },
++        onBack = {
++            viewModel.cancelQuickConnect()
++            viewModel.setupNavigationManager.navigateTo(SetupDestination.ServerList)
++        },
++        modifier = modifier,
++    )
++}
++
++/**
++ * True while the welcome's last steps (other libraries, the look) own the screen after sign-in.
++ * MainContent shows [OrcaWelcomeFinish] instead of the app until then.
++ */
++@Composable
++fun orcaWelcomeOwnsScreen(): Boolean {
++    val hook = orcaHook()
++    val stage by hook.store.onboarding.collectAsState()
++    LaunchedEffect(stage) { if (stage == Onboarding.STARTED) hook.store.setOnboarding(Onboarding.FINISHING) }
++    return stage == Onboarding.STARTED || stage == Onboarding.FINISHING
++}
++
++@Composable
++fun OrcaWelcomeFinish(modifier: Modifier = Modifier) {
++    WelcomeFinish(onDone = {}, modifier = modifier.fillMaxSize())
++}
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
+index 8ae95b256..e3f5f6c86 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
+@@ -37,19 +37,22 @@ fun WholphinTheme(
+     content: @Composable () -> Unit,
+ ) {
+     val themeColors = getThemeColors(appThemeColors)
++    // Orca+: Cinema mode's black-and-white look replaces the app theme while it's on
++    val cinema = com.wholphinplus.sources.cinema.cinemaModeOn()
+ 
+     val colorScheme =
+         when {
+             darkTheme -> themeColors.darkScheme
+             else -> themeColors.lightScheme
+         }
+-    CompositionLocalProvider(LocalTheme provides appThemeColors) {
++    // Orca+: one look; a theme picked before it (OLED black…) no longer tints the player
++    CompositionLocalProvider(LocalTheme provides if (cinema) AppThemeColors.PURPLE else appThemeColors) {
+         androidx.compose.material3.MaterialTheme(
+-            colorScheme = if (darkTheme) themeColors.darkSchemeMaterial else themeColors.lightSchemeMaterial,
++            colorScheme = if (cinema) com.wholphinplus.sources.cinema.CinemaColors.material else if (darkTheme) themeColors.darkSchemeMaterial else themeColors.lightSchemeMaterial,
+             typography = androidx.compose.material3.Typography(),
+         ) {
+             MaterialTheme(
+-                colorScheme = colorScheme,
++                colorScheme = if (cinema) com.wholphinplus.sources.cinema.CinemaColors.tv else colorScheme,
+                 typography = AppTypography,
+                 content = content,
+             )
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/util/DebugLogTree.kt b/app/src/main/java/com/github/damontecres/wholphin/util/DebugLogTree.kt
+index b7f2e2c61..de08ca727 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/util/DebugLogTree.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/util/DebugLogTree.kt
+@@ -20,7 +20,7 @@ class DebugLogTree private constructor() : Timber.Tree() {
+         message: String,
+         t: Throwable?,
+     ) {
+-        Log.println(priority, tag ?: "Wholphin", message)
++        Log.println(priority, tag ?: "Wholphin", com.wholphinplus.sources.LogScrub.text(message)) // Orca+: no tokens in logs (Send app logs uploads them)
+     }
+ 
+     var enabled: Boolean
+diff --git a/app/src/main/res/values/orca_settings_strings.xml b/app/src/main/res/values/orca_settings_strings.xml
+new file mode 100644
+index 000000000..5cf3a6dc3
+--- /dev/null
++++ b/app/src/main/res/values/orca_settings_strings.xml
+@@ -0,0 +1,36 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Orca+: topics and headings for the reorganised settings (OrcaSettings.kt). Kept in their own
++     file so Wholphin's strings.xml stays untouched. -->
++<resources>
++    <string name="orca_settings_playback">Playback</string>
++    <string name="orca_settings_playback_hint">Now playing card, remote and picture</string>
++    <string name="orca_settings_next_up">Next Up &amp; Skipping</string>
++    <string name="orca_settings_next_up_hint">Autoplay, intros, recaps and credits</string>
++    <string name="orca_settings_quality">Audio, Video &amp; Subtitles</string>
++    <string name="orca_settings_quality_hint">Quality, formats, subtitles and player</string>
++    <string name="orca_settings_appearance">Home &amp; Look</string>
++    <string name="orca_settings_appearance_hint">Rows, posters and lists</string>
++    <string name="orca_settings_profile">Account &amp; Cloud</string>
++    <string name="orca_settings_profile_hint">Cloud sync, sign-in, PIN and language</string>
++    <string name="orca_settings_screensaver">Screensaver</string>
++    <string name="orca_settings_screensaver_hint">What plays when you step away</string>
++    <string name="orca_settings_sources">Servers &amp; Search</string>
++    <string name="orca_settings_sources_hint">Extra servers, search and copies</string>
++    <string name="orca_settings_about">About &amp; Help</string>
++    <string name="orca_settings_about_hint">Version, updates and diagnostics</string>
++
++    <string name="orca_settings_controls">Remote &amp; controls</string>
++    <string name="orca_settings_picture">Picture</string>
++    <string name="orca_settings_streaming">Streaming quality</string>
++    <string name="orca_settings_audio_video">Audio &amp; video formats</string>
++    <string name="orca_settings_subtitles">Subtitles</string>
++    <string name="orca_settings_diagnostics">Diagnostics</string>
++    <string name="orca_settings_look">Look</string>
++    <string name="orca_settings_home_menus">Home &amp; menus</string>
++    <string name="orca_settings_extras">Extras</string>
++    <string name="orca_settings_signin">Sign-in</string>
++    <string name="orca_settings_help">Help &amp; diagnostics</string>
++    <string name="orca_settings_engine">Player engine</string>
++    <string name="orca_settings_your_profile">This profile</string>
++    <string name="orca_settings_requests">Requests</string>
++</resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index cff98addc..ef5a2466a 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1,6 +1,7 @@
+ <resources>
+-    <string name="app_name" translatable="false">Wholphin</string>
+-    <string name="app_name_long" translatable="false">Wholphin</string>
++    <!-- Orca+: app name -->
++    <string name="app_name" translatable="false">Orca+</string>
++    <string name="app_name_long" translatable="false">Orca+</string>
+ 
+     <string name="about">About</string>
+     <string name="active_recordings">Active Recordings</string>
+@@ -89,7 +90,7 @@
+     <string name="play_count">Play Count</string>
+     <string name="play_from_here">Play from here</string>
+     <string name="play">Play</string>
+-    <string name="playback_debug_info">Show playback debug info</string>
++    <string name="playback_debug_info">Playback debug info</string>
+     <string name="playback_speed">Playback Speed</string>
+     <string name="playback">Playback</string>
+     <string name="playlist">Playlist</string>
+@@ -134,7 +135,7 @@
+     <string name="select_server">Select Server</string>
+     <string name="select_user">Select User</string>
+     <string name="show_debug_info">Show debug info</string>
+-    <string name="show_next_up_when">Show next up</string>
++    <string name="show_next_up_when">Show Up Next</string>
+     <string name="show">Show</string>
+     <string name="shuffle">Shuffle</string>
+     <string name="skip">Skip</string>
+@@ -181,7 +182,7 @@
+     </plurals>
+     <string name="play_with_transcoding">Play with transcoding</string>
+     <string name="media_information">Media Information</string>
+-    <string name="show_clock">Show Clock</string>
++    <string name="show_clock">Show clock</string>
+     <string name="aired_episode_order">Aired Episode Order</string>
+     <string name="create_playlist">Create new playlist</string>
+     <string name="add_to_playlist">Add to playlist</string>
+@@ -320,20 +321,20 @@
+     <string name="pref_key_update_last_check_threshold" translatable="false">preference.update.threshold</string>
+     <string name="pref_key_update_last_check" translatable="false">preference.update.lastTimestamp</string>
+ 
+-    <string name="ac3_supported">Device supports AC3/Dolby Digital</string>
++    <string name="ac3_supported">Dolby Digital (AC3) support</string>
+     <string name="advanced_settings">Advanced Settings</string>
+     <string name="advanced_ui">Advanced UI</string>
+     <string name="app_theme">Application Theme</string>
+     <string name="auto_check_for_updates">Automatically check for updates</string>
+-    <string name="auto_play_next_delay">Delay before playing next up</string>
+-    <string name="auto_play_next">Auto play next up</string>
++    <string name="auto_play_next_delay">Countdown before the next episode</string>
++    <string name="auto_play_next">Autoplay the next episode</string>
+     <string name="check_for_updates">Check for updates</string>
+     <string name="combine_continue_next_summary">Applies to TV Series only</string>
+     <string name="combine_continue_next"><![CDATA[Combine Continue Watching & Next Up]]></string>
+     <string name="direct_play_ass">Use libass for ASS subtitles</string>
+     <string name="direct_play_pgs">Direct play PGS subtitles</string>
+     <string name="downmix_stereo">Always downmix to stereo</string>
+-    <string name="ffmpeg_extension_pref">Use FFmpeg decoder module</string>
++    <string name="ffmpeg_extension_pref">FFmpeg decoder</string>
+     <string name="global_content_scale">Default content scale</string>
+     <string name="install_update">Install update</string>
+     <string name="installed_version">Installed version</string>
+@@ -342,25 +343,25 @@
+     <string name="nav_drawer_pins">Customize Navigation Drawer Items</string>
+     <string name="nav_drawer_switch_on_focus_summary_off">Click to switch pages</string>
+     <string name="nav_drawer_switch_on_focus">Switch nav drawer pages on focus</string>
+-    <string name="pass_out_protection">Passout Protection</string>
++    <string name="pass_out_protection">Still-watching check</string>
+     <string name="play_theme_music">Play theme music</string>
+     <string name="playback_overrides">Playback overrides</string>
+     <string name="remember_selected_tab">Remember selected tabs</string>
+     <string name="rewatch_next_up">Enable rewatching in next up</string>
+     <string name="seek_bar_steps">Seek bar steps</string>
+     <string name="send_app_logs_summary">Useful for debugging</string>
+-    <string name="send_app_logs">Send app logs to current server</string>
++    <string name="send_app_logs">Send app logs to your server</string>
+     <string name="send_crash_reports_summary">Will try to send to last connected server</string>
+-    <string name="send_crash_reports">Send Crash Reports</string>
++    <string name="send_crash_reports">Send crash reports</string>
+     <string name="settings">Settings</string>
+     <string name="skip_back_on_resume_preference">Skip back when resuming playback</string>
+     <string name="skip_back_preference">Skip back</string>
+-    <string name="skip_commercials_behavior">Skip commercials behavior</string>
++    <string name="skip_commercials_behavior">Commercials</string>
+     <string name="skip_forward_preference">Skip forward</string>
+-    <string name="skip_intro_behavior">Skip intro behavior</string>
+-    <string name="skip_outro_behavior">Skip outro behavior</string>
+-    <string name="skip_previews_behavior">Skip previews behavior</string>
+-    <string name="skip_recap_behavior">Skip recap behavior</string>
++    <string name="skip_intro_behavior">Intros</string>
++    <string name="skip_outro_behavior">Credits</string>
++    <string name="skip_previews_behavior">Previews</string>
++    <string name="skip_recap_behavior">Recaps</string>
+     <string name="update_available">Update available</string>
+     <string name="update_url_summary">URL used to check for app updates</string>
+     <string name="update_url">Update URL</string>
+@@ -376,7 +377,7 @@
+     <string name="reset">Reset</string>
+     <string name="bold_font">Bold font</string>
+ 
+-    <string name="player_backend">Playback Backend</string>
++    <string name="player_backend">Player</string>
+     <string name="mpv_hardware_decoding">MPV: Use hardware decoding</string>
+     <string name="disable_if_crash">Disable if you experience crashes</string>
+     <string name="mpv_options">MPV Options</string>
+@@ -410,7 +411,7 @@
+     <string name="pin_too_short">PIN must be 4 keys or longer</string>
+     <string name="will_remove_pin">Will remove PIN</string>
+     <string name="pin_digits_hint">[0–9]</string>
+-    <string name="image_cache_size">Image disk cache size (MB)</string>
++    <string name="image_cache_size">Image cache size (MB)</string>
+     <string name="disable_audio_offload">Disable audio hardware offload</string>
+     <string name="disable_audio_offload_summary">Disabling offloading audio decoding may fix playback freezes on some devices</string>
+     <string name="view_options">View options</string>
+@@ -485,7 +486,7 @@
+     <string name="dolby_digital">DD</string>
+     <string name="dolby_digital_plus">DD+</string>
+     <string name="dts">DTS</string>
+-    <string name="force_dovi_profile_7">Direct play Dolby Vision Profile 7</string>
++    <string name="force_dovi_profile_7">Direct play Dolby Vision profile 7</string>
+     <string name="force_dovi_profile_7_summary">Ignores device compatibility checks</string>
+ 
+     <string name="discover">Discover</string>
+@@ -585,8 +586,8 @@
+     <string name="content_scale_fill">Fill</string>
+     <string name="content_scale_fill_width">Fill width</string>
+     <string name="content_scale_fill_height">Fill height</string>
+-    <string name="display_preset_default">Wholphin Default</string>
+-    <string name="display_preset_compact">Wholphin Compact</string>
++    <string name="display_preset_default">Default</string>
++    <string name="display_preset_compact">Compact</string>
+     <string name="display_preset_series_thumb">Series Thumb images</string>
+     <string name="display_preset_episode_thumbnails">Episode Thumbnail images</string>
+ 
+@@ -747,7 +748,7 @@
+     <string name="search_and_download_subtitles"><![CDATA[Search & download subtitles]]></string>
+     <string name="no_subtitles_found">No remote subtitles were found</string>
+     <string name="series_continueing">Present</string>
+-    <string name="in_app_screensaver">Use in-app screensaver</string>
++    <string name="in_app_screensaver">In-app screensaver</string>
+     <string name="delete_item">Are you sure you want to delete this item?</string>
+     <string name="show_media_management">Show media management options</string>
+     <string-array name="backdrop_style_options">
+@@ -806,7 +807,7 @@
+     <string name="select_all">Select all</string>
+     <string name="separate_types">Separate types</string>
+     <string name="prefer_logos">Prefer showing logos for titles</string>
+-    <string name="updated_toast">Wholphin updated to %s</string>
++    <string name="updated_toast">Orca+ updated to %s</string>
+     <string name="remove_continue_watching">Remove from continue watching</string>
+     <string name="remove_next_up">Remove series from next up</string>
+     <string name="view_removed_next_up">View series removed from next up</string>
+@@ -820,7 +821,8 @@
+     <string name="ass_subtitle_mode_exoplayer">Direct play with ExoPlayer built-in</string>
+     <string name="ass_subtitle_mode_transcode">Burn in/transcode on server</string>
+     <string name="ass_subtitle_playback">SSA/ASS subtitle playback</string>
+-    <string name="cinema_mode">Cinema mode</string>
++    <!-- Orca+: "Cinema mode" is Orca+'s home; this one plays the server's pre-rolls -->
++    <string name="cinema_mode">Trailers before movies</string>
+     <string name="show_more">Show %1$s more</string>
+     <string name="skip_behavior">Skip behavior</string>
+     <string name="skip_behavior_summary">For intros, credits, etc</string>
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 7fddcdcd7..91bf7d845 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -30,3 +30,14 @@ dependencyResolutionManagement {
+ rootProject.name = "Wholphin"
+ include(":app")
+ include(":wholphin-mpv-stub")
++
++// ---- Orca+ addon module. Kept out of app/build.gradle.kts, which changes every release.
++include(":wholphin-plus-sources")
++project(":wholphin-plus-sources").projectDir = file("../addon")
++gradle.beforeProject {
++    if (path == ":app") {
++        pluginManager.withPlugin("com.android.application") {
++            dependencies.add("implementation", project(":wholphin-plus-sources"))
++        }
++    }
++}

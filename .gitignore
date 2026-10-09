@@ -1,0 +1,26 @@
+# Build output and anything private must never be committed here
+upstream/
+develop-check/
+dist/
+build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+*.idsig
+*.jks
+*.keystore
+keystore*
+.keystore-pass
+release-key/
+.shield
+.tmdb-key
+.cloud-url
+cloud/.secrets
+.secrets
+*.env
+.env*
+.publish-blocklist
+.cleanroom/
+addon/src/test/resources/

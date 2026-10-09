@@ -1,0 +1,14 @@
+Orca+ (built on Wholphin)
+
+Orca+ as a whole is distributed under the GNU General Public License version 2 (LICENSE),
+the licence of Wholphin, which it is built on. Wholphin is GPL-2.0 only (no "or later"), so
+Orca+ can't be offered under a later version.
+
+It is built from:
+
+* Wholphin, https://github.com/damontecres/Wholphin, Copyright damontecres and contributors,
+  under the GNU General Public License version 2 (LICENSES/GPL-2.0-Wholphin.txt).
+  hooks.patch modifies Wholphin source files; changes are marked "Orca+".
+* The Orca+ addon (addon/), under the GNU General Public License version 2.
+
+Not affiliated with or endorsed by the Wholphin project.

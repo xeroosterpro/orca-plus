@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Orca+: the extra servers' tokens, the keys and the cloud sync seed are sealed with a key
+     that lives only in this TV's Keystore. Restored on another device they can't be opened, and
+     the next save would have written them back empty. Left out of backups. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="wholphinplus_sources.xml" />
+    <exclude domain="sharedpref" path="wholphinplus_cloud.xml" />
+</full-backup-content>

@@ -30,7 +30,7 @@ index 582e000a2..4b93d14e5 100644
          android:supportsRtl="true"
          android:theme="@style/Theme.Wholphin"
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
-index 62f0e39b4..74c96f876 100644
+index 62f0e39b4..312b25e39 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 @@ -31,6 +31,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -41,7 +41,22 @@ index 62f0e39b4..74c96f876 100644
  import com.github.damontecres.wholphin.preferences.AppPreferences
  import com.github.damontecres.wholphin.preferences.PlayerBackend
  import com.github.damontecres.wholphin.services.AppUpgradeHandler
-@@ -429,9 +430,31 @@ class MainActivityViewModel
+@@ -195,6 +196,14 @@ class MainActivity : AppCompatActivity() {
+         } else {
+             navigationManager.backStack = NavBackStack(Destination.Home())
+         }
++        com.wholphinplus.sources.Inbox.openUpdate = { navigationManager.navigateTo(Destination.UpdateApp) } // Orca+: the Message Center's Update now
++        if (UpdateChecker.ACTIVE) { // Orca+: the Message Center's Check for updates
++            com.wholphinplus.sources.Inbox.checkUpdate = { // Orca+
++                val installed = updateChecker.getInstalledVersion() // Orca+
++                val latest = updateChecker.getLatestRelease(userPreferencesDataStore.data.first().updateUrl) ?: error("GitHub didn't answer") // Orca+
++                if (latest.version.isGreaterThan(installed)) com.wholphinplus.sources.Inbox.update(installed.toString(), latest.version.toString()) else com.wholphinplus.sources.Inbox.upToDate(installed.toString()) // Orca+
++            } // Orca+
++        } // Orca+
+ 
+         viewModel.serverRepository.currentUserFlow
+             .onEach { user ->
+@@ -429,9 +438,37 @@ class MainActivityViewModel
          private val backdropService: BackdropService,
          private val appUpgradeHandler: AppUpgradeHandler,
          private val intentService: IntentService,
@@ -56,7 +71,12 @@ index 62f0e39b4..74c96f876 100644
 +                switchUser = { viewModelScope.launch { serverRepository.current.value?.server?.let { s -> serverRepository.switchServerOrUser(); serverRepository.closeSession(); setupNavigationManager.navigateTo(SetupDestination.UserList(s)) } } }, // Orca+
 +                signOut = { viewModelScope.launch { serverRepository.current.value?.user?.let { u -> serverRepository.removeUser(u) }; setupNavigationManager.navigateTo(SetupDestination.ServerList) } }, // Orca+
 +            ) // Orca+
-+            viewModelScope.launch { serverRepository.current.collect { cur -> cur?.user?.let { u -> com.wholphinplus.sources.EmbyBridge.remember(u.accessToken, u.id.toString()) } } } // Orca+: an Emby main server's "who am I"
++            viewModelScope.launch { serverRepository.current.collect { cur -> cur?.user?.let { u -> com.wholphinplus.sources.EmbyBridge.remember(u.accessToken, u.id.toString()) }; if (cur != null) sourceHook.profileSync.accountChanged(sourceHook) } } // Orca+: an Emby main server's "who am I"; each account keeps its own setup
++            com.wholphinplus.sources.AccountActions.attachAccounts( // Orca+: Settings → Account → Switch account
++                accounts = { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { val cur = serverRepository.current.value; serverRepository.serverDao.getServers().flatMap { su -> su.users.filter { !it.accessToken.isNullOrBlank() }.map { u -> com.wholphinplus.sources.AccountActions.Account("${su.server.id}|${u.id}", su.server.name.orEmpty(), su.server.url, u.name.orEmpty(), cur?.server?.id == su.server.id && cur?.user?.id == u.id, u.pin != null) } } } }, // Orca+
++                switchTo = { key, pin -> val su = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { serverRepository.serverDao.getServer(java.util.UUID.fromString(key.substringBefore('|'))) } ?: error("That account isn't on this TV any more"); val u = su.users.firstOrNull { it.id.toString() == key.substringAfter('|') } ?: error("That account isn't on this TV any more"); if (u.pin != null && u.pin != pin) { serverRepository.switchServerOrUser(); serverRepository.closeSession(); setupNavigationManager.navigateTo(SetupDestination.UserList(su.server)); return@attachAccounts }; val cur = serverRepository.changeUser(su.server, u); setupNavigationManager.navigateTo(SetupDestination.AppContent(cur)) }, // Orca+: a PIN-locked user: Wholphin's own screen asks it
++                addAccount = { viewModelScope.launch { serverRepository.switchServerOrUser(); serverRepository.closeSession(); setupNavigationManager.navigateTo(SetupDestination.ServerList) } }, // Orca+
++            ) // Orca+
 +            viewModelScope.launch { // Orca+: Direct play Dolby Vision profile 7 on once for installs from before it was the default
 +                if (com.wholphinplus.sources.OrcaDefaults.firstTime(context, "dv_profile7_on")) preferences.updateData { it.updatePlaybackOverrides { directPlayDolbyVisionEL = true } } // Orca+
 +            } // Orca+
@@ -65,7 +85,8 @@ index 62f0e39b4..74c96f876 100644
 +                    override suspend fun read() = (preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()).toByteArray()
 +
 +                    override suspend fun write(bytes: ByteArray) {
-+                        preferences.updateData { AppPreferences.parseFrom(bytes) }
++                        // Orca+: settings never change who is signed in (an account's kept setup carries the ids of the moment it was kept)
++                        preferences.updateData { cur -> AppPreferences.parseFrom(bytes).toBuilder().apply { currentServerId = cur.currentServerId; currentUserId = cur.currentUserId }.build() }
 +                    }
 +                }
 +        }
@@ -73,15 +94,19 @@ index 62f0e39b4..74c96f876 100644
          fun appStart(intent: Intent?) {
              viewModelScope.launchDefault {
                  mutex.withLock {
-@@ -489,6 +512,7 @@ class MainActivityViewModel
+@@ -489,16 +526,33 @@ class MainActivityViewModel
                      try {
                          val needUpgrade = appUpgradeHandler.needUpgrade()
                          if (needUpgrade) {
+-                            showToast(
+-                                context,
+-                                context.getString(
+-                                    R.string.updated_toast,
+-                                    appUpgradeHandler.currentVersion.toString(),
+-                                ),
+-                            )
 +                            if (com.wholphinplus.sources.welcome.Onboarding.announceUpdate(context)) // Orca+: not on a first install
-                             showToast(
-                                 context,
-                                 context.getString(
-@@ -499,6 +523,28 @@ class MainActivityViewModel
++                            com.wholphinplus.sources.Inbox.updated(appUpgradeHandler.currentVersion.toString()) // Orca+: in the Message Center and the welcome, not a toast
                              appUpgradeHandler.run()
                          }
                          appUpgradeHandler.copySubfont(false)
@@ -110,7 +135,7 @@ index 62f0e39b4..74c96f876 100644
                          val prefs =
                              preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()
                          val profileProtected =
-@@ -507,10 +553,12 @@ class MainActivityViewModel
+@@ -507,10 +561,12 @@ class MainActivityViewModel
                                  ?.isProtected == true
                          if (prefs.signInAutomatically && !profileProtected) {
                              val current =
@@ -127,7 +152,7 @@ index 62f0e39b4..74c96f876 100644
                              if (current != null) {
                                  if (current.user.isProtected) {
                                      setupNavigationManager.navigateTo(
-@@ -567,7 +615,8 @@ class MainActivityViewModel
+@@ -567,7 +623,8 @@ class MainActivityViewModel
                  mutex.withLock {
                      try {
                          Timber.v("Updating userDto")
@@ -418,7 +443,7 @@ index 708eb8b5b..955ac6aa5 100644
                  }
              }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
-index 8c2d84cbc..b62e37bd0 100644
+index 8c2d84cbc..9312c087e 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
 @@ -64,7 +64,7 @@ class UpdateChecker
@@ -430,7 +455,20 @@ index 8c2d84cbc..b62e37bd0 100644
          }
  
          /**
-@@ -201,6 +201,7 @@ class UpdateChecker
+@@ -93,10 +93,11 @@ class UpdateChecker
+             val latestRelease = getLatestRelease(updateUrl)
+             if (latestRelease != null && latestRelease.version.isGreaterThan(installedVersion)) {
+                 Timber.v("Update available $installedVersion => ${latestRelease.version}")
++                com.wholphinplus.sources.Inbox.update(installedVersion.toString(), latestRelease.version.toString()) // Orca+: the Message Center (once per version, with Update now)
+                 pref.edit {
+                     putLong(context.getString(R.string.pref_key_update_last_check), now.time)
+                 }
+-                if (lastUpdateCheckThreshold >= timeSince) {
++                if (true || lastUpdateCheckThreshold >= timeSince) { // Orca+: the Message Center pops it up instead of this toast
+                     Timber.i(
+                         "Skipping update notification, threshold is $lastUpdateCheckThreshold",
+                     )
+@@ -201,6 +202,7 @@ class UpdateChecker
          ) {
              withContext(WholphinDispatchers.IO) {
                  cleanup()
@@ -438,7 +476,7 @@ index 8c2d84cbc..b62e37bd0 100644
                  val request =
                      Request
                          .Builder()
-@@ -213,6 +214,9 @@ class UpdateChecker
+@@ -213,6 +215,9 @@ class UpdateChecker
                          withContext(WholphinDispatchers.Main) {
                              callback.contentLength(it.body.contentLength())
                          }
@@ -448,7 +486,7 @@ index 8c2d84cbc..b62e37bd0 100644
                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                              val contentValues =
                                  ContentValues().apply {
-@@ -230,7 +234,7 @@ class UpdateChecker
+@@ -230,7 +235,7 @@ class UpdateChecker
                                      contentValues,
                                  )
                              if (uri != null) {
@@ -457,7 +495,7 @@ index 8c2d84cbc..b62e37bd0 100644
                                      resolver.openOutputStream(uri).use { output ->
                                          copyTo(input, output!!, callback = callback)
                                      }
-@@ -243,7 +247,7 @@ class UpdateChecker
+@@ -243,7 +248,7 @@ class UpdateChecker
                              } else {
                                  Timber.e("Resolver URI is null, trying fallback")
  //                                showToast(context, "Unable to download the apk")
@@ -466,7 +504,7 @@ index 8c2d84cbc..b62e37bd0 100644
                                  val intent = Intent(Intent.ACTION_INSTALL_PACKAGE)
                                  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
                                  intent.data =
-@@ -255,7 +259,7 @@ class UpdateChecker
+@@ -255,7 +260,7 @@ class UpdateChecker
                                  context.startActivity(intent)
                              }
                          } else {
@@ -475,7 +513,7 @@ index 8c2d84cbc..b62e37bd0 100644
                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                                  val intent = Intent(Intent.ACTION_INSTALL_PACKAGE)
                                  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-@@ -282,7 +286,7 @@ class UpdateChecker
+@@ -282,7 +287,7 @@ class UpdateChecker
          }
  
          private suspend fun fallbackDownload(
@@ -484,7 +522,7 @@ index 8c2d84cbc..b62e37bd0 100644
              callback: DownloadCallback,
          ): File {
              val downloadDir =
-@@ -290,7 +294,7 @@ class UpdateChecker
+@@ -290,7 +295,7 @@ class UpdateChecker
              downloadDir.mkdirs()
              val targetFile = File(downloadDir, APK_NAME)
              targetFile.outputStream().use { output ->
@@ -1144,10 +1182,10 @@ index 4a7338e2c..6b629e6d2 100644
  fun PreferenceTitle(
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
 new file mode 100644
-index 000000000..4f2fd2359
+index 000000000..7d56caa95
 --- /dev/null
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,387 @@
 +package com.github.damontecres.wholphin.ui.preferences
 +
 +import androidx.activity.compose.BackHandler
@@ -1392,8 +1430,9 @@ index 000000000..4f2fd2359
 +    initialPreferences: AppPreferences,
 +    modifier: Modifier = Modifier,
 +) {
-+    var section by rememberSaveable { mutableStateOf(OrcaSection.ACCOUNT) }
-+    var focused by remember { mutableStateOf(OrcaSection.ACCOUNT) }
++    val orcaStart = remember { com.wholphinplus.sources.Inbox.takeSettingsSection()?.let { n -> OrcaSection.entries.firstOrNull { it.name == n } } } // Orca+: a Message Center button opens its topic
++    var section by rememberSaveable { mutableStateOf(orcaStart ?: OrcaSection.ACCOUNT) }
++    var focused by remember { mutableStateOf(orcaStart ?: OrcaSection.ACCOUNT) }
 +    var inPane by remember { mutableStateOf(false) }
 +    val railFocus = remember { OrcaSection.entries.associateWith { FocusRequester() } }
 +    // Entering a topic (Right or OK from the list) lands on its first setting, not on whichever

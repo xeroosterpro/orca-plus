@@ -3,6 +3,7 @@ package com.wholphinplus.sources
 import android.annotation.SuppressLint
 import android.content.Context
 import android.provider.Settings
+import com.wholphinplus.sources.cinema.plainName
 import com.wholphinplus.sources.core.ExternalSource
 import com.wholphinplus.sources.core.Labels
 import com.wholphinplus.sources.core.PlayRequest
@@ -309,10 +310,7 @@ class SourceHook
 
         /** How each extra server answered its last lookup (no requests of its own). */
         val health =
-            ServerHealth(context).also { h ->
-                val main = android.os.Handler(android.os.Looper.getMainLooper())
-                h.notify = { text -> main.post { android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_LONG).show() } }
-            }
+            ServerHealth(context)
 
         fun clearCache() = cache.clear()
 
@@ -462,9 +460,9 @@ class PickSession internal constructor(
         val connection = source?.let { hook.connectionFor(it.connectionId) }
         reporter =
             if (source != null && connection != null) {
-                PlaybackReporter(hook.client, connection, source, player, hook.overlay, main)
+                PlaybackReporter(hook.client, connection, source, player, hook.overlay, main, from = connection.plainName)
             } else {
-                PlaybackReporter(null, null, null, player, hook.overlay, main)
+                PlaybackReporter(null, null, null, player, hook.overlay, main, from = ServerBrands.mainName())
             }.also { it.start() }
     }
 
@@ -611,7 +609,16 @@ class PickSession internal constructor(
         lastBase = item
         if (!eligible) return Pick.Jellyfin
         // Every play of a main-server item is kept in the overlay (see track)
-        mainItems[item.id] = MainItem(item.id.toString(), item.seriesId?.toString(), item.seriesName ?: item.name.orEmpty())
+        val episode =
+            if (item.type == org.jellyfin.sdk.model.api.BaseItemKind.EPISODE) {
+                listOfNotNull(
+                    if (item.parentIndexNumber != null && item.indexNumber != null) "S${item.parentIndexNumber}:E${item.indexNumber}" else null,
+                    item.name?.takeIf { it.isNotBlank() },
+                ).joinToString(" · ").ifBlank { null }
+            } else {
+                null
+            }
+        mainItems[item.id] = MainItem(item.id.toString(), item.seriesId?.toString(), item.seriesName ?: item.name.orEmpty(), episode)
         // The trouble screen's replay: the copy it was told to play, no questions
         forced.remove(item.id)?.let { copy ->
             asked = true
@@ -635,7 +642,7 @@ class PickSession internal constructor(
         val result = if (asked) followSticky(connections, request) else ask(item, connections, request)
         if (result is Pick.External) {
             chosen[item.id] = result.source
-            mainItems[item.id] = MainItem(item.id.toString(), item.seriesId?.toString(), request.title)
+            mainItems[item.id] = MainItem(item.id.toString(), item.seriesId?.toString(), request.title, episode)
         }
         return result
     }
@@ -950,6 +957,8 @@ internal data class MainItem(
     val id: String,
     val seriesId: String?,
     val title: String,
+    /** "S4:E6 · Name" for an episode (the Message Center's "where you left off"). */
+    val episode: String? = null,
 )
 
 /** A home row added by Orca+ (a Trakt/MDBList collection). */

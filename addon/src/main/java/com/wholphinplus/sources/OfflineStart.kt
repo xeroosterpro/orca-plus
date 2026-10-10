@@ -48,6 +48,7 @@ object OfflineStart {
             val ex = first.exceptionOrNull() ?: return first.getOrNull()
             if (!isNetwork(ex)) throw ex
             Timber.w(ex, "Server unreachable at start: opening the saved session")
+            lost()
             return offline()?.also { checkLater(recheck, onRefused) } ?: throw ex
         }
         Timber.w("Server slow to answer at start: opening the saved session, checking in the background")
@@ -57,6 +58,17 @@ object OfflineStart {
             if (!settled(ex, onRefused)) checkLater(recheck, onRefused)
         }
         return saved
+    }
+
+    /** For the Message Center: the main server didn't answer at start, and when it came back. */
+    private fun lost() =
+        runCatching {
+            Inbox.post(Inbox.Kind.SERVERS, "${ServerBrands.mainName()} didn't answer", "Orca+ opened your saved Home and keeps trying; rows fill in once it's back.", Inbox.Level.WARN, key = "main-server")
+        }
+
+    private fun back() {
+        Timber.i("Server reached: session checked")
+        runCatching { Inbox.post(Inbox.Kind.SERVERS, "${ServerBrands.mainName()} is back", "Connected again.", Inbox.Level.GOOD, key = "main-server", popUp = false, unread = false) }
     }
 
     /** First wait of [checkLater] (tests shorten it). */
@@ -71,7 +83,7 @@ object OfflineStart {
             var wait = retryStartMs
             repeat(60) {
                 delay(wait)
-                val ex = runCatching { online() }.exceptionOrNull() ?: return@launch Timber.i("Server reached: session checked")
+                val ex = runCatching { online() }.exceptionOrNull() ?: return@launch back()
                 if (settled(ex, onRefused)) return@launch
                 wait = (wait * 2).coerceAtMost(60_000L)
             }
@@ -93,6 +105,7 @@ object OfflineStart {
             return false
         }
         Timber.w("Session check: the server refused the saved sign-in, asking to sign in again")
+        runCatching { Inbox.post(Inbox.Kind.SERVERS, "${ServerBrands.mainName()} asked you to sign in again", "Its saved sign-in ran out or was removed on the server.", Inbox.Level.WARN, key = "main-server") }
         runCatching { onRefused(ex) }.onFailure { Timber.w(it, "Could not open the sign-in") }
         return true
     }

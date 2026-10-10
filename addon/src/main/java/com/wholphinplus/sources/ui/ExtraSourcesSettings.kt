@@ -462,6 +462,7 @@ private fun AccountCard(
     val scope = rememberCoroutineScope()
     var message by remember { mutableStateOf<String?>(null) }
     var confirmOut by remember { mutableStateOf(false) }
+    var switching by remember { mutableStateOf(false) }
     val cloud = com.wholphinplus.sources.sync.ProfileSync.AVAILABLE
     val name = sync.name
     SettingsHeader("Your account")
@@ -526,7 +527,11 @@ private fun AccountCard(
         } else if (cloud) {
             Button(onClick = openCloud, modifier = take()) { Text("Create an account or sign in") }
         }
-        com.wholphinplus.sources.AccountActions.switchUser?.let { sw -> Button(onClick = sw, modifier = take()) { Text("Switch user") } }
+        if (com.wholphinplus.sources.AccountActions.accounts != null) {
+            Button(onClick = { switching = !switching }, modifier = take()) { Text(if (switching) "Close accounts" else "Switch account") }
+        } else {
+            com.wholphinplus.sources.AccountActions.switchUser?.let { sw -> Button(onClick = sw, modifier = take()) { Text("Switch user") } }
+        }
         com.wholphinplus.sources.AccountActions.signOut?.let { out ->
             Button(
                 onClick = {
@@ -545,6 +550,59 @@ private fun AccountCard(
         }
     }
     message?.let { Text(it, color = com.wholphinplus.sources.cinema.InkDim, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 16.dp)) }
+    if (switching) AccountSwitcher(onMessage = { message = it })
+}
+
+/**
+ * Every account this TV has signed in to, each a server and a user with its own main server, Orca+
+ * setup and cloud profile. OK switches at once, without signing out (a user with a Wholphin PIN is
+ * asked it on Wholphin's own screen); the setup on this TV goes with the account it belongs to
+ * ([com.wholphinplus.sources.sync.ProfileSync.accountChanged]).
+ */
+@Composable
+private fun AccountSwitcher(onMessage: (String?) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var list by remember { mutableStateOf<List<com.wholphinplus.sources.AccountActions.Account>?>(null) }
+    var busy by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { list = runCatching { com.wholphinplus.sources.AccountActions.accounts?.invoke() }.getOrNull().orEmpty() }
+    SettingsHeader("Accounts on this TV")
+    val all = list ?: return
+    all.sortedByDescending { it.current }.forEach { a ->
+        val server = a.server.ifBlank { a.url.substringAfter("://").substringBefore("/") }
+        PlusListItem(
+            onClick = {
+                if (a.current || busy != null) return@PlusListItem
+                busy = a.key
+                onMessage("Switching to ${a.user} on $server…")
+                scope.launch {
+                    runCatching { com.wholphinplus.sources.AccountActions.switchTo?.invoke(a.key, null) }
+                        .onFailure {
+                            busy = null
+                            onMessage(it.message ?: "Couldn't switch to that account")
+                        }
+                }
+            },
+            headlineContent = { Text("${a.user} on $server", style = MaterialTheme.typography.titleMedium) },
+            supportingContent = {
+                Text(
+                    when {
+                        a.current -> "Signed in now"
+                        busy == a.key -> "Switching…"
+                        a.pin -> "Asks for its PIN"
+                        else -> a.url
+                    },
+                )
+            },
+            trailingContent = { if (a.current) Text("✓") else Text("›") },
+        )
+    }
+    com.wholphinplus.sources.AccountActions.addAccount?.let { add ->
+        PlusListItem(
+            onClick = add,
+            headlineContent = { Text("+ Add an account", style = MaterialTheme.typography.titleMedium) },
+            supportingContent = { Text("Another Jellyfin, Emby or Silo server or user. This one stays here to switch back to.") },
+        )
+    }
 }
 
 /** A small pill with a state in it: green when all is well. */

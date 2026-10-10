@@ -43,7 +43,7 @@
   <tr>
     <td valign="top"><b>Tuned to your TV</b><br><sub>Orca+ reads your box (Shield, Fire TV, Google TV) and adjusts how much it loads, and which copies it plays, to match.</sub></td>
     <td valign="top"><b>Search like you talk</b><br><sub><i>"best sci-fi movies"</i>, <i>"movies like Interstellar"</i>, actors, typos: it understands, and searches every server.</sub></td>
-    <td valign="top"><b>Always current</b><br><sub>Orca+ updates itself, and picks up every improvement of the open-source Jellyfin app it's built on.</sub></td>
+    <td valign="top"><b>Always current</b><br><sub>A new version shows up in <b>Messages</b> (the bell) with an Update now button. Messages also keeps where you left off, your library, sync and server news.</sub></td>
   </tr>
 </table>
 
@@ -234,9 +234,11 @@ your home, progress and watched marks. Plex, Emby, Jellyfin and Silo servers can
 extra servers: when you press Play, Orca+ looks for the same title on them so you can pick the best
 copy. <b>My Servers</b> lets you browse their libraries too (Settings → Servers &amp; Copies turns that off).
 <br><br>
-<b>Emby as the main server is new</b> in this release: sign-in, home, title pages, playback,
-Continue Watching, My List and search all work. Emby can't be found by scanning your network yet:
-type its address. Emby Connect works for extra servers.
+<b>Emby as the main server is new</b>: sign-in (by address, a network search, or Emby Connect),
+home, title pages, playback, Continue Watching, My List and search all work.
+<br><br>
+<b>Several accounts on one TV:</b> Settings → Account → Switch account. Each account keeps its own
+main server, rows, settings and cloud sync.
 </details>
 
 <details>

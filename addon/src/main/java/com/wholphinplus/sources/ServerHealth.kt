@@ -52,8 +52,6 @@ class ServerHealth(
         )
     val checks: StateFlow<Map<String, Check>> = _checks.asStateFlow()
 
-    /** Shown once per server and problem: set by the app (a toast). */
-    @Volatile var notify: (String) -> Unit = {}
 
     private fun signIn(c: ServerConnection) = c.lastConnectedAt.toString()
 
@@ -68,6 +66,10 @@ class ServerHealth(
         _checks.update { it + (c.connectionId to Check(null, System.currentTimeMillis(), signIn(c))) }
         // Back to normal: a later outage is news again (written only when it changes)
         if (was?.trouble != null || was == null) prefs.edit().remove(c.connectionId).remove(CHECK + c.connectionId).apply()
+        // The Message Center's line for it says it's back (quietly: the trouble was the news)
+        if (was?.trouble != null && was.trouble != Trouble.SLOW) {
+            Inbox.post(Inbox.Kind.SERVERS, "${c.label} is back", "Its copies show up when you press Play again.", Inbox.Level.GOOD, key = "server:${c.connectionId}", popUp = false, unread = false)
+        }
     }
 
     fun failed(
@@ -83,7 +85,18 @@ class ServerHealth(
         val said = prefs.getString(c.connectionId, null)?.split('|')
         if (said != null && said[0] == trouble.name && now - (said.getOrNull(1)?.toLongOrNull() ?: 0L) < NOTICE_AGAIN_MS) return
         prefs.edit().putString(c.connectionId, "${trouble.name}|$now").apply()
-        notify(notice(c.label, trouble))
+        Inbox.post(
+            Inbox.Kind.SERVERS,
+            when (trouble) {
+                Trouble.SIGN_IN -> "${c.label}: sign-in expired"
+                Trouble.OFFLINE -> "${c.label} is offline"
+                else -> "${c.label} answered with an error"
+            },
+            notice(c.label, trouble),
+            Inbox.Level.WARN,
+            key = "server:${c.connectionId}",
+            action = Inbox.Action.Settings("SOURCES", if (trouble == Trouble.SIGN_IN) "Sign in again" else "Check it"),
+        )
     }
 
     companion object {

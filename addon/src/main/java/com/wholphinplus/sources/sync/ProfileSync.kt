@@ -243,6 +243,7 @@ class ProfileSync
                         // and keep "Keep my setup" from ever showing
                         if (e is CloudException && (e.error == "locked" || e.error == "slow_down")) retryAfter(hook, e.retryAfterSec)
                         _status.update { it.copy(problem = if (e is CloudException && e.error == "wrong_pin") "The sync PIN was changed on another TV. Enter the new one to keep syncing." else describe(e)) }
+                        com.wholphinplus.sources.Inbox.post(com.wholphinplus.sources.Inbox.Kind.SYNC, "Cloud sync didn't work", _status.value.problem.orEmpty(), com.wholphinplus.sources.Inbox.Level.WARN, key = "sync", action = com.wholphinplus.sources.Inbox.Action.SyncNow())
                     } finally {
                         busy(false)
                     }
@@ -260,6 +261,19 @@ class ProfileSync
                     kotlinx.coroutines.delay(wait)
                     syncNow(hook)
                 }
+        }
+
+        /** The sections the last merge brought from the cloud (another TV's changes). */
+        @Volatile private var arrived: Set<String> = emptySet()
+
+        /** The Message Center: one "last synced" line; its own message when another TV's changes arrived. */
+        private fun synced(arrived: Set<String>) {
+            val words = arrived.mapNotNull { SECTION_WORDS[it] }.distinct()
+            if (words.isNotEmpty()) {
+                com.wholphinplus.sources.Inbox.post(com.wholphinplus.sources.Inbox.Kind.SYNC, "Synced changes from another TV", "Brought over: ${words.joinToString(", ")}.", com.wholphinplus.sources.Inbox.Level.GOOD, key = "sync")
+            } else {
+                com.wholphinplus.sources.Inbox.post(com.wholphinplus.sources.Inbox.Kind.SYNC, "Synced with your Orca+ account", "Everything on this TV is saved in the cloud.", com.wholphinplus.sources.Inbox.Level.GOOD, key = "sync", popUp = false, unread = false)
+            }
         }
 
         /** Syncs in the background unless it did in the last two minutes ([force]: the app is leaving). */
@@ -306,6 +320,7 @@ class ProfileSync
                 _status.update { it.copy(on = true, lastSync = System.currentTimeMillis(), problem = null, resetAt = copy.resetAt, name = copy.name) }
                 prefs.edit().putLong(LAST, System.currentTimeMillis()).remove(JOINING).apply()
                 Timber.i("Cloud sync: version %d", version)
+                synced(arrived)
                 return
             }
             error("Another TV kept changing the profile; try again")
@@ -326,6 +341,8 @@ class ProfileSync
                 }
             val result = ProfileMerge.merge(local, remote, changed, System.currentTimeMillis())
             apply(hook, local, result)
+            val before = ProfileMerge.hashes(local)
+            arrived = ProfileMerge.hashes(result).filter { (k, v) -> before[k] != v }.keys
             return result
         }
 
@@ -344,6 +361,76 @@ class ProfileSync
                     },
             )
         }
+
+        // ------------------------------------------------------------ several accounts on one TV
+
+        /** Each account's setup on this TV while another is signed in ([accountChanged]). */
+        private val accountsDir = java.io.File(context.noBackupFilesDir, "orca_accounts")
+
+        /** One account's setup and sync state, as kept while another account is signed in. */
+        @kotlinx.serialization.Serializable
+        private class Slot(
+            val profile: Profile,
+            val sync: Map<String, String> = emptyMap(),
+        )
+
+        private val SYNC_KEYS = listOf(ID, SEED, VERSION, HASHES, LAST, JOINING, PROMPTED)
+
+        private fun slotFile(identity: String) = java.io.File(accountsDir, ProfileCrypto.profileId(identity, "slot").take(40))
+
+        /**
+         * The signed-in account changed (the account switcher, Wholphin's own Switch user, signing
+         * out and in as someone else). The setup on this TV still belongs to the account before:
+         * it's kept, with its sync state, in a sealed file of its own; the account now signed in
+         * gets its kept setup back and carries on syncing without its PIN. An account this TV
+         * hasn't had keeps the setup as it is, with sync off and the cloud's offer coming up, so
+         * one account's setup is never synced into another's profile.
+         */
+        suspend fun accountChanged(hook: SourceHook) =
+            withContext(Dispatchers.IO) {
+                mutex.withLock {
+                    val now = runCatching { identity(hook) }.getOrNull() ?: return@withLock
+                    val before = prefs.getString(ACTIVE, null)
+                    if (before == now) return@withLock
+                    if (before != null) {
+                        runCatching {
+                            val setup = Profile(wholphin = localProfile(hook).wholphin, settings = store.snapshot(), lists = collections.snapshot())
+                            val sync = SYNC_KEYS.mapNotNull { k -> prefs.all[k]?.let { v -> k to (if (v is Boolean) "b:$v" else if (v is Int) "i:$v" else if (v is Long) "l:$v" else "s:$v") } }.toMap()
+                            accountsDir.mkdirs()
+                            slotFile(before).writeText(store.seal(ProfileMerge.json.encodeToString(Slot.serializer(), Slot(setup, sync))))
+                        }.onFailure { Timber.w(it, "Accounts: couldn't keep the previous account's setup") }
+                    }
+                    val kept = runCatching { slotFile(now).takeIf { it.isFile }?.readText()?.let { ProfileMerge.json.decodeFromString(Slot.serializer(), store.unseal(it)) } }.getOrNull()
+                    val edit = prefs.edit()
+                    SYNC_KEYS.forEach { edit.remove(it) }
+                    kept?.sync?.forEach { (k, v) ->
+                        when (v.take(2)) {
+                            "b:" -> edit.putBoolean(k, v.drop(2).toBoolean())
+                            "i:" -> edit.putInt(k, v.drop(2).toInt())
+                            "l:" -> edit.putLong(k, v.drop(2).toLong())
+                            else -> edit.putString(k, v.drop(2))
+                        }
+                    }
+                    edit.putString(ACTIVE, now).commit()
+                    // Pages and rows on screen were the other account's (the first account recorded: nothing to drop)
+                    if (before != null) com.wholphinplus.sources.cinema.CinemaCaches.homeChanged()
+                    if (kept != null) {
+                        apply(hook, localProfile(hook), kept.profile)
+                        slotFile(now).delete()
+                    }
+                    Timber.i("Accounts: signed-in account changed (%s)", if (kept != null) "its setup back" else if (before == null) "first one" else "new on this TV")
+                    if (before != null) {
+                        val who = com.wholphinplus.sources.AccountActions.who()
+                        com.wholphinplus.sources.Inbox.post(
+                            com.wholphinplus.sources.Inbox.Kind.ACCOUNT,
+                            if (who != null) "Signed in as ${who.user} on ${who.server}" else "Switched account",
+                            if (kept != null) "Its own setup is back on this TV." else "New on this TV: it starts with this TV's setup, and cloud sync is off until you turn it on.",
+                            action = com.wholphinplus.sources.Inbox.Action.Settings("ACCOUNT", "Account"),
+                        )
+                    }
+                    _status.value = Status(on = prefs.getString(ID, null) != null, lastSync = prefs.getLong(LAST, 0))
+                }
+            }
 
         // ------------------------------------------------------------ Orca+ name sign-in
 
@@ -484,6 +571,10 @@ class ProfileSync
             private const val PROMPTED = "prompted"
             private const val RETURNING = "welcome_returning"
             private const val JOINING = "joining"
+            private const val ACTIVE = "active_account"
+
+            /** [ProfileMerge.hashes]' sections, as the Message Center says them. */
+            private val SECTION_WORDS = mapOf(ProfileMerge.WHOLPHIN to "app settings", ProfileMerge.SETTINGS to "Orca+ settings and servers", ProfileMerge.LISTS to "lists and rows")
             private const val DEVICE = "device_"
             private const val MIN_GAP_MS = 2 * 60 * 1000L
 

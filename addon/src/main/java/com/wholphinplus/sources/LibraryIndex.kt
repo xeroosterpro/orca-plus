@@ -124,7 +124,7 @@ internal class LibraryIndex(
         if (!mutex.tryLock()) return null
         return try {
             withContext(Dispatchers.IO) {
-                current?.takeIf { it.owner == owner } ?: runCatching { read() }.getOrNull()?.takeIf { it.owner == owner }?.also { current = it }
+                current?.takeIf { it.owner == owner } ?: runCatching { load(owner) }.getOrNull()?.also { current = it }
             }
         } finally {
             mutex.unlock()
@@ -148,7 +148,7 @@ internal class LibraryIndex(
     ): Snapshot? {
         val known =
             mutex.withLock {
-                withContext(Dispatchers.IO) { current?.takeIf { it.owner == owner } ?: runCatching { read() }.getOrNull()?.takeIf { it.owner == owner } }.also { current = it }
+                withContext(Dispatchers.IO) { current?.takeIf { it.owner == owner } ?: runCatching { load(owner) }.getOrNull() }.also { current = it }
             }
         if (known == null) return update(hook, owner, full = true)
         val t = System.currentTimeMillis()
@@ -263,17 +263,28 @@ internal class LibraryIndex(
         // How much there is, for the notice: the first page of each kind says
         val firstPages = KINDS.associateWith { page(hook, userId, it, 0) }
         val total = firstPages.values.sumOf { it.total }
+        // A read the app was closed in the middle of carries on where it was (a big library takes
+        // minutes, and Android closes apps in the background: it used to start over every time)
+        val journal = Journal(File(file.parentFile, file.name + ".partial"), owner)
         var done = 0
         _progress.value = Progress(0, total, first)
         val parts =
             KINDS.associateWith { kind ->
                 val b = Builder()
                 val head = firstPages.getValue(kind)
-                head.titles().forEach(b::add)
-                done += head.items.size
-                _progress.value = Progress(done, total, first)
-                // From where the first page ended (on Emby the page size changes as it goes, see [paced])
-                var start = head.items.size
+                val resumed = journal.resume(kind, b)
+                var start =
+                    if (resumed != null && resumed in 1..head.total) {
+                        Timber.i("Library index: %s carries on from %d of %d", kind, resumed, head.total)
+                        resumed
+                    } else {
+                        head.titles().forEach(b::add)
+                        journal.add(kind, head.titles(), head.items.size)
+                        // From where the first page ended (on Emby the page size changes as it goes, see [paced])
+                        head.items.size
+                    }
+                done += start
+                _progress.value = Progress(done.coerceAtMost(total), total, first)
                 while (start < head.total) {
                     // Never while the remote is in use, something plays or Orca+ is in the
                     // background: browsing and the video get the CPU and the network
@@ -283,18 +294,25 @@ internal class LibraryIndex(
                     val asked = System.currentTimeMillis()
                     val pages = coroutineScope { starts.map { s -> async { steadyPage(hook, userId, kind, s, head.total, size) } }.awaitAll() }
                     paced(hook, System.currentTimeMillis() - asked)
+                    val read = ArrayList<Title>()
                     pages.forEach { p ->
-                        p.titles().forEach(b::add)
+                        p.titles().forEach { t ->
+                            b.add(t)
+                            read += t
+                        }
                         done += p.items.size
                     }
                     _progress.value = Progress(done.coerceAtMost(total), total, first)
                     start += starts.size * size
+                    journal.add(kind, read, start)
                 }
                 b.build()
             }
+        journal.finish()
         val now = System.currentTimeMillis()
         val s = Snapshot(owner, now, now, parts.getValue(MOVIE), parts.getValue(SERIES))
         Timber.i("Library index: %d movies, %d shows in %d ms (full)", s.movies.size, s.series.size, now - started)
+        Inbox.indexed(s.movies.size, s.series.size, now - started, full = true)
         return s
     }
 
@@ -324,6 +342,7 @@ internal class LibraryIndex(
             }
         val s = Snapshot(before.owner, System.currentTimeMillis(), before.fullAt, before.movies.plus(added.getValue(MOVIE)), before.series.plus(added.getValue(SERIES)))
         Timber.i("Library index: %d new movies, %d new shows in %d ms", added.getValue(MOVIE).size, added.getValue(SERIES).size, System.currentTimeMillis() - started)
+        Inbox.indexed(s.movies.size, s.series.size, System.currentTimeMillis() - started, full = false, newMovies = added.getValue(MOVIE).size, newShows = added.getValue(SERIES).size)
         return s
     }
 
@@ -395,6 +414,117 @@ internal class LibraryIndex(
         }
     }
 
+    /**
+     * A full read so far, on the device: each kind's titles appended as pages come in, and where the
+     * read got to. Kept for [owner] and two days at most; deleted when the read is done.
+     */
+    private class Journal(
+        private val f: File,
+        private val owner: String,
+    ) {
+        // kind -> (titles written, where the read got to)
+        private val at = HashMap<String, Pair<Int, Int>>()
+        private var startedAt = System.currentTimeMillis()
+
+        init {
+            runCatching {
+                if (f.isFile) {
+                    DataInputStream(f.inputStream().buffered()).use { inp ->
+                        if (inp.readInt() == JOURNAL_FORMAT && inp.readUTF() == owner) {
+                            val began = inp.readLong()
+                            if (System.currentTimeMillis() - began < 2 * DAY_MS) startedAt = began else return@runCatching
+                        }
+                    }
+                }
+            }
+            // Not this owner's, damaged or old: start afresh
+            if (!f.isFile || !matches()) reset()
+        }
+
+        private fun matches(): Boolean =
+            runCatching {
+                DataInputStream(f.inputStream().buffered()).use { inp ->
+                    inp.readInt() == JOURNAL_FORMAT && inp.readUTF() == owner && System.currentTimeMillis() - inp.readLong() < 2 * DAY_MS
+                }
+            }.getOrDefault(false)
+
+        private fun reset() {
+            f.delete()
+            startedAt = System.currentTimeMillis()
+            runCatching {
+                DataOutputStream(f.outputStream().buffered()).use { out ->
+                    out.writeInt(JOURNAL_FORMAT)
+                    out.writeUTF(owner)
+                    out.writeLong(startedAt)
+                }
+            }
+        }
+
+        /** The titles a closed read had for [kind] into [b], and where it got to; null when there's nothing to carry on. */
+        fun resume(
+            kind: String,
+            b: Builder,
+        ): Int? =
+            runCatching {
+                var reached: Int? = null
+                DataInputStream(f.inputStream().buffered()).use { inp ->
+                    inp.readInt()
+                    inp.readUTF()
+                    inp.readLong()
+                    // Records: kind, count, the titles, where the read got to after them. A record cut
+                    // short (closed mid-write) ends the journal there
+                    while (true) {
+                        val k = runCatching { inp.readUTF() }.getOrNull() ?: break
+                        val n = inp.readInt()
+                        if (n !in 0..MAX_TITLES) break
+                        val titles = ArrayList<Title>(n)
+                        for (i in 0 until n) {
+                            val hi = inp.readLong()
+                            val lo = inp.readLong()
+                            val t = inp.readInt()
+                            val m = inp.readInt()
+                            titles += Title(UUID(hi, lo), t.takeIf { it != NONE }, m.takeIf { it != NONE })
+                        }
+                        val to = inp.readInt()
+                        if (k == kind) {
+                            titles.forEach(b::add)
+                            reached = to
+                        }
+                    }
+                }
+                reached
+            }.getOrNull()
+
+        fun add(
+            kind: String,
+            titles: List<Title>,
+            reached: Int,
+        ) {
+            runCatching {
+                DataOutputStream(java.io.FileOutputStream(f, true).buffered()).use { out ->
+                    out.writeUTF(kind)
+                    out.writeInt(titles.size)
+                    titles.forEach { t ->
+                        out.writeLong(t.id.mostSignificantBits)
+                        out.writeLong(t.id.leastSignificantBits)
+                        out.writeInt(t.tmdb ?: NONE)
+                        out.writeInt(t.imdb ?: NONE)
+                    }
+                    out.writeInt(reached)
+                }
+            }
+        }
+
+        fun finish() {
+            f.delete()
+        }
+
+        private companion object {
+            const val JOURNAL_FORMAT = 1
+            const val NONE = Int.MIN_VALUE
+        }
+    }
+
     private fun write(s: Snapshot) {
         val tmp = File(file.path + ".tmp")
         val raw = tmp.outputStream()
@@ -418,7 +548,34 @@ internal class LibraryIndex(
             out.flush()
             raw.fd.sync()
         }
+        // Another account's index (several accounts on one TV) is kept aside for when it's back
+        runCatching { ownerOf(file)?.takeIf { it != s.owner }?.let { other -> file.renameTo(keptFile(other)) } }
         if (!tmp.renameTo(file)) Timber.w("Library index: couldn't replace %s", file.name)
+        keptFile(s.owner).delete()
+        file.parentFile?.listFiles { f -> f.name.startsWith(file.name + ".kept.") }?.sortedByDescending { it.lastModified() }?.drop(KEPT_MAX)?.forEach { it.delete() }
+    }
+
+    /** Where another account's index waits while this TV is signed in as someone else. */
+    private fun keptFile(owner: String) =
+        File(file.parentFile, file.name + ".kept." + java.security.MessageDigest.getInstance("SHA-256").digest(owner.toByteArray()).take(8).joinToString("") { "%02x".format(it) })
+
+    /** Whose index [f] is, read from its head only. */
+    private fun ownerOf(f: File): String? {
+        if (!f.isFile) return null
+        DataInputStream(f.inputStream().buffered()).use { inp -> return if (inp.readInt() == FORMAT) inp.readUTF() else null }
+    }
+
+    /**
+     * The saved index for [owner]: this one, or the one kept aside when the TV switched to another
+     * account (it swaps back in, so switching accounts doesn't read a whole library again).
+     */
+    private fun load(owner: String): Snapshot? {
+        if (ownerOf(file) == owner) return read()
+        val kept = keptFile(owner).takeIf { it.isFile } ?: return null
+        ownerOf(file)?.let { other -> file.renameTo(keptFile(other)) }
+        if (!kept.renameTo(file)) return null
+        Timber.i("Library index: this account's index is back")
+        return read()?.takeIf { it.owner == owner }
     }
 
     private fun read(): Snapshot? {
@@ -483,6 +640,9 @@ internal class LibraryIndex(
         }
         private const val NEW_LIMIT = 5000
         private const val FORMAT = 2
+
+        /** Other accounts' indexes kept on the device (a big library's is a few MB). */
+        private const val KEPT_MAX = 3
         private const val MAX_TITLES = 5_000_000
         private const val NONE = Int.MIN_VALUE
         private const val MOVIE = "Movie"

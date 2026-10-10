@@ -45,6 +45,15 @@ object EmbyBridge : Interceptor {
     // 6: Emby answers 4 at once as fast as 1 (bench, 2026-10-10); with 4, a page's calls waited up to ~4 s for a turn
     private val gate = java.util.concurrent.Semaphore(6, true)
 
+    /**
+     * Big lookups by id (a list row's 40 titles) take their own turns, two at a time: alone one costs
+     * Emby ~0.45 s, six at once ~2.7 s each, and the small calls Home waits on (Continue Watching,
+     * Latest, the user) queued up to ~3 s behind them (bench, 2026-10-10).
+     */
+    private val heavyGate = java.util.concurrent.Semaphore(2, true)
+
+    private fun heavy(url: HttpUrl): Boolean = ((url.queryParameter("Ids") ?: url.queryParameter("ids"))?.count { it == ',' } ?: 0) >= 19
+
     /** What Emby is let in as: Jellyfin's product name, and a version past its minimum. */
     const val AS_VERSION = "10.10.7"
 
@@ -76,6 +85,7 @@ object EmbyBridge : Interceptor {
         prefs = p
         p.getStringSet(HOSTS, emptySet())?.forEach { hosts[it] = true }
         p.all.forEach { (k, v) -> if (k.startsWith(USER) && v is String) users[k.removePrefix(USER)] = v }
+        resumeDir = java.io.File(context.noBackupFilesDir, "emby_resume")
     }
 
     /** The signed-in user for [token] (Wholphin's current sign-in, from the MainActivity hook). */
@@ -128,13 +138,15 @@ object EmbyBridge : Interceptor {
         if (path.endsWith("/System/Info/Public", ignoreCase = true)) return info(chain.proceed(request))
         if (!isEmby(url)) return chain.proceed(request)
         local(request)?.let { return it }
-        val rewritten = lighter(outgoing(rewrite(request) ?: request))
+        val rewritten = lighter(outgoing(rewrite(request) ?: request)).let { if (it.header(REFRESH) != null) it.newBuilder().removeHeader(REFRESH).build() else it }
         // Pictures and video aren't held back; API calls take turns ([gate])
         val api = !Regex("(?i)/(Images|Videos|Audio)/").containsMatchIn(url.encodedPath)
         if (!api) return fetch(chain, request, rewritten, false)
         // A change (played, favourite, progress) may change any answer: start over
         if (request.method != "GET") {
             answers.clear()
+            // Something was played, marked or saved here: Continue Watching is asked fresh next time
+            if (CHANGE.containsMatchIn(url.encodedPath)) resumeDir?.listFiles()?.forEach { it.delete() }
             return fetch(chain, request, rewritten, true)
         }
         // The same question asked again (a page asks for the user 3 times, the libraries 5 times,
@@ -142,6 +154,11 @@ object EmbyBridge : Interceptor {
         val key = rewritten.url.toString() + "|" + (request.header("Authorization") ?: request.header("X-Emby-Token")).orEmpty().hashCode()
         val keep = keepFor(rewritten.url.encodedPath, "?" + rewritten.url.encodedQuery.orEmpty())
         answers[key]?.takeIf { System.currentTimeMillis() - it.at < keep }?.let { return it.response(request) }
+        val resume = RESUME.containsMatchIn(rewritten.url.encodedPath)
+        if (resume && request.header(REFRESH) == null) storedResume(key)?.let { stored ->
+            refreshResume(request, key)
+            return stored.response(request)
+        }
         val mine = java.util.concurrent.CompletableFuture<Answer?>()
         val shared = inFlight.putIfAbsent(key, mine)
         if (shared != null) {
@@ -157,6 +174,7 @@ object EmbyBridge : Interceptor {
                 return response
             }
             val answer = Answer(response.code, response.message, response.headers, type, response.body.bytes(), System.currentTimeMillis())
+            if (resume) storeResume(key, answer, refreshed = request.header(REFRESH) != null)
             if (keep > 0) {
                 answers[key] = answer
                 if (answers.size > KEEP_MAX) answers.entries.sortedBy { it.value.at }.take(answers.size - KEEP_MAX).forEach { answers.remove(it.key, it.value) }
@@ -169,6 +187,72 @@ object EmbyBridge : Interceptor {
         } finally {
             inFlight.remove(key, mine)
         }
+    }
+
+    // ---- Continue Watching at once. Emby takes ~2.1 s for it however it's asked (bench, 2026-10-10:
+    // the type filter; the faster IsResumable query lacks Emby's next-episode entries), and Home's
+    // first rows wait for it. Its last answer is kept on the device and given at once while the real
+    // one is asked in the background; if that differs, [resumeChanged] tells Home to swap it in.
+    // Anything played, marked or saved on this TV deletes the kept copy, so Home asks fresh then.
+
+    private val RESUME = Regex("(?i)/Items/Resume$")
+    private val CHANGE = Regex("(?i)/(Sessions/Playing|PlayedItems|FavoriteItems|UserData|HideFromResume|Items/[^/]+/Refresh)")
+    private const val REFRESH = "X-Orca-Refresh"
+    @Volatile private var resumeDir: java.io.File? = null
+    private val refreshing = ConcurrentHashMap<String, Boolean>()
+    private val refreshClient by lazy { okhttp3.OkHttpClient.Builder().addInterceptor(this).build() }
+    private val _resumeChanged = kotlinx.coroutines.flow.MutableStateFlow(0)
+
+    /** Bumped when Continue Watching given from the device turned out different from the server's. */
+    val resumeChanged: kotlinx.coroutines.flow.StateFlow<Int> = _resumeChanged
+
+    private fun resumeFile(key: String): java.io.File? =
+        resumeDir?.let { dir ->
+            val name = java.security.MessageDigest.getInstance("SHA-256").digest(key.toByteArray()).joinToString("") { "%02x".format(it) }.take(32)
+            java.io.File(dir, name)
+        }
+
+    private fun storedResume(key: String): Answer? {
+        val f = resumeFile(key)?.takeIf { it.isFile } ?: return null
+        // A day old at most: older, the wait is worth a list that's right
+        if (System.currentTimeMillis() - f.lastModified() > 24 * 60 * 60_000L) return null
+        val body = runCatching { f.readBytes() }.getOrNull() ?: return null
+        return Answer(200, "OK", okhttp3.Headers.headersOf(), "application/json; charset=utf-8".toMediaType(), body, f.lastModified())
+    }
+
+    private fun storeResume(
+        key: String,
+        answer: Answer,
+        refreshed: Boolean,
+    ) {
+        val f = resumeFile(key) ?: return
+        val before = if (f.isFile) runCatching { f.readBytes() }.getOrNull() else null
+        runCatching {
+            f.parentFile?.mkdirs()
+            val tmp = java.io.File(f.path + ".tmp")
+            tmp.writeBytes(answer.body)
+            tmp.renameTo(f)
+        }
+        if (refreshed && before != null && !before.contentEquals(answer.body)) _resumeChanged.value++
+    }
+
+    private fun refreshResume(
+        request: Request,
+        key: String,
+    ) {
+        if (refreshing.putIfAbsent(key, true) != null) return
+        refreshClient.newCall(request.newBuilder().header(REFRESH, "1").build()).enqueue(
+            object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    refreshing.remove(key)
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: Response) {
+                    response.close()
+                    refreshing.remove(key)
+                }
+            },
+        )
     }
 
     /** A JSON answer as sent on, kept to share ([intercept]). */
@@ -224,13 +308,22 @@ object EmbyBridge : Interceptor {
     ): Response {
         val path = request.url.encodedPath
         val asked = System.nanoTime()
-        if (api) gate.acquire()
+        // A heavy lookup waits for its own lane first, so it never holds a general turn while waiting
+        val big = api && heavy(rewritten.url)
+        if (big) heavyGate.acquire()
+        try {
+            if (api) gate.acquire()
+        } catch (e: InterruptedException) {
+            if (big) heavyGate.release()
+            throw e
+        }
         val started = System.nanoTime()
         val response =
             try {
                 chain.proceed(rewritten)
             } finally {
                 if (api) gate.release()
+                if (big) heavyGate.release()
             }
         // Where an Emby main server's time goes: each API call, its wait for a turn and the server's
         // own time (no ids or keys: the path's numbers are blanked)

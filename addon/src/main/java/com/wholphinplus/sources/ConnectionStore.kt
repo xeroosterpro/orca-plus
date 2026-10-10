@@ -131,6 +131,7 @@ class ConnectionStore
         }
 
         init {
+            Inbox.init(context)
             DeviceClass.init(context)
             DeviceClass.mode = _deviceMode.value
             com.wholphinplus.sources.cinema.PosterSize.also {

@@ -119,6 +119,10 @@ fun WelcomeServerFlow(
 ) {
     var intro by rememberSaveable { mutableStateOf(!startAtServer) }
     var account by rememberSaveable { mutableStateOf(false) }
+    // Emby Connect for the main server: 1 the code, 2 the account's servers
+    var embyMain by rememberSaveable { mutableStateOf(0) }
+    var embyError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val hook = remember { context.welcomeHook() }
     // The first run offers setting up from a phone; what it sends takes the welcome forward
@@ -135,7 +139,7 @@ fun WelcomeServerFlow(
     Box(modifier.fillMaxSize()) {
         WelcomeBackdrop(emptyList())
         AnimatedContent(
-            targetState = if (intro) 0 else if (account) 1 else 2,
+            targetState = if (intro) 0 else if (account) 1 else if (embyMain > 0) 2 + embyMain else 2,
             transitionSpec = { (fadeIn(tween(700, delayMillis = 200, easing = CinemaFade)) + slideInHorizontally(tween(700, easing = CinemaEase)) { it / 8 }) togetherWith fadeOut(tween(400, easing = CinemaFade)) },
             label = "welcome",
         ) { stage ->
@@ -156,7 +160,33 @@ fun WelcomeServerFlow(
                             intro = true
                         },
                     )
-                else -> ServerStep(found, connecting, error, onPick, onAddress, onSearchAgain, onBack = { if (startAtServer) onBack() else intro = true })
+                3 -> EmbyStep(onAccount = { embyMain = 2 }, onCancel = { embyMain = 0 }, onError = { embyError = it }, main = true)
+                4 ->
+                    EmbyPickStep(
+                        single = true,
+                        error = embyError,
+                        onAdded = { connections ->
+                            val c = connections.first()
+                            // Signed in the way an Orca+ name signs in: with the server's own sign-in
+                            com.wholphinplus.sources.EmbyBridge.markEmby(c.serverUrl)
+                            scope.launch {
+                                embyError = null
+                                try {
+                                    onCloudSignIn?.invoke(com.wholphinplus.sources.sync.MainLogin(url = c.serverUrl, serverId = c.serverId, userId = c.userId, userName = c.userName, token = c.accessToken))
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    embyError = e.message ?: "Couldn't sign in to that server"
+                                }
+                            }
+                        },
+                        onCancel = { embyMain = 0 },
+                    )
+                else ->
+                    ServerStep(
+                        found, connecting, error, onPick, onAddress, onSearchAgain, onBack = { if (startAtServer) onBack() else intro = true },
+                        onEmbyConnect = if (onCloudSignIn != null) ({ embyMain = 1 }) else null,
+                    )
             }
         }
         PhoneSetupBanner(Modifier.align(Alignment.TopEnd).padding(top = 14.dp, end = 40.dp))
@@ -252,6 +282,8 @@ private fun ServerStep(
     onAddress: (String) -> Unit,
     onSearchAgain: () -> Unit,
     onBack: () -> Unit,
+    /** Emby Connect for the main server (null: not offered here). */
+    onEmbyConnect: (() -> Unit)? = null,
 ) {
     var typing by rememberSaveable { mutableStateOf(false) }
     var address by rememberSaveable { mutableStateOf("") }
@@ -279,6 +311,10 @@ private fun ServerStep(
         onAddress(url)
     }
     var searching by remember { mutableStateOf(true) }
+    // Emby servers on this network too (Wholphin's search only finds Jellyfin); asked again with it
+    var embyFound by remember { mutableStateOf<List<EmbyDiscovery.Found>>(emptyList()) }
+    var searchRound by remember { mutableStateOf(0) }
+    LaunchedEffect(searchRound) { embyFound = EmbyDiscovery.find() }
     val firstCard = remember { FocusRequester() }
     val field = remember { FocusRequester() }
     BackHandler { if (typing) typing = false else onBack() }
@@ -321,20 +357,43 @@ private fun ServerStep(
                             onClick = { onPick(s) },
                         )
                     }
-                    if (found.isEmpty()) {
+                    // Emby servers the Jellyfin search didn't already list (same address)
+                    val known = found.map { it.address.trimEnd('/').lowercase() }.toSet()
+                    embyFound.filter { it.address.trimEnd('/').lowercase() !in known }.forEachIndexed { i, s ->
+                        ChoiceCard(
+                            title = s.name.ifBlank { "Emby server" },
+                            subtitle = s.address + "  ·  Emby, found on your network",
+                            glyph = "E",
+                            accent = Color(0xFF52B54B),
+                            trailing = if (connecting) "Connecting…" else "›",
+                            modifier = if (found.isEmpty() && i == 0) Modifier.focusRequester(firstCard) else Modifier,
+                            onClick = { connect(s.address) },
+                        )
+                    }
+                    if (found.isEmpty() && embyFound.isEmpty()) {
                         Text(if (searching) "Searching your network…" else "No servers found automatically. Type its address below.", color = InkDim, fontSize = 15.sp, modifier = Modifier.padding(vertical = 6.dp))
                     }
                     ChoiceCard(
                         title = "Enter an address",
-                        subtitle = "For example 10.0.0.20:8096 or jellyfin.example.com",
+                        subtitle = "For example 10.0.0.20:8096 or media.example.com",
                         glyph = "+",
                         accent = Indigo,
-                        modifier = if (found.isEmpty()) Modifier.focusRequester(firstCard) else Modifier,
+                        modifier = if (found.isEmpty() && embyFound.isEmpty()) Modifier.focusRequester(firstCard) else Modifier,
                         onClick = { typing = true },
                     )
+                    onEmbyConnect?.let { open ->
+                        ChoiceCard(
+                            title = "Emby Connect",
+                            subtitle = "Sign in with your Emby account at emby.media/pin",
+                            glyph = "E",
+                            accent = Color(0xFF52B54B),
+                            onClick = open,
+                        )
+                    }
                     if (!searching && found.isEmpty()) {
                         PillButton("Search again", primary = false, onClick = {
                             searching = true
+                            searchRound++
                             onSearchAgain()
                         })
                     }
@@ -735,6 +794,8 @@ internal fun <T> CodeStep(
     where: String,
     onConnected: (T) -> Unit,
     onCancel: () -> Unit,
+    eyebrow: String = "ADD A SERVER",
+    body: String = "Nothing to type on the TV. Approve the code and Orca+ adds it by itself.",
 ) {
     var login by remember { mutableStateOf<CodeLogin?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -762,7 +823,7 @@ internal fun <T> CodeStep(
         }
     }
     Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
-        StepHeader("ADD A SERVER", title, "Nothing to type on the TV. Approve the code and Orca+ adds it by itself.", Modifier.weight(0.42f))
+        StepHeader(eyebrow, title, body, Modifier.weight(0.42f))
         GlassPanel(Modifier.weight(0.58f)) {
             Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 val l = login
@@ -784,10 +845,14 @@ internal fun EmbyStep(
     onAccount: () -> Unit,
     onCancel: () -> Unit,
     onError: (String) -> Unit,
+    /** Signing in to the main server (the welcome) rather than adding one. */
+    main: Boolean = false,
 ) {
     val hook = LocalContext.current.welcomeHook()
     CodeStep(
         title = "Sign in with Emby Connect",
+        eyebrow = if (main) "SIGN IN  ·  1 OF 2" else "ADD A SERVER",
+        body = if (main) "Nothing to type on the TV. Approve the code, then pick your main server." else "Nothing to type on the TV. Approve the code and Orca+ adds it by itself.",
         start = { hook.client.startEmbyConnectPin() },
         poll = { hook.client.pollEmbyConnectPin(it) },
         where = "On your phone or computer go to emby.media/pin, sign in to your Emby account and enter this code.",
@@ -803,6 +868,10 @@ internal fun EmbyStep(
 internal fun EmbyPickStep(
     onAdded: (List<ServerConnection>) -> Unit,
     onCancel: () -> Unit,
+    /** The main server: one server, signed in to as soon as it's picked. */
+    single: Boolean = false,
+    /** A problem from after the pick (signing in), shown under the list. */
+    error: String? = null,
 ) {
     val hook = LocalContext.current.welcomeHook()
     val scope = rememberCoroutineScope()
@@ -810,18 +879,23 @@ internal fun EmbyPickStep(
     var servers by remember { mutableStateOf<List<EmbyConnectServer>?>(null) }
     val chosen = remember { mutableStateListOf<String>() }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var problem by remember { mutableStateOf<String?>(null) }
     val first = remember { FocusRequester() }
+    LaunchedEffect(error) { if (error != null) busy = false }
     LaunchedEffect(account) {
         if (account == null) return@LaunchedEffect onCancel()
-        servers = runCatching { withContext(Dispatchers.IO) { hook.client.embyConnectServers(account) } }.onFailure { error = it.message }.getOrDefault(emptyList())
+        servers = runCatching { withContext(Dispatchers.IO) { hook.client.embyConnectServers(account) } }.onFailure { problem = it.message }.getOrDefault(emptyList())
         // A few: all ticked. An account with many (owner, 2026-10-08: too many to scroll): pick
-        servers?.takeIf { it.size <= 3 }?.forEach { chosen += it.systemId.ifBlank { it.name } }
+        if (!single) servers?.takeIf { it.size <= 3 }?.forEach { chosen += it.systemId.ifBlank { it.name } }
         delay(100)
         runCatching { first.requestFocus() }
     }
     Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 56.dp), horizontalArrangement = Arrangement.spacedBy(56.dp), verticalAlignment = Alignment.CenterVertically) {
-        StepHeader("EMBY CONNECT", "Choose your Emby servers", "These are linked to your Emby account. Orca+ signs in to each one for you.", Modifier.weight(0.42f))
+        if (single) {
+            StepHeader("EMBY CONNECT", "Choose your main server", "These are linked to your Emby account. Pick the one Orca+ runs on; you can add the others afterwards.", Modifier.weight(0.42f))
+        } else {
+            StepHeader("EMBY CONNECT", "Choose your Emby servers", "These are linked to your Emby account. Orca+ signs in to each one for you.", Modifier.weight(0.42f))
+        }
         GlassPanel(Modifier.weight(0.58f)) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 val list = servers
@@ -844,16 +918,37 @@ internal fun EmbyPickStep(
                                     subtitle = s.localUrl.ifBlank { s.remoteUrl },
                                     glyph = "E",
                                     accent = Color(0xFF52B54B),
-                                    trailing = if (key in chosen) "✓" else "",
+                                    trailing = if (single) (if (busy && key in chosen) "Signing in…" else "›") else if (key in chosen) "✓" else "",
                                     modifier = if (i == 0) Modifier.focusRequester(first) else Modifier,
-                                ) { if (key in chosen) chosen -= key else chosen += key }
+                                ) {
+                                    if (single) {
+                                        val acc = account
+                                        if (!busy && acc != null) {
+                                            busy = true
+                                            chosen.clear()
+                                            chosen += key
+                                            problem = null
+                                            scope.launch {
+                                                val result = withContext(Dispatchers.IO) { runCatching { hook.client.connectEmbyServer(acc, s, "") } }
+                                                result.onSuccess { onAdded(listOf(it)) }.onFailure {
+                                                    problem = it.message
+                                                    busy = false
+                                                }
+                                            }
+                                        }
+                                    } else if (key in chosen) {
+                                        chosen -= key
+                                    } else {
+                                        chosen += key
+                                    }
+                                }
                             }
                         }
                     }
                 }
-                error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 14.sp) }
+                (error ?: problem)?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 14.sp) }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PillButton(if (busy) "Adding…" else "Add ${chosen.size} server${if (chosen.size == 1) "" else "s"}", enabled = chosen.isNotEmpty() && !busy && account != null, onClick = {
+                    if (!single) PillButton(if (busy) "Adding…" else "Add ${chosen.size} server${if (chosen.size == 1) "" else "s"}", enabled = chosen.isNotEmpty() && !busy && account != null, onClick = {
                         val acc = account ?: return@PillButton
                         busy = true
                         scope.launch {
@@ -861,7 +956,7 @@ internal fun EmbyPickStep(
                             val results = withContext(Dispatchers.IO) { picked.map { s -> runCatching { hook.client.connectEmbyServer(acc, s, "") } } }
                             busy = false
                             val ok = results.mapNotNull { it.getOrNull() }
-                            results.firstNotNullOfOrNull { it.exceptionOrNull() }?.let { error = it.message }
+                            results.firstNotNullOfOrNull { it.exceptionOrNull() }?.let { problem = it.message }
                             if (ok.isNotEmpty()) onAdded(ok)
                         }
                     })

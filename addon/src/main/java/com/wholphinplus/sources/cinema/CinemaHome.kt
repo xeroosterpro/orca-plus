@@ -46,9 +46,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -125,6 +127,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.decodeFromStream
@@ -265,6 +268,10 @@ fun CinemaHome(
     val navBack = remember { NavReturn.to.also { NavReturn.to = null } }
     val searchFocus = remember { FocusRequester() }
     val settingsFocus = remember { FocusRequester() }
+    val messagesFocus = remember { FocusRequester() }
+    // The Message Center (the bell): over the tab like a page, kept across a title page and back
+    var messagesOpen by rememberSaveable { mutableStateOf(false) }
+    var messagesClosed by remember { mutableStateOf(false) }
     var grabFocus by remember { mutableStateOf(navBack == null) }
     var refocus by remember { mutableStateOf(false) }
     // Back from a tile's page or a See all: focus goes back where it was on the tab
@@ -450,6 +457,17 @@ fun CinemaHome(
             }
         }
     }
+    // An Emby main server's Continue Watching is shown from the device at once and asked again in
+    // the background (EmbyBridge); when the server's turns out different, the tab on screen reloads
+    // and swaps it in, as after a play. Jellyfin and Silo never send this.
+    LaunchedEffect(Unit) {
+        com.wholphinplus.sources.EmbyBridge.resumeChanged.drop(1).collect {
+            if (pages[tab] != null) {
+                TabCache.at.remove(tab)
+                attempt++
+            }
+        }
+    }
     // Once Home is up, quietly load Shows and Movies so switching tabs is instant
     LaunchedEffect(pages[CinemaTab.HOME] != null) {
         if (pages[CinemaTab.HOME] == null) return@LaunchedEffect
@@ -542,7 +560,7 @@ fun CinemaHome(
         // A page from a tile (or a row's See all) covers the tab. The tab stays built underneath,
         // hidden and closed to focus, so Back returns to the same scroll and the same tile
         // (it used to be torn down: focus came back on Play and the rows were at the top)
-        val covered = openPage != null || grid != null
+        val covered = openPage != null || grid != null || messagesOpen
         // A page or grid open over the tab takes focus itself; closing it returns focus to the tile
         // or See all ([ReturnFocus]), so the tab mustn't grab Play then
         LaunchedEffect(covered) { if (covered) grabFocus = false }
@@ -614,7 +632,7 @@ fun CinemaHome(
             }, onNavigate = {
                 if (it == CinemaNav.Search || it == CinemaNav.Settings) NavReturn.to = it
                 onNavigate(it)
-            }, searchFocus, settingsFocus)
+            }, searchFocus, settingsFocus, onMessages = { messagesOpen = true }, messagesFocus = messagesFocus)
             if (navBack != null) {
                 LaunchedEffect(Unit) {
                     val icon = if (navBack == CinemaNav.Search) searchFocus else settingsFocus
@@ -722,8 +740,42 @@ fun CinemaHome(
         // Over everything: the library index being read (rows fill in when it's done)
         // Top right, over the billboard's picture: it never covers a row
         Column(Modifier.align(Alignment.TopEnd).padding(top = 76.dp, end = 40.dp), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.End) {
+            // The welcome, once per start of the app, as Home first shows; pop-ups stack under it
+            WelcomeGreeting(ready = pages[CinemaTab.HOME] != null && !covered)
+            InboxBanner()
             LibraryNotice(hook)
             PosterNotice()
+        }
+        // The Message Center over everything; Back returns to the bell
+        if (messagesOpen) {
+            MessageCenter(
+                hook,
+                onAction = { a ->
+                    when (a) {
+                        is com.wholphinplus.sources.Inbox.Action.Update -> com.wholphinplus.sources.Inbox.openUpdate?.invoke()
+                        is com.wholphinplus.sources.Inbox.Action.OpenTitle ->
+                            runCatching { UUID.fromString(a.id) }.getOrNull()?.let { openTitle(it, if (a.series) BaseItemKind.SERIES else BaseItemKind.MOVIE) }
+                        is com.wholphinplus.sources.Inbox.Action.Settings -> {
+                            com.wholphinplus.sources.Inbox.settingsSection = a.section
+                            onNavigate(CinemaNav.Settings)
+                        }
+                        is com.wholphinplus.sources.Inbox.Action.SyncNow -> openScope.launch { hook.profileSync.syncNow(hook) }
+                    }
+                },
+                onClose = {
+                    messagesOpen = false
+                    messagesClosed = true
+                },
+            )
+        }
+        if (messagesClosed) {
+            LaunchedEffect(Unit) {
+                messagesClosed = false
+                for (i in 0 until 30) {
+                    withFrameNanos {}
+                    if (runCatching { messagesFocus.requestFocus() }.getOrDefault(false)) return@LaunchedEffect
+                }
+            }
         }
         // An extra server's title the main server doesn't have: its copies
         copiesOf?.let { com.wholphinplus.sources.ui.TitleSheet(it, search, onDismiss = { copiesOf = null }) }
@@ -1262,8 +1314,11 @@ private fun TopNav(
     onNavigate: (CinemaNav) -> Unit,
     searchFocus: FocusRequester,
     settingsFocus: FocusRequester,
+    onMessages: () -> Unit,
+    messagesFocus: FocusRequester,
 ) {
     val selected = remember { FocusRequester() }
+    val unread = com.wholphinplus.sources.Inbox.messages.collectAsState().value.count { !it.read }
     Row(
         Modifier.fillMaxWidth().padding(start = 48.dp, end = 40.dp, top = 18.dp).height(TopNavHeight - 18.dp)
             // Up from Play lands on the tab you're on (it took the nearest pill: Home)
@@ -1283,6 +1338,7 @@ private fun TopNav(
         }
         Spacer(Modifier.weight(1f))
         NavIcon(Icons.Filled.Search, "Search", Modifier.focusRequester(searchFocus)) { onNavigate(CinemaNav.Search) }
+        NavIcon(Icons.Filled.Notifications, "Messages", Modifier.focusRequester(messagesFocus), badge = unread, onClick = onMessages)
         NavIcon(Icons.Filled.Settings, "Settings", Modifier.focusRequester(settingsFocus)) { onNavigate(CinemaNav.Settings) }
     }
 }
@@ -1312,6 +1368,8 @@ private fun NavIcon(
     icon: ImageVector,
     label: String,
     modifier: Modifier = Modifier,
+    /** Unread messages: a dot with the count on the icon's corner. */
+    badge: Int = 0,
     onClick: () -> Unit,
 ) {
     val f = rememberFocusFade(Color.White.copy(alpha = 0f), Ink, Ink, Stage)
@@ -1323,7 +1381,14 @@ private fun NavIcon(
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
         interactionSource = f.source,
     ) {
-        Icon(icon, contentDescription = label, modifier = Modifier.padding(7.dp).size(20.dp))
+        Box {
+            Icon(icon, contentDescription = label, modifier = Modifier.padding(7.dp).size(20.dp))
+            if (badge > 0) {
+                Box(Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = 1.dp).size(15.dp).background(Plus, CircleShape), contentAlignment = Alignment.Center) {
+                    Text(if (badge > 9) "9+" else "$badge", color = Stage, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
     }
 }
 

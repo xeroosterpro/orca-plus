@@ -34,6 +34,8 @@ internal class PlaybackReporter(
     private val player: Player,
     private val overlay: ProgressOverlay?,
     private val mainItem: MainItem?,
+    /** The server it plays from, for the Message Center. */
+    private val from: String? = null,
 ) : Player.Listener {
     private val session = UUID.randomUUID().toString().replace("-", "")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -92,6 +94,7 @@ internal class PlaybackReporter(
         scope.cancel()
         send(PlayEvent.STOP, paused = true)
         outbox.close()
+        mainItem?.let { m -> runCatching { Inbox.played(m.id, m.seriesId, m.title, m.episode, positionMs, durationMs, from) } }
     }
 
     private fun snapshot() {

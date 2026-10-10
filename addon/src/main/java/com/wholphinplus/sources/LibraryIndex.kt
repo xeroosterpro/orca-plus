@@ -198,6 +198,7 @@ internal class LibraryIndex(
         kind: String,
         start: Int,
         newest: Boolean = false,
+        limit: Int = pageSize(hook),
     ): IndexPage =
         hook.jellyfin
             .get<IndexPage>(
@@ -208,10 +209,13 @@ internal class LibraryIndex(
                         put("includeItemTypes", kind)
                         put("recursive", true)
                         put("startIndex", start)
-                        put("limit", PAGE)
+                        put("limit", limit)
                         put("fields", if (newest) "ProviderIds,DateCreated" else "ProviderIds")
                         put("enableImages", false)
                         put("enableUserData", false)
+                        // The total plans the read. Jellyfin counts by default; said out loud because
+                        // an Emby main server isn't asked to count unless a request says so (EmbyBridge)
+                        if (start == 0) put("enableTotalRecordCount", true)
                         if (newest) {
                             put("sortBy", "DateCreated")
                             put("sortOrder", "Descending")
@@ -231,11 +235,12 @@ internal class LibraryIndex(
         kind: String,
         start: Int,
         total: Int,
+        limit: Int,
     ): IndexPage {
         var tries = 0
         while (true) {
             try {
-                val p = page(hook, userId, kind, start)
+                val p = page(hook, userId, kind, start, limit = limit)
                 // (Empty with a total past it, or with none at all: a library doesn't shrink to nothing mid-read)
                 if (p.items.isEmpty() && (p.total == 0 || p.total > start)) error("Library index: an empty page at $start of $total")
                 return p
@@ -254,6 +259,7 @@ internal class LibraryIndex(
     ): Snapshot {
         val started = System.currentTimeMillis()
         val userId = userId(hook)
+        embyPage = EMBY_PAGE
         // How much there is, for the notice: the first page of each kind says
         val firstPages = KINDS.associateWith { page(hook, userId, it, 0) }
         val total = firstPages.values.sumOf { it.total }
@@ -266,16 +272,23 @@ internal class LibraryIndex(
                 head.titles().forEach(b::add)
                 done += head.items.size
                 _progress.value = Progress(done, total, first)
-                (PAGE until head.total step PAGE).chunked(AT_ONCE).forEach { starts ->
+                // From where the first page ended (on Emby the page size changes as it goes, see [paced])
+                var start = head.items.size
+                while (start < head.total) {
                     // Never while the remote is in use, something plays or Orca+ is in the
                     // background: browsing and the video get the CPU and the network
                     Conductor.whenIdle()
-                    val pages = coroutineScope { starts.map { s -> async { steadyPage(hook, userId, kind, s, head.total) } }.awaitAll() }
+                    val size = pageSize(hook)
+                    val starts = (0 until atOnce(hook)).map { start + it * size }.filter { it < head.total }
+                    val asked = System.currentTimeMillis()
+                    val pages = coroutineScope { starts.map { s -> async { steadyPage(hook, userId, kind, s, head.total, size) } }.awaitAll() }
+                    paced(hook, System.currentTimeMillis() - asked)
                     pages.forEach { p ->
                         p.titles().forEach(b::add)
                         done += p.items.size
                     }
                     _progress.value = Progress(done.coerceAtMost(total), total, first)
+                    start += starts.size * size
                 }
                 b.build()
             }
@@ -441,6 +454,33 @@ internal class LibraryIndex(
         private const val FULL_MS = 7 * DAY_MS
         private const val PAGE = 1000
         private const val AT_ONCE = 4
+
+        // An Emby main server (EmbyBridge): a plain Emby box answered 1,000-title pages four at a
+        // time slowly enough to stop answering anything else (bench, 2026-10-09); gentler there
+        private const val EMBY_PAGE = 200
+        private const val EMBY_AT_ONCE = 1
+
+        private fun emby(hook: SourceHook) = hook.jellyfin.baseUrl?.let(EmbyBridge::isEmby) == true
+
+        // Emby takes about as long for 1,000 titles as for 200 (a 131k-title bench server: 2-7 s either
+        // way), so its pages grow while they come back quickly and shrink when it slows (a slow bench server)
+        @Volatile private var embyPage = EMBY_PAGE
+        private const val GROW_MS = 8_000L
+        private const val SHRINK_MS = 20_000L
+
+        private fun pageSize(hook: SourceHook) = if (emby(hook)) embyPage else PAGE
+
+        private fun atOnce(hook: SourceHook) = if (emby(hook)) EMBY_AT_ONCE else AT_ONCE
+
+        private fun paced(hook: SourceHook, ms: Long) {
+            if (!emby(hook)) return
+            embyPage =
+                when {
+                    ms < GROW_MS -> (embyPage * 2).coerceAtMost(PAGE)
+                    ms > SHRINK_MS -> (embyPage / 2).coerceAtLeast(EMBY_PAGE)
+                    else -> embyPage
+                }
+        }
         private const val NEW_LIMIT = 5000
         private const val FORMAT = 2
         private const val MAX_TITLES = 5_000_000

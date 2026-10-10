@@ -138,7 +138,9 @@ fun CinemaDetails(
         var tries = 0
         while (true) {
             try {
+                val asked = System.currentTimeMillis()
                 val loaded = repo.details(itemId, kind)
+                timber.log.Timber.i("Cinema title page: details in %d ms", System.currentTimeMillis() - asked)
                 // More Like This is loaded on its own (below); a refresh keeps the one already found
                 val known = (DetailsCache[itemId] ?: data)?.similar.orEmpty()
                 val page = loaded.copy(similar = known)
@@ -155,6 +157,7 @@ fun CinemaDetails(
                                 timber.log.Timber.w(e, "More Like This failed for %s", itemId)
                                 return@launch
                             }
+                        timber.log.Timber.i("Cinema title page: More Like This in %d ms", System.currentTimeMillis() - asked)
                         data = data?.copy(similar = similar)?.also { DetailsCache[itemId] = it }
                         // Their badges in one request
                         if (overlays.needsStreams) StreamCache.prefetch(similar.filter { s -> s.kind != BaseItemKind.SERIES }.map { s -> s.id }, repo::streamTagsBatch)

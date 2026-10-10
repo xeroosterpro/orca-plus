@@ -9,7 +9,7 @@
   <a href="LICENSE"><img alt="License GPL-2.0" src="https://img.shields.io/badge/license-GPL--2.0-2563eb?style=flat-square"></a>
 </p>
 
-<h3 align="center">The streaming home your Jellyfin server deserves.</h3>
+<h3 align="center">The streaming home your Jellyfin or Emby server deserves.</h3>
 
 <p align="center">
   Orca+ turns your media servers into a big-screen streaming service: a home that fills itself<br>
@@ -33,7 +33,7 @@
   <tr>
     <td width="33%" valign="top"><b>Ready the moment you sign in</b><br><sub>Trending movies and shows, the streaming Top 10s, new releases, Certified Fresh picks and a seasonal row, matched to <i>your</i> library and refreshed every day.</sub></td>
     <td width="33%" valign="top"><b>Smooth like the big apps</b><br><sub>Hold the remote and the rows glide. Posters load ahead of you while you rest, and the motion never waits for them.</sub></td>
-    <td width="33%" valign="top"><b>Every server, one library</b><br><sub>Add Plex, Emby and other Jellyfin servers. Press Play and Orca+ finds every copy, with the best one for <i>your</i> TV already picked.</sub></td>
+    <td width="33%" valign="top"><b>Every server, one library</b><br><sub>Add Plex, Emby, Jellyfin and Silo servers. Press Play and Orca+ finds every copy, with the best one for <i>your</i> TV already picked. Browse each one in <b>My Servers</b>.</sub></td>
   </tr>
   <tr>
     <td valign="top"><b>Your account on every TV</b><br><sub>Pick an Orca+ name and a PIN. On a new TV, enter both and your servers, rows, lists and progress come back. Or set it up from your phone.</sub></td>
@@ -143,7 +143,7 @@ their own rows, and plain requests just work:
 
 ### Your account, on every TV
 
-A short guided tour connects your Jellyfin server, adds your other servers and sets the look,
+A short guided tour connects your main server, adds your other servers and sets the look,
 with a live preview of your own titles. Then **create your Orca+ account**: an Orca+ name and a
 six-digit PIN. Your whole setup (settings, rows, lists, extra servers, where you left off) is saved
 **encrypted with your PIN** on the TV before it leaves. On another TV, choose *I have an Orca+
@@ -186,7 +186,7 @@ Works on Android TV, Google TV, NVIDIA Shield and Fire TV.
     <td>
       1. Install <b>Downloader</b> (by AFTVnews) from your TV's app store.<br>
       2. Open it and enter <b><code>3075012</code></b>.<br>
-      3. Install, open <b>Orca+</b>, and sign in to your Jellyfin server.
+      3. Install, open <b>Orca+</b>, and sign in to your Jellyfin, Emby or Silo server.
     </td>
   </tr>
 </table>
@@ -195,7 +195,7 @@ Works on Android TV, Google TV, NVIDIA Shield and Fire TV.
 <code>https://github.com/xeroosterpro/orca-plus/releases/latest/download/Wholphin-release.apk</code></sub>
 
 The link always delivers the newest version, and Orca+ offers its own updates from then on.
-You need a **Jellyfin** (or Silo) server to sign in to; Plex and Emby servers can be added after.
+You need a **Jellyfin**, **Emby** (new) or Silo server to sign in to; Plex and other servers can be added after.
 
 <br>
 
@@ -229,8 +229,14 @@ Orca+ works out of the box. Everything else is in **Settings**, organised by wha
 <details>
 <summary><b>Which servers does it work with?</b></summary>
 <br>
-You sign in to a <b>Jellyfin</b> (or Silo) server; that's your main library. Plex, Emby and other
-Jellyfin servers can then be added as extra servers to play from.
+You sign in to a <b>Jellyfin</b>, <b>Emby</b> or Silo server; that's your main library, and it owns
+your home, progress and watched marks. Plex, Emby, Jellyfin and Silo servers can then be added as
+extra servers: when you press Play, Orca+ looks for the same title on them so you can pick the best
+copy. <b>My Servers</b> lets you browse their libraries too (Settings → Servers &amp; Copies turns that off).
+<br><br>
+<b>Emby as the main server is new</b> in this release: sign-in, home, title pages, playback,
+Continue Watching, My List and search all work. Emby can't be found by scanning your network yet:
+type its address. Emby Connect works for extra servers.
 </details>
 
 <details>
@@ -244,7 +250,7 @@ and a PIN you pick) is optional: it saves your setup so another TV can bring it 
 <summary><b>Does it change anything on my servers?</b></summary>
 <br>
 Only what any player does: it reports playback progress to the server it's streaming from. Your main
-Jellyfin server is never modified; progress from other servers is merged inside the app.
+server is never modified; progress from other servers is merged inside the app.
 </details>
 
 <details>

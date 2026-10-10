@@ -31,6 +31,7 @@ data class OrcaSettings(
     val picker: com.wholphinplus.sources.core.PickerPrefs = com.wholphinplus.sources.core.PickerPrefs(),
     val playInfo: com.wholphinplus.sources.PlayInfoPrefs = com.wholphinplus.sources.PlayInfoPrefs(),
     val descriptionTags: com.wholphinplus.sources.cinema.DescriptionTags = com.wholphinplus.sources.cinema.DescriptionTags(),
+    val browseExtras: Boolean = true,
 )
 
 /** Trakt/MDBList lists, Top Streaming charts and their accounts. */
@@ -100,9 +101,9 @@ object ProfileMerge {
      * like (otherwise the new field alone made this TV's settings look edited here, and they
      * overwrote another TV's newer change in the cloud).
      */
-    const val SCHEMA = 3
+    const val SCHEMA = 4
     const val SCHEMA_KEY = "schema"
-    val SETTINGS_ADDED = mapOf("picker" to 2, "playInfo" to 2, "descriptionTags" to 3)
+    val SETTINGS_ADDED = mapOf("picker" to 2, "playInfo" to 2, "descriptionTags" to 3, "browseExtras" to 4)
 
     /** The section hashes, and the schema they were taken with. */
     fun hashes(

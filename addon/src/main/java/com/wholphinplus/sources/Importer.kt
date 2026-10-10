@@ -65,6 +65,8 @@ internal object Importer {
                 Timber.i("Imported TMDB API key")
             }
             root.obj("main")?.let { m ->
+                // An Emby main server signs in without asking its public info first: say so here
+                if (m.string("type").equals("emby", ignoreCase = true)) EmbyBridge.markEmby(normalizeServerUrl(m.string("url")))
                 ImportedLogin(
                     url = normalizeServerUrl(m.string("url")),
                     serverId = m.string("serverId"),

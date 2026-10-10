@@ -19,6 +19,7 @@ release-key/
 .cloud-url
 cloud/.secrets
 .secrets
+.bench-logins.json
 *.env
 .env*
 .publish-blocklist

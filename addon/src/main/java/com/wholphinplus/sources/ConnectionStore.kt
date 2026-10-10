@@ -88,6 +88,19 @@ class ConnectionStore
             _kidsTab.value = on
         }
 
+        private val _browseExtras = MutableStateFlow(prefs.getBoolean(BROWSE_EXTRAS_KEY, true))
+
+        /**
+         * My Servers shows the extra servers' libraries as rows (on), or only the main server's with
+         * the extras as tiles (off: extra servers are then asked only when you press Play).
+         */
+        val browseExtras: StateFlow<Boolean> = _browseExtras.asStateFlow()
+
+        fun setBrowseExtras(on: Boolean) {
+            prefs.edit().putBoolean(BROWSE_EXTRAS_KEY, on).apply()
+            _browseExtras.value = on
+        }
+
         private val _posterSize = MutableStateFlow(prefs.getString(POSTER_SIZE_KEY, null) ?: com.wholphinplus.sources.cinema.PosterSize.AUTO)
 
         /**
@@ -305,6 +318,7 @@ class ConnectionStore
                 picker = _pickerPrefs.value,
                 playInfo = _playInfoPrefs.value,
                 descriptionTags = _descriptionTags.value,
+                browseExtras = _browseExtras.value,
             )
 
         /** A cloud profile's settings, through the usual setters so every screen follows. */
@@ -320,6 +334,7 @@ class ConnectionStore
             if (s.picker != _pickerPrefs.value) setPickerPrefs(s.picker)
             if (s.playInfo != _playInfoPrefs.value) setPlayInfoPrefs(s.playInfo)
             if (s.descriptionTags != _descriptionTags.value) setDescriptionTags(s.descriptionTags)
+            if (s.browseExtras != _browseExtras.value) setBrowseExtras(s.browseExtras)
             if (s.overlays != _overlays.value) setOverlays(s.overlays)
             if (s.ratings != _ratingPrefs.value) setRatingPrefs(s.ratings)
             com.wholphinplus.sources.cinema.RowsPage.entries.forEach { page -> if (s.layouts[page] != _pageLayouts.value[page]) setPageLayout(page, s.layouts[page]) }
@@ -375,6 +390,7 @@ class ConnectionStore
             const val ROLL_UP_KEY = "cinema_roll_up"
             const val SHUFFLE_LOCKS_KEY = "shuffle_locks"
             const val KIDS_TAB_KEY = "kids_tab"
+            const val BROWSE_EXTRAS_KEY = "browse_extras"
             const val PICKER_KEY = "picker_prefs"
             const val PLAY_INFO_KEY = "play_info_prefs"
             const val POSTER_SIZE_KEY = "poster_size"

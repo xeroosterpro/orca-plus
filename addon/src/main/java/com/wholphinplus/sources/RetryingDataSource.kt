@@ -32,7 +32,7 @@ class RetryingDataSource(
 
     override fun open(dataSpec: DataSpec): Long =
         withRetries(isTransient = { e -> isTransient(e).also { if (it) StreamHealth.failed((e as? HttpDataSource.InvalidResponseCodeException)?.responseCode) } }, sleep = sleep, onRetry = { attempt, e ->
-            Timber.w("Stream open failed (%s), try %d: %s", LogScrub.text(e.message), attempt + 1, dataSpec.uri.path)
+            Timber.w("Stream open failed (%s), try %d: %s", LogScrub.text(e.message), attempt + 1, if (attempt == 0) LogScrub.text(dataSpec.uri.toString()) else dataSpec.uri.path)
             try {
                 upstream.close()
             } catch (_: IOException) {

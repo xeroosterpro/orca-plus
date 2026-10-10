@@ -109,7 +109,12 @@ data class CinemaRow(
      * before takes its place ([withPreviousRows]); never drawn.
      */
     val failed: Boolean = false,
+    /** The server whose library this row is (the My Servers tab): [SERVER_MAIN] or an extra server's connection id. */
+    val server: String? = null,
 )
+
+/** [CinemaRow.server] of the main server's rows. */
+internal const val SERVER_MAIN = "main"
 
 /**
  * Where a row's titles come from, so it can keep loading and be shuffled. [seed]: a shuffled
@@ -122,6 +127,8 @@ data class RowSource(
     val spec: HomeRowSpec,
     val seed: Long? = null,
     val next: Int = 0,
+    /** An extra server's library row (My Servers): its connection id; [spec]'s ref is the library. */
+    val server: String? = null,
 ) {
     /** Its "always shuffle" switch, per page. */
     val lockKey: String get() = page.name + "|" + spec.key
@@ -134,16 +141,20 @@ class RowPage(
     val end: Boolean,
 )
 
-/** A service's, genre's or decade's tile; it opens that page (with its Movies or Shows side first). */
+/** A service's, genre's, decade's or server's tile; it opens that page (with its Movies or Shows side first). */
 @androidx.compose.runtime.Immutable
 @Serializable
 data class PageTile(
     val id: String,
     val name: String,
-    /** "service", "genre" or "decade". */
+    /** "service", "genre", "decade" or "server". */
     val kind: String,
     val logoUrl: String?,
     val pictureUrl: String?,
+    /** A server tile's line under its name ("3 libraries", or why it's left out). */
+    val note: String? = null,
+    /** A server tile's software ([com.wholphinplus.sources.core.ServerKind] name), for its logo. */
+    val brand: String? = null,
 ) {
     val service: Boolean get() = kind == "service"
 }
@@ -690,9 +701,164 @@ internal class CinemaRepository(
         offset: Int,
     ): RowPage =
         withContext(Dispatchers.IO) {
+            if (source.server != null) return@withContext serverRowPage(source, offset)
             val (items, end) = fetch(source.spec, source.page, userId(), offset, source.seed)
             RowPage(items.filter { fits(source.page, it) }.map(::toItem), offset + PAGE, end)
         }
+
+    /**
+     * The My Servers tab: a tile per server (the main one first, then the extra servers in
+     * Settings order), then each server's movie and show libraries as rows, newest first. An
+     * extra server's titles open the main server's page when it has them too, else its copies.
+     * [onUpdate] gets the page as it fills: tiles and placeholder rows at once, each row as its
+     * library answers (a slow server held the whole tab blank for ~15 s).
+     */
+    suspend fun serversPage(onUpdate: (CinemaHomeData) -> Unit = {}): CinemaHomeData =
+        withContext(Dispatchers.IO) {
+            val userId = userId()
+            val gate = kotlinx.coroutines.sync.Semaphore(4)
+            val mainName = com.wholphinplus.sources.ServerBrands.mainName()
+            // Off: extra servers show as tiles only and aren't asked (they're for Play's copies)
+            val browse = hook.store.browseExtras.value
+            val extras =
+                hook.searchableConnections().map { c ->
+                    c to if (browse) c.collections.filter { it.enabled && it.type.lowercase() in VIDEO_LIBRARIES } else emptyList()
+                }
+
+            // One slot per library, in the order shown; its row once loaded (null: empty or failed)
+            class Slot(val key: String, val server: String, val name: String) {
+                @Volatile var title = name
+                @Volatile var done = false
+                @Volatile var row: CinemaRow? = null
+                @Volatile var failed = false
+                // Answered 401/403: its sign-in ran out (said so on the tile, not "couldn't reach it")
+                @Volatile var signIn = false
+            }
+            val lock = Any()
+            var mainSlots: List<Slot>? = null
+            var featured: List<CinemaItem>? = null
+            val extraSlots = extras.map { (c, libs) -> c to libs.map { Slot("${c.connectionId}:${it.id}", c.connectionId, "${c.plainName} · ${it.name}") } }
+            val resting = extras.associate { (c, _) -> c.connectionId to hook.health.resting(c) }
+
+            fun build(final: Boolean): CinemaHomeData =
+                synchronized(lock) {
+                    val main = mainSlots
+                    val all = main.orEmpty() + extraSlots.flatMap { it.second }
+                    // Row titles are the rows' keys on screen: two servers with one name stay apart
+                    val seen = HashMap<String, Int>()
+                    all.forEach { slot ->
+                        val n = seen.merge(slot.name, 1, Int::plus)!!
+                        slot.title = if (n == 1) slot.name else "${slot.name} ($n)"
+                    }
+                    val rows =
+                        all.mapNotNull { slot ->
+                            when {
+                                slot.server != SERVER_MAIN && resting[slot.server] != null -> null
+                                slot.done -> slot.row?.copy(title = slot.title)
+                                final -> null
+                                else -> CinemaRow(slot.title, emptyList(), loading = true, server = slot.server)
+                            }
+                        }
+                    fun note(server: String, slots: List<Slot>?): String? {
+                        resting[server]?.let { return "⚠ " + it.trouble?.reason.orEmpty() }
+                        if (slots == null) return null
+                        if (server != SERVER_MAIN && !browse) return "copies when you press Play"
+                        if (slots.isNotEmpty() && slots.all { it.done && it.failed }) return if (slots.any { it.signIn }) "⚠ sign-in expired" else "⚠ couldn't reach it"
+                        return libraries(slots.size)
+                    }
+                    val tiles =
+                        listOf(PageTile(serverTileId(SERVER_MAIN), mainName, "server", null, null, note = note(SERVER_MAIN, main), brand = com.wholphinplus.sources.ServerBrands.mainKind().name)) +
+                            extraSlots.map { (c, slots) -> PageTile(serverTileId(c.connectionId), c.plainName, "server", null, null, note = note(c.connectionId, slots), brand = c.serverKind.name) }
+                    // The billboard: titles from the first rows in (the main server's when it has
+                    // some), picked once so it doesn't change under the remote as rows fill in
+                    val picks =
+                        featured ?: rows.filter { !it.loading }.sortedBy { if (it.server == SERVER_MAIN) 0 else 1 }
+                            .flatMap { it.items.take(4) }.filter { it.backdropUrl != null }.take(8).shuffled().takeIf { it.isNotEmpty() }
+                    featured = picks
+                    CinemaHomeData(
+                        featured = picks.orEmpty(),
+                        rows = listOf(CinemaRow("Your servers", emptyList(), tiles = tiles)) + rows,
+                        shows = null,
+                        movies = null,
+                    )
+                }
+
+            // Told at most every 400 ms while rows come in, so the screen isn't rebuilt per row
+            var told = 0L
+            fun tell(force: Boolean = false) {
+                val now = System.currentTimeMillis()
+                if (!force && now - told < 400) return
+                told = now
+                onUpdate(build(final = false))
+            }
+
+            coroutineScope {
+                val loads =
+                    extraSlots.flatMap { (c, slots) ->
+                        if (resting[c.connectionId] != null) return@flatMap emptyList()
+                        val libs = extras.first { it.first.connectionId == c.connectionId }.second
+                        slots.zip(libs).map { (slot, lib) ->
+                            async {
+                                gate.withPermit {
+                                    try {
+                                        val got = hook.client.libraryTitles(c, lib.id, 0, PAGE)
+                                        slot.row =
+                                            CinemaRow(
+                                                slot.name,
+                                                got.map { ServerTitles.item(c, it) },
+                                                source = if (got.size < PAGE) null else RowSource(RowsPage.HOME, HomeRowSpec(HomeRowType.LIBRARY, ref = lib.id), next = PAGE, server = c.connectionId),
+                                                server = c.connectionId,
+                                            ).takeIf { it.items.isNotEmpty() }
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        Timber.w("My Servers: %s failed: %s", slot.name, e.message)
+                                        slot.failed = true
+                                        slot.signIn = (e as? com.wholphinplus.sources.core.ServerRequestException)?.statusCode in setOf(401, 403)
+                                    }
+                                    slot.done = true
+                                    tell()
+                                }
+                            }
+                        }
+                    }
+                // The main server's libraries, as the Home rows read them: first in line, but the
+                // tiles and the extra servers' placeholders show without waiting for its list
+                val views = async { safe { api.userViewsApi.getUserViews(userId = userId).content.items } }
+                if (withTimeoutOrNull(1_500) { views.await() } == null) tell(force = true)
+                val libs = views.await()
+                val video = libs.filter { it.collectionType == null || it.collectionType == CollectionType.MOVIES || it.collectionType == CollectionType.TVSHOWS }
+                val slots = video.map { Slot("$SERVER_MAIN:${it.id}", SERVER_MAIN, "$mainName · ${it.name.orEmpty()}") }
+                synchronized(lock) { mainSlots = slots }
+                tell(force = true)
+                val mainLoads =
+                    slots.zip(video).map { (slot, lib) ->
+                        async {
+                            gate.withPermit {
+                                val spec = HomeRowSpec(HomeRowType.LIBRARY, ref = lib.id.toString())
+                                val (items, end) = fetch(spec, RowsPage.HOME, userId, 0, null)
+                                slot.row =
+                                    CinemaRow(slot.name, items.map(::toItem), source = if (end) null else RowSource(RowsPage.HOME, spec, next = PAGE), server = SERVER_MAIN)
+                                        .takeIf { it.items.isNotEmpty() }
+                                slot.done = true
+                                tell()
+                            }
+                        }
+                    }
+                (loads + mainLoads).awaitAll()
+            }
+            build(final = true)
+        }
+
+    /** The next page of an extra server's library row. */
+    private fun serverRowPage(
+        source: RowSource,
+        offset: Int,
+    ): RowPage {
+        val c = hook.connectionFor(source.server.orEmpty()) ?: return RowPage(emptyList(), offset, true)
+        val got = hook.client.libraryTitles(c, source.spec.ref, offset, PAGE, random = source.seed != null)
+        return RowPage(got.map { ServerTitles.item(c, it) }, offset + PAGE, source.seed == null && got.size < PAGE)
+    }
 
     /** A list row's size: its titles in the library (null for other rows). */
     private fun listTotal(spec: HomeRowSpec): Int? =
@@ -1523,6 +1689,8 @@ internal class CinemaRepository(
      */
     suspend fun streamTagsOf(id: UUID): StreamTags? =
         withContext(Dispatchers.IO) {
+            // An extra server's title (My Servers): the main server doesn't know its id
+            if (ServerTitles.of(id) != null) return@withContext null
             runCatching { streamTags(api.userLibraryApi.getItem(id, userId()).content.mediaStreams) }.getOrNull()
         }
 
@@ -1534,6 +1702,7 @@ internal class CinemaRepository(
      */
     suspend fun streamTagsBatch(ids: List<UUID>): Map<UUID, StreamTags> =
         withContext(Dispatchers.IO) {
+            @Suppress("NAME_SHADOWING") val ids = ids.filter { ServerTitles.of(it) == null }
             if (ids.isEmpty()) return@withContext emptyMap()
             val started = System.currentTimeMillis()
             val items = itemsByIds(ids, userId(), "MediaStreams")
@@ -1809,6 +1978,11 @@ internal class CinemaRepository(
 
         /** Titles per page when a row loads more. */
         const val PAGE = 40
+
+        /** Extra servers' library types the My Servers tab shows (Emby/Jellyfin; Plex; "" = mixed). */
+        private val VIDEO_LIBRARIES = setOf("movies", "tvshows", "", "mixed", "movie", "show")
+
+        private fun libraries(n: Int) = if (n == 1) "1 library" else "$n libraries"
 
         /** Rows that keep loading as you browse (and can be shuffled): not Top 10s or Continue Watching. */
         val PAGED =

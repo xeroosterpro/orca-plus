@@ -97,7 +97,7 @@ data class WelcomeUser(
 // ======================================================================== intro + server
 
 /**
- * First launch, before any server: the grand entrance, then choosing the Jellyfin server.
+ * First launch, before any server: the grand entrance, then choosing the main server.
  * Wholphin's own server code does the work through [onPick] / [onAddress].
  */
 @Composable
@@ -223,7 +223,7 @@ private fun Intro(onStart: (returning: Boolean) -> Unit) {
         Column(Modifier.graphicsLayer { alpha = rest.value; translationY = (1f - rest.value) * 16.dp.toPx() }, horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Every library you love. One beautiful home.", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(10.dp))
-            Text("STARTS WITH YOUR JELLYFIN OR SILO SERVER  ·  ADD EMBY, PLEX AND MORE", color = InkDim, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
+            Text("STARTS WITH YOUR JELLYFIN, EMBY OR SILO SERVER  ·  ADD PLEX AND MORE", color = InkDim, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
             Spacer(Modifier.height(36.dp))
             // The fastest way in: the phone (owner, 2026-10-08), beside the two doors on this TV: a
             // guided setup, or bringing a saved setup back with the sync PIN
@@ -270,7 +270,8 @@ private fun ServerStep(
         wrongKind = null
         if (error != null && address.isNotBlank()) {
             val kind = withContext(Dispatchers.IO) { runCatching { hook.client.fetchPublicInfo(com.wholphinplus.sources.core.normalizeServerUrl(address.trim())).serverKind }.getOrNull() }
-            wrongKind = kind?.takeIf { it == ServerKind.EMBY || it == ServerKind.PLEX }
+            // Emby is welcome as the main server (EmbyBridge); Plex isn't
+            wrongKind = kind?.takeIf { it == ServerKind.PLEX }
         }
     }
     val connect = { url: String ->
@@ -349,7 +350,7 @@ private fun ServerStep(
                     val kind = wrongKind
                     if (kind != null) {
                         Text("That's ${if (kind == ServerKind.PLEX) "a Plex" else "an Emby"} server", color = Color(0xFFFFC46B), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                        Text("Your main server needs to be Jellyfin or Silo. Connect that here, then add your ${if (kind == ServerKind.PLEX) "Plex" else "Emby"} server once you're signed in.", color = InkDim, fontSize = 13.sp, lineHeight = 18.sp)
+                        Text("Your main server needs to be Jellyfin, Emby or Silo. Connect that here, then add your ${if (kind == ServerKind.PLEX) "Plex" else "Emby"} server once you're signed in.", color = InkDim, fontSize = 13.sp, lineHeight = 18.sp)
                     } else {
                         Text("Couldn't connect to that server", color = Color(0xFFFF8A80), fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Text("Check the address and that the server is switched on. Orca+ tried it with and without https and the usual ports.", color = InkDim, fontSize = 13.sp, lineHeight = 18.sp)
@@ -412,10 +413,10 @@ fun WelcomeSignIn(
                 StepHeader(
                     eyebrow,
                     "Sign in to ${serverName.ifBlank { "your server" }}",
-                    if (quickEnabled) "Approve the code from your phone and Orca+ carries on by itself. Or sign in with your password." else "Sign in with your Jellyfin username and password.",
+                    if (quickEnabled) "Approve the code from your phone and Orca+ carries on by itself. Or sign in with your password." else "Sign in with your username and password.",
                 )
                 if (quickEnabled && quickCode != null) {
-                    CodeDisplay(quickCode, "On your phone or computer open Jellyfin, go to your profile, then Quick Connect, and enter this code.")
+                    CodeDisplay(quickCode, "On your phone or computer open your server (Jellyfin or Silo), go to your profile, then Quick Connect, and enter this code.")
                 }
             }
             GlassPanel(Modifier.weight(0.58f)) {
@@ -705,7 +706,7 @@ private fun LibrariesStep(
         StepHeader(
             tourStep(TourStop.SERVERS, "OPTIONAL"),
             "Add more servers",
-            "You're in. Add Emby, Plex, or another Jellyfin or Silo server, and Orca+ finds every title wherever it lives: press Play and pick the best copy. You can do this later in Settings too.",
+            "You're in. Add Plex, or another Jellyfin, Emby or Silo server, and Orca+ finds every title wherever it lives: press Play and pick the best copy. You can do this later in Settings too.",
             Modifier.weight(0.42f),
         )
         GlassPanel(Modifier.weight(0.58f)) {
@@ -1125,7 +1126,7 @@ private fun Outro(onFinished: () -> Unit) {
 @Composable
 private fun ServerRoles() {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        RoleRow("MAIN SERVER", listOf("Jellyfin" to Violet, "Silo" to Color(0xFF3D8BD8)))
+        RoleRow("MAIN SERVER", listOf("Jellyfin" to Violet, "Emby" to Color(0xFF52B54B), "Silo" to Color(0xFF3D8BD8)))
         RoleRow("ADD AFTERWARDS", listOf("Emby" to Color(0xFF52B54B), "Plex" to Color(0xFFE5A00D), "Jellyfin" to Violet, "Silo" to Color(0xFF3D8BD8)))
     }
 }
@@ -1190,7 +1191,7 @@ fun WelcomeServerChoice(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     servers.forEachIndexed { i, sv ->
                         ChoiceCard(
-                            title = sv.name.ifBlank { "Jellyfin server" },
+                            title = sv.name.ifBlank { "Your server" },
                             subtitle = sv.address,
                             subtitleOneLine = true,
                             glyph = sv.name.firstOrNull()?.uppercase() ?: "J",
@@ -1207,7 +1208,7 @@ fun WelcomeServerChoice(
                     }
                     ChoiceCard(
                         title = "Add a server",
-                        subtitle = "Another Jellyfin or Silo server, by address",
+                        subtitle = "Another Jellyfin, Emby or Silo server, by address",
                         glyph = "+",
                         accent = Indigo,
                         modifier = if (servers.isEmpty()) Modifier.focusRequester(first) else Modifier,

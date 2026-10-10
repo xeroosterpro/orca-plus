@@ -169,7 +169,6 @@ fun CinemaHome(
     modifier: Modifier = Modifier,
 ) {
     val openTitle = guarded(onOpen)
-    @Suppress("NAME_SHADOWING") val onPlay = guarded(onPlay)
     val context = LocalContext.current
     val entry = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java) }
     val hook = remember { entry.sourceHook() }
@@ -185,10 +184,52 @@ fun CinemaHome(
     val lookingUp = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
     // D-pad presses so far (counted by the screen's key handler below)
     val moves = remember { java.util.concurrent.atomic.AtomicInteger(0) }
+    // An extra server's title (My Servers): the main server's page when it has it too, else
+    // its copies on the extra servers (as search does for titles not in the library)
+    val search = remember { entry.searchService() }
+    var copiesOf by remember { mutableStateOf<com.wholphinplus.sources.core.TmdbItem?>(null) }
+    val playTitle = guarded(onPlay)
+    // [play]: from a Play button: a movie the main server has plays at once (a show opens its page)
+    val openElsewhere: (ServerTitles.Title, Boolean) -> Unit =
+        remember(openTitle, playTitle) {
+            { elsewhere, play ->
+                    if (lookingUp[0]?.isActive != true) {
+                        val moved = moves.get()
+                        lookingUp[0] =
+                            openScope.launch {
+                                val t = elsewhere.title
+                                val tmdbId =
+                                    t.tmdbId ?: kotlinx.coroutines.withTimeoutOrNull(EPISODE_LOOKUP_MS) {
+                                        runCatching { search.search(t.name) }.getOrNull()?.items?.firstOrNull { r ->
+                                            (r.type == com.wholphinplus.sources.core.TmdbType.TV) == t.series &&
+                                                (t.year == null || r.year == null || kotlin.math.abs(r.year - t.year) <= 1) &&
+                                                com.wholphinplus.sources.core.Matcher.normalizeTitle(r.title) == com.wholphinplus.sources.core.Matcher.normalizeTitle(t.name)
+                                        }?.id
+                                    }
+                                if (moves.get() != moved) return@launch
+                                if (tmdbId == null) {
+                                    android.widget.Toast.makeText(context, "Orca+ couldn't tell which title this is", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@launch
+                                }
+                                val item = ServerTitles.tmdbItem(t, tmdbId)
+                                when (val a = kotlinx.coroutines.withTimeoutOrNull(10_000L) { runCatching { search.availability(item) }.getOrNull() }) {
+                                    is com.wholphinplus.sources.Availability.Library ->
+                                        if (moves.get() == moved) {
+                                            if (play && !a.series) playTitle(a.itemId, 0L) else openTitle(a.itemId, if (a.series) BaseItemKind.SERIES else BaseItemKind.MOVIE)
+                                        }
+                                    else -> if (moves.get() == moved) copiesOf = item
+                                }
+                            }
+                    }
+            }
+        }
     @Suppress("NAME_SHADOWING") val onOpen: (UUID, BaseItemKind) -> Unit =
-        remember(openTitle, repo) {
+        remember(openTitle, repo, openElsewhere) {
             { id, kind ->
-                if (kind != BaseItemKind.EPISODE) {
+                val elsewhere = ServerTitles.of(id)
+                if (elsewhere != null) {
+                    openElsewhere(elsewhere, false)
+                } else if (kind != BaseItemKind.EPISODE) {
                     openTitle(id, kind)
                 } else if (lookingUp[0]?.isActive != true) {
                     val moved = moves.get()
@@ -204,6 +245,11 @@ fun CinemaHome(
     DisposableEffect(Unit) { onDispose { art.save() } }
     remember { StreamCache.attach(context) }
     remember { PageSnapshots.attach(context) }
+
+    // Play on an extra server's title (a server page's billboard) opens it as OK does: the main
+    // server's page, or its copies
+    @Suppress("NAME_SHADOWING") val onPlay: (UUID, Long) -> Unit =
+        remember(playTitle, openElsewhere) { { id, at -> ServerTitles.of(id)?.let { openElsewhere(it, true) } ?: playTitle(id, at) } }
 
     // The tab you were on survives a trip to a details page and back
     var tab by rememberSaveable { mutableStateOf(CinemaTab.HOME) }
@@ -270,7 +316,7 @@ fun CinemaHome(
                         if (i >= ON_SCREEN_ROWS) Conductor.whenQuiet()
                         row.items.take(8).forEach { item -> item.tmdbId?.let { id -> launch { art.art(item.tmdbTv, id) } } }
                         if (overlays.needsStreams) {
-                            val ids = row.items.filter { item -> item.kind != BaseItemKind.SERIES }.map { item -> item.id }
+                            val ids = row.items.filter { item -> item.kind != BaseItemKind.SERIES && row.server.let { it == null || it == SERVER_MAIN } }.map { item -> item.id }
                             if (i < ON_SCREEN_ROWS) StreamCache.prefetch(ids, repo::streamTagsBatch) else Conductor.later { StreamCache.prefetch(ids, repo::streamTagsBatch) }
                         }
                     }
@@ -290,7 +336,7 @@ fun CinemaHome(
                 Unit
             }
             errors.remove(tab)
-            if (pages[tab] == null && tab != CinemaTab.MY_LIST) {
+            if (pages[tab] == null && tab !in PageSnapshots.UNSAVED) {
                 PageSnapshots.read(tab, repo::owner)?.let { saved ->
                     // The app's first screen: a moment for the first rows' pictures, so it opens whole
                     if (pages[tab] == null) StartWarmup.once(context, saved, art, overlays)
@@ -310,6 +356,16 @@ fun CinemaHome(
                     CinemaTab.MOVIES -> repo.load(RowsPage.MOVIES, onFirst, previous)
                     CinemaTab.NEW_POPULAR -> repo.load(RowsPage.NEW_POPULAR, onFirst, previous)
                     CinemaTab.KIDS -> repo.load(RowsPage.KIDS, onFirst, previous)
+                    // Shown as it fills (tiles and placeholders at once); a page already up stays until the load is done
+                    CinemaTab.SERVERS ->
+                        repo.serversPage { d ->
+                            launch {
+                                if (pages[tab] == null || partial) {
+                                    pages[tab] = d
+                                    partial = true
+                                }
+                            }
+                        }
                     CinemaTab.MY_LIST -> CinemaHomeData(emptyList(), listOf(CinemaRow("My List", repo.myList())), null, null)
                 }
             }
@@ -331,7 +387,7 @@ fun CinemaHome(
                         val next =
                             when {
                                 tab in fromDevice && shown != null -> page.over(shown)
-                                shown == null || partial || shown.rows.any { it.loading } || tab == CinemaTab.MY_LIST -> page
+                                shown == null || partial || shown.rows.any { it.loading } || tab == CinemaTab.MY_LIST || tab == CinemaTab.SERVERS -> page
                                 // In their places, keeping the billboard and the random rows on screen
                                 // (a reload for rows that failed brings them back the same way)
                                 gained || rowRetries > 0 -> page.over(shown)
@@ -453,7 +509,7 @@ fun CinemaHome(
             RowActions(
                 load = { source, at ->
                     repo.more(source, at).also { p ->
-                        if (overlays.needsStreams) StreamCache.prefetch(p.items.filter { it.kind != BaseItemKind.SERIES }.map { it.id }, repo::streamTagsBatch)
+                        if (overlays.needsStreams && source.server == null) StreamCache.prefetch(p.items.filter { it.kind != BaseItemKind.SERIES }.map { it.id }, repo::streamTagsBatch)
                     }
                 },
                 locks = shuffleLocks,
@@ -582,34 +638,67 @@ fun CinemaHome(
                     .focusGroup(),
             ) {
                 CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf), LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings, LocalRowActions provides rowActions) {
-                    CloudPageView(
-                        id,
-                        pageSeries,
-                        { pageSeries = it },
-                        repo,
-                        onOpen,
-                        onPlay,
-                        onClose = {
-                            openPage = null
-                            returning = true
-                        },
-                        rollUp = rollUp,
-                        lastInput = lastInput,
-                        covered = underGrid,
-                    )
+                    if (serverOfTile(id) != null) {
+                        // A server's tile (My Servers): its libraries
+                        ServerPageView(
+                            id,
+                            pages[CinemaTab.SERVERS],
+                            onOpen,
+                            onPlay,
+                            onClose = {
+                                openPage = null
+                                returning = true
+                            },
+                            rollUp = rollUp,
+                            lastInput = lastInput,
+                            covered = underGrid,
+                        )
+                    } else {
+                        CloudPageView(
+                            id,
+                            pageSeries,
+                            { pageSeries = it },
+                            repo,
+                            onOpen,
+                            onPlay,
+                            onClose = {
+                                openPage = null
+                                returning = true
+                            },
+                            rollUp = rollUp,
+                            lastInput = lastInput,
+                            covered = underGrid,
+                        )
+                    }
                 }
             }
         }
         // Back from a See all opened on a page: focus back on that row's See all
         var pageReturning by remember { mutableStateOf(false) }
-        LaunchedEffect(grid == null, pageReturning) {
+        // The row the See all was of: its buttons are only built while the row has focus, so when
+        // See all can't take focus back, the card that was focused in the grid does (focus was
+        // left on nothing and the remote did nothing)
+        var gridRow by remember { mutableStateOf<RowState?>(null) }
+        // Keyed on the grid alone: clearing [pageReturning] below restarted an effect keyed on it
+        // too, cancelling it before it moved focus (Back from See all on a page left focus on nothing)
+        LaunchedEffect(grid == null) {
             if (grid != null || !pageReturning) return@LaunchedEffect
             pageReturning = false
             val back = ReturnFocus.grid
             ReturnFocus.grid = null
-            for (i in 0 until 20) {
+            val row = gridRow
+            gridRow = null
+            for (i in 0 until 10) {
                 withFrameNanos {}
-                if (back != null && runCatching { back.requestFocus() }.getOrDefault(false)) break
+                if (back != null && runCatching { back.requestFocus() }.getOrDefault(false)) return@LaunchedEffect
+            }
+            if (row == null) return@LaunchedEffect
+            val key = (row.items.getOrNull(row.gridAt) ?: row.items.firstOrNull())?.key ?: return@LaunchedEffect
+            row.returnKey = key
+            for (i in 0 until 30) {
+                withFrameNanos {}
+                if (runCatching { row.cardFocus.requestFocus() }.getOrDefault(false)) return@LaunchedEffect
+                if (i == 3) runCatching { row.reveal?.invoke(key) }
             }
         }
         // After the page, so its Back comes first
@@ -618,6 +707,7 @@ fun CinemaHome(
                 OpenGrid.state = null
                 grid = null
                 if (openPage != null) {
+                    gridRow = state
                     pageReturning = true
                 } else {
                     ReturnFocus.target = ReturnFocus.grid
@@ -635,6 +725,8 @@ fun CinemaHome(
             LibraryNotice(hook)
             PosterNotice()
         }
+        // An extra server's title the main server doesn't have: its copies
+        copiesOf?.let { com.wholphinplus.sources.ui.TitleSheet(it, search, onDismiss = { copiesOf = null }) }
     }
 }
 
@@ -777,10 +869,11 @@ enum class CinemaTab(
     MOVIES("Movies"),
     NEW_POPULAR("New & Popular"),
     KIDS("Kids"),
+    SERVERS("My Servers"),
     MY_LIST("My List"),
 }
 
-/** The rows page a tab shows (My List has none). */
+/** The rows page a tab shows (My Servers and My List have none). */
 private val CinemaTab.rowsPage: RowsPage?
     get() =
         when (this) {
@@ -789,7 +882,7 @@ private val CinemaTab.rowsPage: RowsPage?
             CinemaTab.MOVIES -> RowsPage.MOVIES
             CinemaTab.NEW_POPULAR -> RowsPage.NEW_POPULAR
             CinemaTab.KIDS -> RowsPage.KIDS
-            CinemaTab.MY_LIST -> null
+            CinemaTab.SERVERS, CinemaTab.MY_LIST -> null
         }
 
 internal val TopNavHeight = 54.dp
@@ -2166,6 +2259,9 @@ private object TabCache {
  */
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 internal object PageSnapshots {
+    /** Tabs never saved: My List is quick, My Servers' extra-server titles mean nothing after a restart ([ServerTitles]). */
+    val UNSAVED = setOf(CinemaTab.MY_LIST, CinemaTab.SERVERS)
+
     @kotlinx.serialization.Serializable
     private class Saved(
         val owner: String,
@@ -2215,7 +2311,7 @@ internal object PageSnapshots {
         whose: () -> String?,
         page: CinemaHomeData,
     ) {
-        if (tab == CinemaTab.MY_LIST) return
+        if (tab in UNSAVED) return
         Conductor.later {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 val owner = whose() ?: return@withContext
@@ -2281,6 +2377,13 @@ internal object CinemaCaches {
         }
         RowMemory.trim { it == "tab:${CinemaTab.HOME.name}" }
         trimDetails()
+    }
+
+    /** My Servers' rows changed (its extra servers switched on or off): it loads afresh next time it shows. */
+    fun serversChanged() {
+        TabCache.data.remove(CinemaTab.SERVERS)
+        TabCache.at.remove(CinemaTab.SERVERS)
+        RowMemory.trim { it != "tab:${CinemaTab.SERVERS.name}" && !it.startsWith("server:") }
     }
 
     /** The rows were rearranged: every tab loads afresh next time it shows. */

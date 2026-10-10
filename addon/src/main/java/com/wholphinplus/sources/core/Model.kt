@@ -181,3 +181,20 @@ enum class PlayEvent {
     PROGRESS,
     STOP,
 }
+
+/** A movie or show in one library of an extra server (the My Servers tab). */
+data class LibraryTitle(
+    val id: String,
+    val name: String,
+    val year: Int?,
+    val series: Boolean,
+    val overview: String,
+    val tmdbId: Int?,
+    val imdbId: String?,
+    val minutes: Int?,
+    val seasons: Int?,
+    val backdropUrl: String?,
+    val cardUrl: String?,
+    val posterUrl: String?,
+    val cardHasTitleArt: Boolean = false,
+)

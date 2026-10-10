@@ -115,4 +115,39 @@ class ServerClientTest {
         assertTrue(got[1].played)
         assertEquals("tt1160419", got[1].request.imdbId)
     }
+
+    @Test fun `emby library titles newest first, file names cleaned, tmdb id from the name`() {
+        val page =
+            """{"Items":[
+            {"Id":"1","Name":"Rise (2022) {imdb-tt13531468} {tmdb-771077}","Type":"Movie","ProductionYear":2022,"RunTimeTicks":60000000000,
+             "BackdropImageTags":["b1"],"ImageTags":{"Primary":"p1"}},
+            {"Id":"2","Name":"Severance","Type":"Series","ProductionYear":2022,"ChildCount":2,"ProviderIds":{"Tmdb":"95396"},"ImageTags":{"Thumb":"t2"}}]}"""
+        val c = client(mapOf("/Users/u1/Items" to page))
+        val got = c.libraryTitles(emby, "lib9", 40, 40)
+        assertTrue(requests.single(), requests.single().contains("ParentId=lib9") && requests.single().contains("StartIndex=40") && requests.single().contains("SortBy=DateCreated"))
+        assertEquals("Rise", got[0].name)
+        assertEquals(771077, got[0].tmdbId)
+        assertEquals(100, got[0].minutes)
+        assertEquals("http://emby.local:8096/Items/1/Images/Backdrop/0?maxWidth=480&quality=90&tag=b1&api_key=tok", got[0].cardUrl)
+        assertTrue(got[1].series)
+        assertEquals(95396, got[1].tmdbId)
+        assertEquals(2, got[1].seasons)
+        assertTrue(got[1].cardHasTitleArt)
+    }
+
+    @Test fun `plex library titles read the section with paging and keep only movies and shows`() {
+        val plex =
+            ServerConnection(connectionId = "plex", serverUrl = "http://plex.local:32400", serverName = "Server B", serverKind = ServerKind.PLEX, userId = "plex", accessToken = "ptok")
+        val page =
+            """{"MediaContainer":{"Metadata":[
+            {"ratingKey":"7","type":"movie","title":"Heat","year":1995,"duration":10200000,"art":"/library/metadata/7/art/1","Guid":[{"id":"tmdb://949"}]},
+            {"ratingKey":"8","type":"collection","title":"Box"}]}}"""
+        val c = client(mapOf("/library/sections/3/all" to page))
+        val got = c.libraryTitles(plex, "3", 0, 40)
+        assertTrue(requests.single(), requests.single().contains("sort=addedAt:desc") && requests.single().contains("X-Plex-Container-Size=40"))
+        assertEquals(1, got.size)
+        assertEquals(949, got[0].tmdbId)
+        assertEquals(170, got[0].minutes)
+        assertTrue(got[0].cardUrl.orEmpty(), got[0].cardUrl.orEmpty().startsWith("http://plex.local:32400/photo/:/transcode?width=480") && got[0].cardUrl.orEmpty().contains("X-Plex-Token=ptok"))
+    }
 }

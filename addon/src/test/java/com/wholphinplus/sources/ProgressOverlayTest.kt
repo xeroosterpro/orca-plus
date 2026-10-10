@@ -77,6 +77,17 @@ class ProgressOverlayTest {
         assertTrue(body, body.indexOf("Supergirl") in 0 until body.indexOf("11111111111111111111111111111111"))
     }
 
+    @Test fun `continue watching shows a title kept as two copies once`() {
+        val o = ProgressOverlay(null, null)
+        fun ep(id: String, series: String) = """{"Id":"$id","Type":"Episode","SeriesName":"The Sopranos","SeriesId":"$series","ParentIndexNumber":4,"IndexNumber":6,"UserData":{"PlaybackPositionTicks":5,"LastPlayedDate":"$iso"}}"""
+        fun movie(id: String, tmdb: String) = """{"Id":"$id","Type":"Movie","Name":"Midway","ProviderIds":{"Tmdb":"$tmdb"},"UserData":{"PlaybackPositionTicks":5,"LastPlayedDate":"$iso"}}"""
+        val resume = """{"Items":[${ep("2958892", "2956108")},${ep("7276961", "7274392")},${movie("6250989", "522162")},${movie("7000001", "522162")},${movie("7000002", "10000")}]}"""
+        val c = client(o, mapOf("/UserItems/Resume" to resume))
+        val body = get(c, "https://emby.test/UserItems/Resume?userId=u&limit=24")
+        assertTrue(body, body.contains("2958892") && !body.contains("7276961"))
+        assertTrue(body, body.contains("6250989") && !body.contains("7000001") && body.contains("7000002"))
+    }
+
     @Test fun `next up switches to the episode after one finished elsewhere`() {
         val o = ProgressOverlay(null, null)
         o.record("e10", ProgressOverlay.Entry(0, true, now, "s1", "Silo"))

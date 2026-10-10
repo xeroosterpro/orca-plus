@@ -85,7 +85,7 @@ fun SourcePickerOverlay(session: PickSession) {
                     contentPadding = PaddingValues(vertical = 8.dp),
                     modifier = Modifier.heightIn(max = 520.dp),
                 ) {
-                    itemsIndexed(current.rows, key = { _, row -> row.connectionId + row.url }) { index, row ->
+                    itemsIndexed(current.rows.distinctBy { com.wholphinplus.sources.copyKey(it) }, key = { _, row -> com.wholphinplus.sources.copyKey(row) }) { index, row ->
                         SourceRow(
                             row = row,
                             best = index == 0 && !current.searching && current.rows.size > 1,

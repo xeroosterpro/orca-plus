@@ -323,14 +323,15 @@ class ProgressOverlay internal constructor(
             // with nothing kept here
             val oneSeries = if (isNextUp) param(request.url, "seriesId") else null
             val gone = dismissals()
-            if (entries.isEmpty() && oneSeries == null && gone.isEmpty()) return response
+            // /UserItems/Resume (Jellyfin 10.9+, what Wholphin calls) or /Users/{id}/Items/Resume
+            val isResume = path.endsWith("Items/Resume", ignoreCase = true)
+            // (Continue Watching always: one title kept as several copies is shown once, see [mergeResume])
+            if (entries.isEmpty() && oneSeries == null && gone.isEmpty() && !isResume) return response
             // Asked without watch data (the library index's 1,000-title pages): nothing to merge,
             // and copying and scanning them would undo what makes them light
             if ((request.url.queryParameter("enableUserData") ?: request.url.queryParameter("EnableUserData")).equals("false", true)) return response
             val type = response.body.contentType()
             if (type?.subtype?.contains("json") != true) return response
-            // /UserItems/Resume (Jellyfin 10.9+, what Wholphin calls) or /Users/{id}/Items/Resume
-            val isResume = path.endsWith("Items/Resume", ignoreCase = true)
             val text = response.body.string()
             val rebuilt = { body: String -> response.newBuilder().body(body.toResponseBody(type)).build() }
             if (!isResume && !isNextUp && !mentionsAny(text, entries)) return rebuilt(text)
@@ -568,8 +569,29 @@ class ProgressOverlay internal constructor(
                     // Watched elsewhere since: drop from Continue Watching
                     .filterNot { (it["UserData"] as? JsonObject)?.get("Played")?.let { p -> (p as JsonPrimitive).content == "true" } == true }
                     .sortedByDescending { lastPlayedOf(it) }
+                    // A server with a 4K and a 1080p library has each show twice, and its own
+                    // Continue Watching lists both copies of the episode (a bench Emby server: six such pairs)
+                    .distinctBy(::titleKey)
             val limit = limitOf(request) ?: merged.size
             return JsonObject(obj + ("Items" to JsonArray(merged.take(limit))))
+        }
+
+        /** The same title on any copy: the episode of the show by name, a movie by its database ids or name and year. */
+        internal fun titleKey(item: JsonObject): String {
+            val type = str(item, "Type")
+            val number = { name: String -> (item[name] as? JsonPrimitive)?.content?.toIntOrNull() }
+            val series = str(item, "SeriesName")?.lowercase()
+            if (type == "Episode" && series != null) {
+                val season = number("ParentIndexNumber")
+                val episode = number("IndexNumber")
+                if (season != null && episode != null) return "episode|$series|$season|$episode"
+            }
+            if (type == "Movie") {
+                val ids = item["ProviderIds"] as? JsonObject
+                listOf("Tmdb", "Imdb").firstNotNullOfOrNull { k -> ids?.let { str(it, k) }?.let { "movie|$k|$it" } }?.let { return it }
+                str(item, "Name")?.let { return "movie|${it.lowercase()}|${number("ProductionYear")}" }
+            }
+            return "id|" + (str(item, "Id")?.let(::norm) ?: item.hashCode())
         }
 
         /** [root]'s Items without the titles removed from Continue Watching ([dismiss]). */

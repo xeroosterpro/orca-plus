@@ -124,7 +124,11 @@ private fun PageTileCard(
         colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
         modifier = Modifier.width(width).aspectRatio(16f / 9f).focusRequester(self).glideLift(onFocused = onFocused).tapToClick { open() },
     ) {
-        if (tile.service) ServiceFace(tile, width) else GenreFace(tile)
+        when {
+            tile.service -> ServiceFace(tile, width)
+            tile.kind == "server" -> ServerFace(tile)
+            else -> GenreFace(tile)
+        }
     }
 }
 

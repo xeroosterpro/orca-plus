@@ -166,7 +166,7 @@ private fun AddChoices(
         StepHeader(
             "EXTRA SERVERS",
             "Add a server",
-            "Emby, Plex, or another Jellyfin or Silo server. Orca+ then finds every title on it: press Play and pick the best copy." +
+            "Plex, or another Jellyfin, Emby or Silo server. Orca+ then finds every title on it: press Play and pick the best copy." +
                 if (phone) " Easiest: fill it in on your phone." else "",
             Modifier.weight(0.42f),
         )

@@ -179,9 +179,12 @@ class SourceHook
         internal fun mainConnection(): ServerConnection? {
             val url = jellyfin.baseUrl?.let(::normalizeServerUrl) ?: return null
             val token = jellyfin.accessToken ?: return null
-            val shell = ServerConnection(serverUrl = url, serverKind = ServerKind.JELLYFIN, accessToken = token, serverName = "main")
+            // An Emby main server (EmbyBridge) is asked the Emby way
+            val shell = ServerConnection(serverUrl = url, serverKind = if (EmbyBridge.isEmby(url)) ServerKind.EMBY else ServerKind.JELLYFIN, accessToken = token, serverName = "main")
             val userId =
-                mainUserId?.takeIf { it.first == token }?.second
+                // An Emby main server has no "who am I": the sign-in told EmbyBridge
+                (if (shell.serverKind == ServerKind.EMBY) EmbyBridge.userOf(token) else null)
+                    ?: mainUserId?.takeIf { it.first == token }?.second
                     ?: mainUserPrefs.getString("user_id", null)?.takeIf { mainUserPrefs.getString("sign_in", null) == signInKey(token) }
                         ?.also { mainUserId = token to it }
                     ?: runCatching { client.currentUserId(shell) }

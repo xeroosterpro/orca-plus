@@ -70,4 +70,7 @@ object ServerBrands {
 
     /** The main server's address, for its brand. */
     fun mainUrl(): String = AccountActions.who()?.url.orEmpty()
+
+    /** The main server's kind for its logo: Emby when [EmbyBridge] found it so, else Jellyfin (Silo is told by [check]). */
+    fun mainKind(): ServerKind = if (EmbyBridge.isEmby(mainUrl())) ServerKind.EMBY else ServerKind.JELLYFIN
 }

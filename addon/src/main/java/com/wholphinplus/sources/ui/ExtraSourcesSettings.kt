@@ -382,9 +382,29 @@ fun OrcaTopicItems(
                 SettingsHeader("Your servers")
                 MenuItem(
                     "Extra servers",
-                    if (connections.isEmpty()) "Play from your Plex, Emby and other Jellyfin servers" else "${connections.count { it.enabled }} of ${connections.size} servers on",
+                    if (connections.isEmpty()) "Play from your other Plex, Emby, Jellyfin and Silo servers" else "${connections.count { it.enabled }} of ${connections.size} servers on",
                     firstModifier,
                 ) { open = Screen.List }
+                if (connections.any { it.enabled }) {
+                    val browse by hook.store.browseExtras.collectAsState()
+                    PlusListItem(
+                        onClick = {
+                            hook.store.setBrowseExtras(!browse)
+                            com.wholphinplus.sources.cinema.CinemaCaches.serversChanged()
+                        },
+                        headlineContent = { Text("Browse them in My Servers", style = MaterialTheme.typography.titleMedium) },
+                        supportingContent = {
+                            Text(
+                                if (browse) {
+                                    "On: My Servers shows each extra server's libraries too (they're asked while the tab is open)"
+                                } else {
+                                    "Off: My Servers shows your main server only; extra servers are asked only when you press Play"
+                                },
+                            )
+                        },
+                        trailingContent = { androidx.tv.material3.Switch(checked = browse, onCheckedChange = null, colors = com.wholphinplus.sources.ui.plusSwitchColors()) },
+                    )
+                }
                 // The TMDB key (search) lives in Keys & Services with every other key
                 if (connections.any { it.enabled }) PickerTuning(hook)
             }
@@ -896,10 +916,10 @@ private fun ExtraSourcesScreen(
                 Screen.TraktKey -> "Trakt" to "Your Trakt lists as rows on Home. Trakt needs a free Client ID of your own."
                 Screen.Collections, is Screen.AddCollection, is Screen.Collection ->
                     "Your lists" to "MDBList, Trakt and Top Streaming lists as rows on your home screen. They follow the list as it changes " +
-                        "(checked every 6 hours) and show the titles you have on your Jellyfin server."
+                        "(checked every 6 hours) and show the titles you have on your main server."
                 else ->
                     "Extra servers" to "When you press Play, these servers are searched for the same title and you pick where to " +
-                        "stream from. Watched status and resume stay on your Jellyfin."
+                        "stream from. Watched status and resume stay on your main server."
             }
         SettingsPageHeader(title, about)
         busy?.let { Text("$it…", color = MaterialTheme.colorScheme.primary) }
@@ -1256,7 +1276,7 @@ private fun MenuScreen(
             MenuItem(
                 "Extra sources",
                 if (connections.isEmpty()) {
-                    "Play from your Plex, Emby and other Jellyfin servers"
+                    "Play from your other Plex, Emby, Jellyfin and Silo servers"
                 } else {
                     "${connections.count { it.enabled }} of ${connections.size} servers on"
                 },

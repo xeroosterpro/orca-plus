@@ -300,7 +300,7 @@ private fun CopyRow(
                     val own = r.connectionId == com.wholphinplus.sources.SourceHook.JELLYFIN_ROW
                     // The server's logo and its own name (never "Your server")
                     val brandUrl = if (own) com.wholphinplus.sources.ServerBrands.mainUrl() else r.url
-                    val brandKind = if (own) com.wholphinplus.sources.core.ServerKind.JELLYFIN else r.serverKind
+                    val brandKind = if (own) com.wholphinplus.sources.ServerBrands.mainKind() else r.serverKind
                     val brand by androidx.compose.runtime.produceState(com.wholphinplus.sources.ServerBrands.known(brandKind, brandUrl), brandUrl) {
                         value = com.wholphinplus.sources.ServerBrands.check(brandKind, brandUrl)
                     }

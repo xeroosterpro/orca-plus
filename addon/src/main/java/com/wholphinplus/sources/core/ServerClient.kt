@@ -311,6 +311,110 @@ class ServerClient(
                 }
         }
 
+    /**
+     * One page of a library's movies and shows, newest first (or in random order), for the My
+     * Servers tab. Picture addresses carry the server's own key (only that server is asked).
+     */
+    fun libraryTitles(
+        connection: ServerConnection,
+        collectionId: String,
+        start: Int,
+        limit: Int,
+        random: Boolean = false,
+    ): List<LibraryTitle> {
+        val base = connection.serverUrl.trimEnd('/')
+        if (connection.isPlex) {
+            val root =
+                getJson(
+                    endpoint(
+                        connection.serverUrl,
+                        "library/sections/$collectionId/all",
+                        "sort" to if (random) "random" else "addedAt:desc",
+                        "includeGuids" to "1",
+                        "X-Plex-Container-Start" to start,
+                        "X-Plex-Container-Size" to limit,
+                    ),
+                    connection,
+                )
+            val token = connection.accessToken
+            fun picture(path: String, width: Int, height: Int): String? =
+                path.takeIf { it.isNotBlank() }?.let {
+                    endpoint(base, "photo/:/transcode", "width" to width, "height" to height, "minSize" to 1, "url" to it, "X-Plex-Token" to token).toString()
+                }
+            return root.array("MediaContainer", "Metadata").filterIsInstance<JsonObject>().mapNotNull { o ->
+                val series = o.string("type") == "show"
+                if (!series && o.string("type") != "movie") return@mapNotNull null
+                val ids = plexItem(o).providerIds
+                LibraryTitle(
+                    id = o.string("ratingKey").ifBlank { return@mapNotNull null },
+                    name = cleanTitle(o.string("title")),
+                    year = o.int("year"),
+                    series = series,
+                    overview = o.string("summary"),
+                    tmdbId = ids["tmdb"]?.toIntOrNull() ?: tmdbInName(o.string("title")),
+                    imdbId = ids["imdb"],
+                    minutes = o.long("duration")?.let { (it / 60_000L).toInt() }?.takeIf { !series && it > 0 },
+                    seasons = o.int("childCount")?.takeIf { series && it > 0 },
+                    backdropUrl = picture(o.string("art"), 1280, 720),
+                    cardUrl = picture(o.string("art"), 480, 270),
+                    posterUrl = picture(o.string("thumb"), 320, 480),
+                )
+            }
+        }
+        val token = connection.accessToken
+        val items =
+            getJson(
+                endpoint(
+                    connection.serverUrl,
+                    "Users/${connection.userId}/Items",
+                    "ParentId" to collectionId,
+                    "Recursive" to "true",
+                    "IncludeItemTypes" to "Movie,Series",
+                    "SortBy" to if (random) "Random" else "DateCreated,SortName",
+                    "SortOrder" to "Descending",
+                    "Fields" to "ProviderIds,ProductionYear,Overview,ChildCount",
+                    "EnableImageTypes" to "Primary,Backdrop,Thumb",
+                    "ImageTypeLimit" to 1,
+                    "EnableUserData" to "false",
+                    "StartIndex" to if (random) null else start,
+                    "Limit" to limit,
+                ),
+                connection,
+            ).objects("Items")
+        fun image(id: String, type: String, tag: String?, width: Int): String? =
+            tag?.takeIf { it.isNotBlank() }?.let { "$base/Items/$id/Images/$type?maxWidth=$width&quality=90&tag=$it&api_key=$token" }
+        return items.mapNotNull { o ->
+            val id = o.string("Id").ifBlank { return@mapNotNull null }
+            val series = o.string("Type") == "Series"
+            val tags = o.obj("ImageTags")
+            val backdrop = o.array("BackdropImageTags").firstOrNull()?.let { (it as? JsonPrimitive)?.content }
+            val ids = providerIds(o)
+            LibraryTitle(
+                id = id,
+                name = cleanTitle(o.string("Name")),
+                year = o.int("ProductionYear"),
+                series = series,
+                overview = o.string("Overview"),
+                tmdbId = ids["tmdb"]?.toIntOrNull() ?: tmdbInName(o.string("Name")),
+                imdbId = ids["imdb"],
+                minutes = o.long("RunTimeTicks")?.let { (it / 600_000_000L).toInt() }?.takeIf { !series && it > 0 },
+                seasons = o.int("ChildCount")?.takeIf { series && it > 0 },
+                // A file the server never identified ("Rise (2022) {tmdb-…}") can carry some other
+                // title's backdrop: the billboard uses TMDB's then (cards already prefer TMDB's)
+                backdropUrl = image(id, "Backdrop/0", backdrop, 1280).takeUnless { cleanTitle(o.string("Name")) != o.string("Name") && tmdbInName(o.string("Name")) != null },
+                cardUrl = image(id, "Thumb", tags?.string("Thumb"), 480) ?: image(id, "Backdrop/0", backdrop, 480),
+                posterUrl = image(id, "Primary", tags?.string("Primary"), 320),
+                cardHasTitleArt = tags?.string("Thumb").isNullOrBlank().not(),
+            )
+        }
+    }
+
+    /** A title the server never matched shows its file name: "Rise (2022) {imdb-tt…} {tmdb-771077}" → "Rise". */
+    private fun cleanTitle(name: String): String =
+        name.replace(Regex("""\{[^}]*\}|\[[^\]]*\]"""), " ").replace(Regex("""\(\d{4}\)"""), " ").replace(Regex("""\s+"""), " ").trim().ifBlank { name }
+
+    private fun tmdbInName(name: String): Int? = Regex("""\{tmdb-(\d+)\}""").find(name)?.groupValues?.get(1)?.toIntOrNull()
+
     // ---- Plex sign-in ----
 
     fun startPlexPin(serverUrl: String): CodeLogin {

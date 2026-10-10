@@ -30,7 +30,7 @@ index 582e000a2..4b93d14e5 100644
          android:supportsRtl="true"
          android:theme="@style/Theme.Wholphin"
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
-index 62f0e39b4..9ffe86fca 100644
+index 62f0e39b4..74c96f876 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 @@ -31,6 +31,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -41,7 +41,7 @@ index 62f0e39b4..9ffe86fca 100644
  import com.github.damontecres.wholphin.preferences.AppPreferences
  import com.github.damontecres.wholphin.preferences.PlayerBackend
  import com.github.damontecres.wholphin.services.AppUpgradeHandler
-@@ -429,9 +430,30 @@ class MainActivityViewModel
+@@ -429,9 +430,31 @@ class MainActivityViewModel
          private val backdropService: BackdropService,
          private val appUpgradeHandler: AppUpgradeHandler,
          private val intentService: IntentService,
@@ -56,6 +56,7 @@ index 62f0e39b4..9ffe86fca 100644
 +                switchUser = { viewModelScope.launch { serverRepository.current.value?.server?.let { s -> serverRepository.switchServerOrUser(); serverRepository.closeSession(); setupNavigationManager.navigateTo(SetupDestination.UserList(s)) } } }, // Orca+
 +                signOut = { viewModelScope.launch { serverRepository.current.value?.user?.let { u -> serverRepository.removeUser(u) }; setupNavigationManager.navigateTo(SetupDestination.ServerList) } }, // Orca+
 +            ) // Orca+
++            viewModelScope.launch { serverRepository.current.collect { cur -> cur?.user?.let { u -> com.wholphinplus.sources.EmbyBridge.remember(u.accessToken, u.id.toString()) } } } // Orca+: an Emby main server's "who am I"
 +            viewModelScope.launch { // Orca+: Direct play Dolby Vision profile 7 on once for installs from before it was the default
 +                if (com.wholphinplus.sources.OrcaDefaults.firstTime(context, "dv_profile7_on")) preferences.updateData { it.updatePlaybackOverrides { directPlayDolbyVisionEL = true } } // Orca+
 +            } // Orca+
@@ -72,7 +73,7 @@ index 62f0e39b4..9ffe86fca 100644
          fun appStart(intent: Intent?) {
              viewModelScope.launchDefault {
                  mutex.withLock {
-@@ -489,6 +511,7 @@ class MainActivityViewModel
+@@ -489,6 +512,7 @@ class MainActivityViewModel
                      try {
                          val needUpgrade = appUpgradeHandler.needUpgrade()
                          if (needUpgrade) {
@@ -80,7 +81,7 @@ index 62f0e39b4..9ffe86fca 100644
                              showToast(
                                  context,
                                  context.getString(
-@@ -499,6 +522,27 @@ class MainActivityViewModel
+@@ -499,6 +523,28 @@ class MainActivityViewModel
                              appUpgradeHandler.run()
                          }
                          appUpgradeHandler.copySubfont(false)
@@ -88,6 +89,7 @@ index 62f0e39b4..9ffe86fca 100644
 +                        sourceHook.takeImportedLogin()?.let { login ->
 +                            val serverId = login.serverId.toUUIDOrNull()
 +                            val userId = login.userId.toUUIDOrNull()
++                            com.wholphinplus.sources.EmbyBridge.remember(login.token, login.userId) // Orca+: an Emby main server's "who am I"
 +                            if (serverId != null && userId != null) {
 +                                try {
 +                                    serverRepository.changeUser(
@@ -108,7 +110,7 @@ index 62f0e39b4..9ffe86fca 100644
                          val prefs =
                              preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()
                          val profileProtected =
-@@ -507,10 +551,12 @@ class MainActivityViewModel
+@@ -507,10 +553,12 @@ class MainActivityViewModel
                                  ?.isProtected == true
                          if (prefs.signInAutomatically && !profileProtected) {
                              val current =
@@ -125,7 +127,7 @@ index 62f0e39b4..9ffe86fca 100644
                              if (current != null) {
                                  if (current.user.isProtected) {
                                      setupNavigationManager.navigateTo(
-@@ -567,7 +613,8 @@ class MainActivityViewModel
+@@ -567,7 +615,8 @@ class MainActivityViewModel
                  mutex.withLock {
                      try {
                          Timber.v("Updating userDto")
@@ -492,7 +494,7 @@ index 8c2d84cbc..b62e37bd0 100644
                  }
              }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
-index 06607cf98..aa4eda490 100644
+index 06607cf98..ced89cf34 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/hilt/AppModule.kt
 @@ -94,6 +94,8 @@ object AppModule {
@@ -519,15 +521,24 @@ index 06607cf98..aa4eda490 100644
                      request
                          .newBuilder()
                          .addHeader(
-@@ -130,7 +135,11 @@ object AppModule {
+@@ -124,13 +129,19 @@ object AppModule {
+                         ).build()
+                 }
+             it.proceed(newRequest ?: request)
+-        }.build()
++        }.addInterceptor(com.wholphinplus.sources.EmbyBridge) // Orca+: pictures and video from an Emby main server
++        .build()
+ 
+     @Provides
      @Singleton
      fun okHttpFactory(
          @StandardOkHttpClient okHttpClient: OkHttpClient,
 -    ) = CoroutineContextApiClientFactory(OkHttpFactory(okHttpClient))
 +        progressOverlay: com.wholphinplus.sources.ProgressOverlay,
++        @ApplicationContext context: Context, // Orca+
 +    ) = CoroutineContextApiClientFactory(
 +        // Orca+: merge progress from the extra servers into the main server's answers
-+        OkHttpFactory(okHttpClient.newBuilder().addInterceptor(progressOverlay).build()),
++        OkHttpFactory(okHttpClient.newBuilder().addInterceptor(progressOverlay).addInterceptor(com.wholphinplus.sources.EmbyBridge.also { it.init(context) }).build()), // Orca+: an Emby main server, inside the progress overlay
 +    )
  
      @Provides
@@ -796,7 +807,7 @@ index 6ed210a2d..5189c542d 100644
      }
  }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
-index 79d2ae579..425a49610 100644
+index 79d2ae579..cc54bb2e1 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
 @@ -152,6 +152,7 @@ class PlaybackViewModel
@@ -889,10 +900,19 @@ index 79d2ae579..425a49610 100644
                      val mediaUrl =
 -                        if (source.supportsDirectPlay) {
 +                        // Orca+: play the picked source's own URL
-+                        sourcePicker.urlFor(itemId) ?: if (source.supportsDirectPlay) {
++                        (sourcePicker.urlFor(itemId) ?: if (source.supportsDirectPlay) {
                              if (source.isRemote && source.path.isNotNullOrBlank()) {
                                  Timber.i("Playback is remote for source: %s", source.id)
                                  source.path
+@@ -701,7 +725,7 @@ class PlaybackViewModel
+                             source.transcodingUrl?.let(api::createUrl)
+                         } else {
+                             source.transcodingUrl?.let(api::createUrl)
+-                        }
++                        })?.let { com.wholphinplus.sources.EmbyBridge.forPlayer(it, api.accessToken) } // Orca+: an Emby main server's own ids and key
+                     if (mediaUrl.isNullOrBlank()) {
+                         _state.update {
+                             it.copy(
 @@ -715,6 +739,9 @@ class PlaybackViewModel
                      }
                      val transcodeType =
@@ -903,6 +923,15 @@ index 79d2ae579..425a49610 100644
  //                        playerBackend == PlayerBackend.MPV -> PlayMethod.DIRECT_PLAY
                              source.supportsDirectPlay -> PlayMethod.DIRECT_PLAY
  
+@@ -737,7 +764,7 @@ class PlaybackViewModel
+                                 if (it.isDefault) flags = flags.or(C.SELECTION_FLAG_DEFAULT)
+                                 MediaItem.SubtitleConfiguration
+                                     .Builder(
+-                                        api.createUrl(deliveryUrl).toUri(),
++                                        com.wholphinplus.sources.EmbyBridge.forPlayer(api.createUrl(deliveryUrl), api.accessToken).toUri(), // Orca+: an Emby main server's own ids and key
+                                     ).setId("e:${it.index}")
+                                     .setMimeType(subtitleMimeTypes[it.codec])
+                                     .setLanguage(it.language)
 @@ -790,7 +817,7 @@ class PlaybackViewModel
                              ?.firstOrNull { it.type == MediaStreamType.VIDEO }
                              ?.let { stream ->
@@ -1739,10 +1768,10 @@ index a96ab8fe2..db4ae70c6 100644
                      verticalArrangement = Arrangement.SpaceBetween,
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
 new file mode 100644
-index 000000000..234dd950e
+index 000000000..b0ab54366
 --- /dev/null
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,286 @@
 +package com.github.damontecres.wholphin.ui.setup
 +
 +import android.Manifest
@@ -1904,6 +1933,7 @@ index 000000000..234dd950e
 +) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
 +    val serverId = login.serverId.toUUIDOrNull() ?: error("Your setup's server sign-in is damaged. Sign in with your server instead.")
 +    val userId = login.userId.toUUIDOrNull() ?: error("Your setup's server sign-in is damaged. Sign in with your server instead.")
++    com.wholphinplus.sources.EmbyBridge.remember(login.token, login.userId) // an Emby main server's "who am I"
 +    val saved = viewModel.jellyfin.createApi(baseUrl = login.url, accessToken = login.token)
 +    val me =
 +        try {

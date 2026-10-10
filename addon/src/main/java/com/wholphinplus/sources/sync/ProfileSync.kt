@@ -435,8 +435,8 @@ class ProfileSync
         }
 
         private suspend fun identity(hook: SourceHook): String {
-            val main = hook.mainConnection() ?: error("Sign in to your Jellyfin server first")
-            val serverId = hook.mainServerId() ?: error("Your Jellyfin server didn't answer")
+            val main = hook.mainConnection() ?: error("Sign in to your main server first")
+            val serverId = hook.mainServerId() ?: error("Your main server didn't answer")
             return ProfileCrypto.profileId(serverId, main.userId)
         }
 

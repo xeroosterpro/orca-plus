@@ -380,6 +380,8 @@ data class PickerUi(
     val failed: Set<String> = emptySet(),
     // Servers with no copy of this, and why (listed under the copies)
     val misses: List<Miss> = emptyList(),
+    // The copy on screen ([copyKey]) when the player's "Play from another server" opened the list
+    val playing: String? = null,
 )
 
 /** A server the picker found nothing on: [trouble] null means it answered, it just hasn't this title. */
@@ -547,10 +549,12 @@ class PickSession internal constructor(
         subtitleIndex: Int?,
     ) {
         mainTracks[itemId] = MainTracks(audioIndex, subtitleIndex)
+        if (mainSource != null) mainSources[itemId] = mainSource else mainSources.remove(itemId)
         if (!isExternal(itemId)) return restoreTracks()
         val streams = mainSource?.mediaStreams.orEmpty()
         val audio = streams.firstOrNull { it.type == MediaStreamType.AUDIO && it.index == audioIndex }
         val subtitle = streams.firstOrNull { it.type == MediaStreamType.SUBTITLE && it.index == subtitleIndex }
+        wanted[itemId] = Wanted(audio?.language, subtitle?.let { WantedText(it.language, it.isForced, it) })
         runCatching {
             if (tracksPlayer !== player) {
                 savedParams = player.trackSelectionParameters
@@ -559,6 +563,218 @@ class PickSession internal constructor(
             val base = savedParams ?: player.trackSelectionParameters
             player.trackSelectionParameters = externalTrackParams(base, audio?.language, subtitle != null, subtitle?.language)
         }.onFailure { Timber.w(it, "Could not set track languages") }
+    }
+
+    // ------------------------------------------------------------ subtitles and sound in another server's file
+
+    /** A subtitle chosen on the main copy, as what it means in any file: a language (forced or not). */
+    private class WantedText(
+        val language: String?,
+        val forced: Boolean,
+        val main: org.jellyfin.sdk.model.api.MediaStream,
+    )
+
+    private class Wanted(
+        val audioLanguage: String?,
+        val text: WantedText?,
+    )
+
+    private val wanted = ConcurrentHashMap<UUID, Wanted>()
+    private val mainSources = ConcurrentHashMap<UUID, org.jellyfin.sdk.model.api.MediaSourceInfo>()
+
+    /**
+     * The separate subtitle file to load with an extra server's copy of [itemId], if the wanted
+     * subtitle isn't inside the file: that server's own file in the language, else (same cut
+     * only) the main server's. [mainUrl] turns the main server's delivery path into a playable
+     * address. Empty for the main copy, subtitles off, or a track the file carries itself.
+     */
+    fun sidecarsFor(
+        itemId: UUID,
+        mainUrl: (String) -> String,
+    ): List<androidx.media3.common.MediaItem.SubtitleConfiguration> {
+        val copy = chosen[itemId] ?: return emptyList()
+        val text = wanted[itemId]?.text ?: return emptyList()
+        return listOfNotNull(sidecar(copy, text, mainSources[itemId], mainUrl))
+    }
+
+    private fun sidecar(
+        copy: ExternalSource,
+        text: WantedText,
+        mainSource: org.jellyfin.sdk.model.api.MediaSourceInfo?,
+        mainUrl: (String) -> String,
+    ): androidx.media3.common.MediaItem.SubtitleConfiguration? {
+        val inLanguage = copy.subtitles.filter { Lang.same(it.language, text.language) }
+        // In the file itself: the player's language preference takes it, nothing to add
+        if (inLanguage.any { it.url == null }) return null
+        val own = inLanguage.filter { it.url != null }.sortedByDescending { it.forced == text.forced }.firstOrNull()
+        if (own != null) {
+            return subtitleConfig(own.url!!, "srt", text.language, own.title, own.forced)
+        }
+        // Unknown tracks (the lookup said nothing): don't guess, the file may carry it
+        if (copy.subtitles.isEmpty() && copy.serverKind == ServerKind.PLEX) return null
+        // The main server's separate file, when the main copy is the same cut (runtime within 1%)
+        val main = text.main
+        val path = main.deliveryUrl?.takeIf { main.isExternal || main.deliveryMethod == org.jellyfin.sdk.model.api.SubtitleDeliveryMethod.EXTERNAL } ?: return null
+        val mainTicks = mainSource?.runTimeTicks ?: 0L
+        if (copy.runTimeTicks > 0 && mainTicks > 0 && kotlin.math.abs(copy.runTimeTicks - mainTicks) > mainTicks / 100) return null
+        val ext = path.substringBefore('?').substringAfterLast('.', "srt")
+        return subtitleConfig(mainUrl(path), ext, text.language, main.displayTitle ?: main.title.orEmpty(), main.isForced)
+    }
+
+    private fun subtitleConfig(
+        url: String,
+        ext: String,
+        language: String?,
+        label: String,
+        forced: Boolean,
+    ): androidx.media3.common.MediaItem.SubtitleConfiguration {
+        val mime =
+            when (ext.lowercase()) {
+                "vtt", "webvtt" -> androidx.media3.common.MimeTypes.TEXT_VTT
+                "ass", "ssa" -> androidx.media3.common.MimeTypes.TEXT_SSA
+                "ttml", "xml" -> androidx.media3.common.MimeTypes.APPLICATION_TTML
+                else -> androidx.media3.common.MimeTypes.APPLICATION_SUBRIP
+            }
+        return androidx.media3.common.MediaItem.SubtitleConfiguration
+            .Builder(android.net.Uri.parse(url))
+            .setId(SIDECAR_ID)
+            .setMimeType(mime)
+            .setLanguage(language)
+            .setLabel(label)
+            .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or if (forced) androidx.media3.common.C.SELECTION_FLAG_FORCED else 0)
+            .build()
+    }
+
+    /**
+     * The subtitle menu while an extra server's copy plays (on the main thread). The menu lists the
+     * main copy's tracks, whose numbers mean nothing in this file: Wholphin then restarted the
+     * stream, which froze on the owner's Shield (2026-10-11, a movie from an extra server). Now the choice
+     * becomes a language: a track in the file is switched to at once; otherwise the separate file
+     * is added and the stream reopened where it was (the one case that has to reload).
+     * [index] is the main copy's track (negative: off). Always handled here.
+     */
+    fun changeSubtitle(
+        player: androidx.media3.common.Player,
+        itemId: UUID,
+        index: Int?,
+        mainUrl: (String) -> String,
+    ) {
+        val main = mainSources[itemId]?.mediaStreams?.firstOrNull { it.type == MediaStreamType.SUBTITLE && it.index == index }
+        val text = main?.let { WantedText(it.language, it.isForced, it) }
+        wanted[itemId] = Wanted(wanted[itemId]?.audioLanguage, text)
+        val params = player.trackSelectionParameters.buildUpon().clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT)
+        if (text == null) {
+            player.trackSelectionParameters = params.setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build()
+            Timber.i("Extra copy subtitles: off")
+            return
+        }
+        params.setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
+            .setPreferredTextLanguage(text.language?.let(Lang::code))
+            .setSelectUndeterminedTextLanguage(true)
+        val group = textGroup(player.currentTracks, text)
+        if (group != null) {
+            player.trackSelectionParameters = params.setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, 0)).build()
+            Timber.i("Extra copy subtitles: %s from the file (no reload)", text.language)
+            return
+        }
+        player.trackSelectionParameters = params.build()
+        val copy = chosen[itemId] ?: return
+        val sidecar = sidecar(copy, text, mainSources[itemId], mainUrl)
+        val current = player.currentMediaItem
+        if (sidecar == null || current == null) {
+            Timber.i("Extra copy subtitles: no %s track in this copy", text.language)
+            return
+        }
+        val position = player.currentPosition
+        val playing = player.playWhenReady
+        player.setMediaItem(current.buildUpon().setSubtitleConfigurations(listOf(sidecar)).build(), position)
+        player.prepare()
+        player.playWhenReady = playing
+        Timber.i("Extra copy subtitles: %s from a separate file, stream reopened at %d s", text.language, position / 1000)
+    }
+
+    /** The text track in [tracks] that fits [text]: its language, forced when forced was asked. */
+    private fun textGroup(
+        tracks: androidx.media3.common.Tracks,
+        text: WantedText,
+    ): androidx.media3.common.Tracks.Group? {
+        val groups =
+            tracks.groups.filter { g ->
+                g.type == androidx.media3.common.C.TRACK_TYPE_TEXT && g.length > 0 && g.isTrackSupported(0) &&
+                    Lang.same(g.getTrackFormat(0).language, text.language)
+            }
+        fun forced(g: androidx.media3.common.Tracks.Group) =
+            g.getTrackFormat(0).selectionFlags and androidx.media3.common.C.SELECTION_FLAG_FORCED != 0 ||
+                g.getTrackFormat(0).label?.contains("forced", ignoreCase = true) == true
+        return groups.firstOrNull { forced(it) == text.forced } ?: groups.firstOrNull()
+    }
+
+    /** The languages on screen when the player's switch button changed copies, for the next copy's choice. */
+    private class Carry(
+        val audio: String?,
+        val text: WantedText?,
+    )
+
+    private val carry = ConcurrentHashMap<UUID, Carry>()
+
+    /** Before [chooseAgain]'s copy plays: what's on screen now ([source]'s track numbers), as languages. */
+    fun carryTracks(
+        itemId: UUID,
+        source: org.jellyfin.sdk.model.api.MediaSourceInfo,
+        audioIndex: Int,
+        subtitleIndex: Int,
+    ) {
+        val streams = source.mediaStreams.orEmpty()
+        val audio = streams.firstOrNull { it.type == MediaStreamType.AUDIO && it.index == audioIndex }
+        val text = streams.firstOrNull { it.type == MediaStreamType.SUBTITLE && it.index == subtitleIndex }?.let { WantedText(it.language, it.isForced, it) }
+        carry[itemId] = Carry(audio?.language, text)
+    }
+
+    /** The carried audio language as a track of the main copy [source] (null: nothing carried, choose as usual). */
+    fun carriedAudio(
+        itemId: UUID,
+        source: org.jellyfin.sdk.model.api.MediaSourceInfo?,
+    ): Int? {
+        val language = carry[itemId]?.audio ?: return null
+        return source?.mediaStreams.orEmpty()
+            .filter { it.type == MediaStreamType.AUDIO && Lang.same(it.language, language) }
+            .sortedByDescending { it.isDefault }
+            .firstOrNull()
+            ?.index
+    }
+
+    /** The carried subtitles as a track of [source], else [chosen] (Wholphin's own choice); used once. */
+    fun carriedSubtitle(
+        itemId: UUID,
+        source: org.jellyfin.sdk.model.api.MediaSourceInfo?,
+        chosen: Int?,
+    ): Int? {
+        val c = carry.remove(itemId) ?: return chosen
+        val text = c.text ?: return null
+        val matches = source?.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && Lang.same(it.language, text.language) }
+        return (matches.firstOrNull { it.isForced == text.forced } ?: matches.firstOrNull())?.index ?: chosen
+    }
+
+    /** The audio menu while an extra server's copy plays: the language, in this file's own tracks. */
+    fun changeAudio(
+        player: androidx.media3.common.Player,
+        itemId: UUID,
+        index: Int,
+    ) {
+        val main = mainSources[itemId]?.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && it.index == index } ?: return
+        wanted[itemId] = Wanted(main.language, wanted[itemId]?.text)
+        val params =
+            player.trackSelectionParameters
+                .buildUpon()
+                .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_AUDIO)
+                .setPreferredAudioLanguage(main.language?.let(Lang::code))
+        val group =
+            player.currentTracks.groups
+                .filter { it.type == androidx.media3.common.C.TRACK_TYPE_AUDIO && it.length > 0 && it.isTrackSupported(0) && Lang.same(it.getTrackFormat(0).language, main.language) }
+                .maxByOrNull { it.getTrackFormat(0).channelCount }
+        if (group != null) params.setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, 0))
+        player.trackSelectionParameters = params.build()
+        Timber.i("Extra copy audio: %s%s", main.language, if (group == null) " (not in this copy)" else "")
     }
 
     private fun restoreTracks() {
@@ -574,6 +790,11 @@ class PickSession internal constructor(
      * external file failed (the external play had none of its own: subtitles went off).
      */
     fun mainTrackChoice(itemId: UUID): Pair<Int?, Int?>? = mainTracks[itemId]?.let { it.audioIndex to it.subtitleIndex }
+
+    companion object {
+        /** The id of a separate subtitle file Orca+ adds to an extra server's copy. */
+        const val SIDECAR_ID = "orca-sidecar"
+    }
 
     /** HDR of the picked external file (null: not external, use the main copy's). */
     fun isHdr(itemId: UUID): Boolean? = chosen[itemId]?.takeIf { it.hdr.isNotBlank() || it.height > 0 }?.let { it.hdr.isNotBlank() }
@@ -668,28 +889,55 @@ class PickSession internal constructor(
         val ranking = tunedRanking(connections.map { it.connectionId }, prefs, SourceHook.JELLYFIN_ROW)
         val list = showList.also { showList = false }
         if (prefs.autoPlay && !list) return autoPick(item, connections, request, ranking)
-        val decision = CompletableDeferred<Pick>()
+        val row = choose(item, connections, request, playing = null)
+        val result =
+            when {
+                row == null -> Pick.Cancelled
+                row.connectionId == SourceHook.JELLYFIN_ROW -> mainPick(item, row)
+                else -> Pick.External(row)
+            }
+        asked = true
+        stickyConnectionId = (result as? Pick.External)?.source?.connectionId
+        sticky = (result as? Pick.External)?.source
+        Timber.i("Source picked for %s: %s", item.id, (result as? Pick.External)?.source?.serverLabel ?: result.toString())
+        return result
+    }
+
+    /**
+     * The picker list: the main server's versions at once, each extra server's copies as they
+     * answer ([request] null: the main server's only). The row chosen, or null for Back.
+     */
+    private suspend fun choose(
+        item: BaseItemDto,
+        connections: List<ServerConnection>,
+        request: PlayRequest?,
+        playing: String?,
+    ): ExternalSource? {
+        val ranking = tunedRanking(connections.map { it.connectionId }, hook.store.pickerPrefs.value, SourceHook.JELLYFIN_ROW)
+        val decision = CompletableDeferred<ExternalSource?>()
         val found = MutableStateFlow(jellyfinRows(item))
         val title =
-            if (request.isEpisode) {
+            if (request == null) {
+                item.name.orEmpty()
+            } else if (request.isEpisode) {
                 "${request.title} S%02dE%02d".format(request.season, request.episode)
             } else {
                 listOfNotNull(request.title, request.year?.let { "($it)" }).joinToString(" ")
             }
+        val asking = if (request == null) emptyList() else connections
         _ui.value =
             PickerUi(
                 title = title,
-                rows = found.value,
-                searching = true,
-                serversTotal = connections.size,
+                rows = if (asking.isEmpty()) found.value.sortedWith(ranking) else found.value,
+                searching = asking.isNotEmpty(),
+                serversTotal = asking.size,
                 serversDone = 0,
-                onSelect = { row ->
-                    decision.complete(if (row.connectionId == SourceHook.JELLYFIN_ROW) mainPick(item, row) else Pick.External(row))
-                },
-                onCancel = { decision.complete(Pick.Cancelled) },
+                onSelect = { row -> decision.complete(row) },
+                onCancel = { decision.complete(null) },
                 itemId = item.id.toString(),
                 seriesId = item.seriesId?.toString(),
                 failed = failedCopies[item.id].orEmpty().toSet(),
+                playing = playing,
             )
         // The search runs on its own, not as a child the choice must wait for: a server that
         // answers slowly held OK and Back for up to half a minute (a scope can't end before its
@@ -697,7 +945,8 @@ class PickSession internal constructor(
         // picker at once; late answers just land in the cache.
         val search =
             hook.background.launch {
-                connections
+                if (request == null) return@launch
+                asking
                     .map { connection ->
                         async {
                             val (sources, trouble) = hook.findChecked(connection, request)
@@ -707,7 +956,7 @@ class PickSession internal constructor(
                                 ui?.copy(
                                     serversDone = ui.serversDone + 1,
                                     // In the Settings order of servers, whatever answers first
-                                    misses = (ui.misses + listOfNotNull(miss)).sortedBy { m -> connections.indexOfFirst { it.connectionId == m.connectionId } },
+                                    misses = (ui.misses + listOfNotNull(miss)).sortedBy { m -> asking.indexOfFirst { it.connectionId == m.connectionId } },
                                 )
                             }
                         }
@@ -716,19 +965,44 @@ class PickSession internal constructor(
                 _ui.update { ui -> ui?.copy(rows = found.value.sortedWith(ranking).sortedBy { copyKey(it) in ui.failed }, searching = false) }
             }
         // finally: a playback screen closed mid-search must not leave the picker on screen
-        val result =
-            try {
-                decision.await()
-            } finally {
-                search.cancel()
-                _ui.value = null
-            }
-        asked = true
-        stickyConnectionId = (result as? Pick.External)?.source?.connectionId
-        sticky = (result as? Pick.External)?.source
-        Timber.i("Source picked for %s: %s", item.id, (result as? Pick.External)?.source?.serverLabel ?: result.toString())
-        return result
+        return try {
+            decision.await()
+        } finally {
+            search.cancel()
+            _ui.value = null
+        }
     }
+
+    /**
+     * The player's "Play from another server" button: the list again over the title, the copy
+     * on screen marked. True when one was chosen (the next [pick] plays it, see VM `orcaSwitchCopy`);
+     * false for Back (keep playing). Choosing the copy already on screen counts as Back.
+     */
+    suspend fun chooseAgain(itemId: UUID): Boolean {
+        val item = lastBase?.takeIf { it.id == itemId } ?: return false
+        val connections = hook.searchableConnections()
+        val request =
+            if (connections.isEmpty()) {
+                null
+            } else {
+                try {
+                    hook.requestFor(item)
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    Timber.w(e, "Could not describe %s for matching", item.id)
+                    null
+                }
+            }
+        val playing = playingCopy(itemId).first?.let(::copyKey)
+        val row = choose(item, connections, request, playing) ?: return false
+        if (copyKey(row) == playing) return false
+        forced[itemId] = row
+        Timber.i("Switching %s to %s", itemId, row.serverLabel)
+        return true
+    }
+
+    /** Whether the player's switch button has anything to offer: extra servers, or versions on the main one. */
+    fun canSwitch(itemId: UUID): Boolean = hasOtherServers() || (lastBase?.takeIf { it.id == itemId }?.mediaSources?.size ?: 0) > 1
 
     // ------------------------------------------------------------ a copy that failed (the trouble screen)
 

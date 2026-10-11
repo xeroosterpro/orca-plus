@@ -141,6 +141,15 @@ private fun NowPlayingSettings(
     firstModifier: Modifier,
 ) {
     val p by hook.store.playInfoPrefs.collectAsState()
+    val confirmLeave by hook.store.confirmLeave.collectAsState()
+    SettingsHeader("Leaving the player")
+    PlusListItem(
+        onClick = { hook.store.setConfirmLeave(!confirmLeave) },
+        headlineContent = { Text("Ask before closing", style = MaterialTheme.typography.titleMedium) },
+        supportingContent = { Text(if (confirmLeave) "On: Back asks \"Stop watching?\" first, so a stray press never ends the movie" else "Off: Back closes the player at once") },
+        trailingContent = { androidx.tv.material3.Switch(checked = confirmLeave, onCheckedChange = null, colors = plusSwitchColors()) },
+        modifier = firstModifier,
+    )
     SettingsHeader("Now playing card")
     PlusListItem(
         onClick = { hook.store.setPlayInfoPrefs(p.copy(on = !p.on)) },
@@ -155,7 +164,6 @@ private fun NowPlayingSettings(
             )
         },
         trailingContent = { androidx.tv.material3.Switch(checked = p.on, onCheckedChange = null, colors = plusSwitchColors()) },
-        modifier = firstModifier,
     )
     if (!p.on) return
     listOf(

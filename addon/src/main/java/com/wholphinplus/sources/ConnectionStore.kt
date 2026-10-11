@@ -88,6 +88,16 @@ class ConnectionStore
             _kidsTab.value = on
         }
 
+        private val _confirmLeave = MutableStateFlow(prefs.getBoolean(CONFIRM_LEAVE_KEY, true))
+
+        /** Back in the player asks "Stop watching?" before closing it (Settings → Playback; per TV). */
+        val confirmLeave: StateFlow<Boolean> = _confirmLeave.asStateFlow()
+
+        fun setConfirmLeave(on: Boolean) {
+            prefs.edit().putBoolean(CONFIRM_LEAVE_KEY, on).apply()
+            _confirmLeave.value = on
+        }
+
         private val _browseExtras = MutableStateFlow(prefs.getBoolean(BROWSE_EXTRAS_KEY, true))
 
         /**
@@ -392,6 +402,7 @@ class ConnectionStore
             const val SHUFFLE_LOCKS_KEY = "shuffle_locks"
             const val KIDS_TAB_KEY = "kids_tab"
             const val BROWSE_EXTRAS_KEY = "browse_extras"
+            const val CONFIRM_LEAVE_KEY = "confirm_leave_player"
             const val PICKER_KEY = "picker_prefs"
             const val PLAY_INFO_KEY = "play_info_prefs"
             const val POSTER_SIZE_KEY = "poster_size"

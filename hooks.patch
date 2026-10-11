@@ -30,7 +30,7 @@ index 582e000a2..4b93d14e5 100644
          android:supportsRtl="true"
          android:theme="@style/Theme.Wholphin"
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
-index 62f0e39b4..312b25e39 100644
+index 62f0e39b4..f6a36e5ba 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 @@ -31,6 +31,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -56,6 +56,15 @@ index 62f0e39b4..312b25e39 100644
  
          viewModel.serverRepository.currentUserFlow
              .onEach { user ->
+@@ -314,7 +323,7 @@ class MainActivity : AppCompatActivity() {
+         if (!playExternalViewModel.launched.value) {
+             // If restarting during playback that is not external, go back a page
+             val lastDest = navigationManager.backStack.lastOrNull()
+-            if (lastDest.isPlayback) {
++            if (lastDest.isPlayback && !com.wholphinplus.sources.cinema.PlayerAway.kept) { // Orca+: a kept player stays on screen
+                 Timber.v("onRestart: go back from playback")
+                 navigationManager.goBack()
+             }
 @@ -429,9 +438,37 @@ class MainActivityViewModel
          private val backdropService: BackdropService,
          private val appUpgradeHandler: AppUpgradeHandler,
@@ -442,6 +451,56 @@ index 708eb8b5b..955ac6aa5 100644
                      setupListeners()
                  }
              }
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt
+index 09450b34a..2af328cd9 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt
+@@ -118,6 +118,7 @@ class StreamChoiceService
+                 }
+             return source.mediaStreams?.letNotEmpty { streams ->
+                 val candidates = streams.filter { it.type == MediaStreamType.AUDIO }
++                    .let(com.wholphinplus.sources.Lang::streams) // Orca+: one spelling per language ("en" = "eng")
+                 chooseAudioStream(candidates, itemPlayback, plc, prefs)
+             }
+         }
+@@ -136,6 +137,7 @@ class StreamChoiceService
+             } else {
+                 val seriesLang =
+                     playbackLanguageChoice?.audioLanguage?.takeIf { it.isNotNullOrBlank() }
++                        ?.let(com.wholphinplus.sources.Lang::code) // Orca+
+                 // If the user has chosen a different language for the series, prefer that
+                 val audioLanguage =
+                     seriesLang ?: getPreferredLanguage(MediaStreamType.AUDIO, prefs, userConfig)
+@@ -172,6 +174,7 @@ class StreamChoiceService
+                 }
+             return source.mediaStreams?.letNotEmpty { streams ->
+                 val candidates = streams.filter { it.type == MediaStreamType.SUBTITLE }
++                    .let(com.wholphinplus.sources.Lang::streams) // Orca+: one spelling per language ("en" = "eng")
+                 chooseSubtitleStream(
+                     audioStream?.language,
+                     candidates,
+@@ -231,6 +234,7 @@ class StreamChoiceService
+             }
+             val seriesLang =
+                 playbackLanguageChoice?.subtitleLanguage?.takeIf { it.isNotNullOrBlank() }
++                    ?.let(com.wholphinplus.sources.Lang::code) // Orca+
+             val subtitleLanguage =
+                 seriesLang ?: getPreferredLanguage(MediaStreamType.SUBTITLE, prefs, userConfig)
+             if (itemPlayback?.subtitleIndex == TrackIndex.ONLY_FORCED) {
+@@ -303,6 +307,7 @@ class StreamChoiceService
+                     SubtitlePlaybackMode.SMART -> {
+                         if (subtitleLanguage.isNotNullOrBlank()) {
+                             val audioLanguage = userConfig?.audioLanguagePreference
++                                .let(com.wholphinplus.sources.Lang::code) // Orca+
+                             if (
+                                 // Has preferred subtitle lang & preferred audio, so only show subtitles if actual audio is different
+                                 (audioLanguage.isNotNullOrBlank() && audioLanguage != audioStreamLang) ||
+@@ -411,4 +416,5 @@ fun getPreferredLanguage(
+         UserProfileSettings.PREFER_ANY_LANGUAGE -> null
+         else -> pref
+     }?.takeIf { it.isNotNullOrBlank() }
++        ?.let(com.wholphinplus.sources.Lang::code) // Orca+: "eng" and the server's "en" are one language
+ }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
 index 8c2d84cbc..9312c087e 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
@@ -798,12 +857,16 @@ index 63789d6ce..ecb769f5e 100644
  
          Destination.Debug -> {
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
-index 6ed210a2d..5189c542d 100644
+index 6ed210a2d..4334db796 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
-@@ -122,12 +122,16 @@ fun PlaybackPage(
+@@ -120,14 +120,20 @@ fun PlaybackPage(
+         ),
+ ) {
      LifecycleStartEffect(destination) {
++        viewModel.orcaForeground() // Orca+: back in the app: the player waits, paused, where it was
          onStopOrDispose {
++            if (lifecycle.currentState < androidx.lifecycle.Lifecycle.State.STARTED && viewModel.orcaBackground()) return@onStopOrDispose // Orca+: left the app (Home): keep the player
              viewModel.release()
 +            viewModel.sourcePicker.close() // Orca+: the play ends here (the extra server hears it now)
          }
@@ -819,7 +882,7 @@ index 6ed210a2d..5189c542d 100644
          }
  
          LoadingState.Pending,
-@@ -138,13 +142,17 @@ fun PlaybackPage(
+@@ -138,13 +144,19 @@ fun PlaybackPage(
  
          LoadingState.Success -> {
              val playerState by viewModel.currentPlayer.collectAsState()
@@ -831,6 +894,7 @@ index 6ed210a2d..5189c542d 100644
 -                modifier = modifier,
 -            )
 +            androidx.compose.foundation.layout.Box(modifier) { // Orca+: room for the now-playing card
++                androidx.compose.runtime.CompositionLocalProvider(com.wholphinplus.sources.cinema.LocalSwitchCopy provides viewModel.orcaSwitchAction()) { // Orca+: play from another server
 +                PlaybackPageContent(
 +                    playerInstance = playerState!!,
 +                    preferences = preferences,
@@ -838,14 +902,24 @@ index 6ed210a2d..5189c542d 100644
 +                    viewModel = viewModel,
 +                    modifier = Modifier.fillMaxSize(),
 +                )
++                } // Orca+
 +                // Orca+: how it's playing (direct or transcode, quality, sound, server), a moment after it starts
 +                com.wholphinplus.sources.cinema.NowPlayingCard(viewModel.sourcePicker, playerState!!.player, runCatching { viewModel.itemId }.getOrNull(), state.currentPlayback?.playMethod?.name, Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(top = 40.dp, end = 48.dp))
 +            }
          }
      }
  }
+@@ -323,6 +335,8 @@ fun PlaybackPageContent(
+         }
+     }
+ 
++    // Orca+: Back asks "Stop watching?" (the player's menus, Next Up and skip buttons handle their own Back first)
++    com.wholphinplus.sources.cinema.LeavePlayerConfirm(state.currentPlayback?.item?.title, enabled = state.nextUp == null && playbackDialog == null, onLeave = { player.stop(); viewModel.navigationManager.goBack() })
+     val showSegment =
+         state.currentSegment?.interacted == false &&
+             state.nextUp == null && !controllerViewState.controlsVisible && skipIndicatorDuration == 0L
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
-index 79d2ae579..cc54bb2e1 100644
+index 79d2ae579..a924db084 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
 @@ -152,6 +152,7 @@ class PlaybackViewModel
@@ -905,7 +979,24 @@ index 79d2ae579..cc54bb2e1 100644
  
                  val subtitleStreams = mediaSource?.let { getSubtitleStreams(mediaSource) }.orEmpty()
                  val audioStreams = mediaSource?.let { getAudioStreams(mediaSource) }.orEmpty()
-@@ -584,17 +602,22 @@ class PlaybackViewModel
+@@ -525,7 +543,7 @@ class PlaybackViewModel
+                                 prefs = preferences,
+                             )
+                     }
+-                val audioIndex = audioStream?.index
++                val audioIndex = sourcePicker.carriedAudio(base.id, mediaSource) ?: audioStream?.index // Orca+: a server switch keeps the language
+ 
+                 val subtitleIndex =
+                     mediaSource?.let {
+@@ -538,6 +556,7 @@ class PlaybackViewModel
+                                 plc = plc,
+                                 prefs = preferences,
+                             )?.index
++                            .let { sourcePicker.carriedSubtitle(base.id, mediaSource, it) } // Orca+: a server switch keeps the subtitles
+                     }
+                 Timber.d(
+                     "Selected mediaSource=%s, audioIndex=%s, subtitleIndex=%s",
+@@ -584,17 +603,23 @@ class PlaybackViewModel
                      )
                  }
                  withContext(WholphinDispatchers.Main) {
@@ -924,6 +1015,7 @@ index 79d2ae579..cc54bb2e1 100644
                      )
 -                    player.prepare()
 -                    player.play()
++                    if (external) updateCurrentPlayback { it?.copy(audioIndex = audioIndex ?: TrackIndex.DISABLED, subtitleIndex = subtitleIndex ?: TrackIndex.DISABLED) } // Orca+: an extra server's copy shows the subtitles chosen (they were hidden)
 +                    // Orca+: no stream (an error is on screen): an empty player "ends" at once and that closed the screen
 +                    if (state.value.loading !is LoadingState.Error) {
 +                        player.prepare()
@@ -932,7 +1024,7 @@ index 79d2ae579..cc54bb2e1 100644
                  }
                  listenForSegments(item.id)
                  return@withContext true
-@@ -684,7 +707,8 @@ class PlaybackViewModel
+@@ -684,7 +709,8 @@ class PlaybackViewModel
                  val source = response.mediaSources.firstOrNull()
                  source?.let { source ->
                      val mediaUrl =
@@ -942,7 +1034,7 @@ index 79d2ae579..cc54bb2e1 100644
                              if (source.isRemote && source.path.isNotNullOrBlank()) {
                                  Timber.i("Playback is remote for source: %s", source.id)
                                  source.path
-@@ -701,7 +725,7 @@ class PlaybackViewModel
+@@ -701,7 +727,7 @@ class PlaybackViewModel
                              source.transcodingUrl?.let(api::createUrl)
                          } else {
                              source.transcodingUrl?.let(api::createUrl)
@@ -951,7 +1043,7 @@ index 79d2ae579..cc54bb2e1 100644
                      if (mediaUrl.isNullOrBlank()) {
                          _state.update {
                              it.copy(
-@@ -715,6 +739,9 @@ class PlaybackViewModel
+@@ -715,6 +741,9 @@ class PlaybackViewModel
                      }
                      val transcodeType =
                          when {
@@ -961,7 +1053,7 @@ index 79d2ae579..cc54bb2e1 100644
  //                        playerBackend == PlayerBackend.MPV -> PlayMethod.DIRECT_PLAY
                              source.supportsDirectPlay -> PlayMethod.DIRECT_PLAY
  
-@@ -737,7 +764,7 @@ class PlaybackViewModel
+@@ -737,7 +766,7 @@ class PlaybackViewModel
                                  if (it.isDefault) flags = flags.or(C.SELECTION_FLAG_DEFAULT)
                                  MediaItem.SubtitleConfiguration
                                      .Builder(
@@ -970,7 +1062,15 @@ index 79d2ae579..cc54bb2e1 100644
                                      ).setId("e:${it.index}")
                                      .setMimeType(subtitleMimeTypes[it.codec])
                                      .setLanguage(it.language)
-@@ -790,7 +817,7 @@ class PlaybackViewModel
+@@ -765,6 +794,7 @@ class PlaybackViewModel
+                                 ),
+                             ).setUri(mediaUrl.toUri())
+                             .setSubtitleConfigurations(listOfNotNull(externalSubtitle))
++                            .apply { sourcePicker.sidecarsFor(itemId, ::orcaMainSubtitleUrl).takeIf { it.isNotEmpty() }?.let { setSubtitleConfigurations(listOfNotNull(externalSubtitle) + it) } } // Orca+: an extra server's copy gets its subtitle file
+                             .apply {
+                                 when (source.container) {
+                                     Codec.Container.HLS -> setMimeType(MimeTypes.APPLICATION_M3U8)
+@@ -790,7 +820,7 @@ class PlaybackViewModel
                              ?.firstOrNull { it.type == MediaStreamType.VIDEO }
                              ?.let { stream ->
                                  refreshRateService.changeRefreshRate(
@@ -979,7 +1079,7 @@ index 79d2ae579..cc54bb2e1 100644
                                      switchRefreshRate = prefs.refreshRateSwitching,
                                      switchResolution = prefs.resolutionSwitching,
                                  )
-@@ -812,6 +839,8 @@ class PlaybackViewModel
+@@ -812,6 +842,8 @@ class PlaybackViewModel
                              )
                          player.addListener(activityListener)
                          this@PlaybackViewModel.activityListener = activityListener
@@ -988,7 +1088,23 @@ index 79d2ae579..cc54bb2e1 100644
  
                          _state.update {
                              it.copy(
-@@ -1371,6 +1400,7 @@ class PlaybackViewModel
+@@ -945,6 +977,7 @@ class PlaybackViewModel
+                             currentPlayback = it.currentPlayback?.copy(audioIndex = index),
+                         )
+                     }
++                    if (sourcePicker.isExternal(currentItem.item.id)) return@launchIO onMain { sourcePicker.changeAudio(player, currentItem.item.id, index) } // Orca+: by language in another server's file
+ 
+                     // Resolve ONLY_FORCED to actual track based on new audio language
+                     val resolvedSubtitleIndex =
+@@ -991,6 +1024,7 @@ class PlaybackViewModel
+                             subtitleIndex = index,
+                             prefs = preferences,
+                         )
++                    if (sourcePicker.isExternal(currentItem.item.id)) return@launchIO onMain { sourcePicker.changeSubtitle(player, currentItem.item.id, resolvedIndex, ::orcaMainSubtitleUrl) } // Orca+: by language, no restart
+ 
+                     changeStreams(
+                         item = currentItem.item,
+@@ -1371,6 +1405,7 @@ class PlaybackViewModel
  
          override fun onPlayerError(error: PlaybackException) {
              Timber.e(error, "Playback error")
@@ -996,7 +1112,7 @@ index 79d2ae579..cc54bb2e1 100644
              viewModelScope.launch(WholphinDispatchers.Main + ExceptionHandler()) {
                  state.value.currentPlayback?.let {
                      when (it.playMethod) {
-@@ -1388,6 +1418,9 @@ class PlaybackViewModel
+@@ -1388,6 +1423,9 @@ class PlaybackViewModel
  
                          PlayMethod.DIRECT_STREAM, PlayMethod.DIRECT_PLAY -> {
                              Timber.w("Playback error during ${it.playMethod}, falling back to transcoding")
@@ -1006,7 +1122,7 @@ index 79d2ae579..cc54bb2e1 100644
                              val currentPlayback = state.value.currentPlayback
                              if (currentPlayback == null) {
                                  Timber.w("Playback error, currentPlayback is null")
-@@ -1395,12 +1428,14 @@ class PlaybackViewModel
+@@ -1395,12 +1433,14 @@ class PlaybackViewModel
                              changeStreams(
                                  item = currentItem.item,
                                  sourceId = currentPlayback?.mediaSourceInfo?.id,
@@ -1025,10 +1141,77 @@ index 79d2ae579..cc54bb2e1 100644
                              withContext(WholphinDispatchers.Main) {
                                  player.prepare()
                                  player.play()
-@@ -1411,6 +1446,22 @@ class PlaybackViewModel
+@@ -1411,6 +1451,89 @@ class PlaybackViewModel
              }
          }
  
++        /** Orca+: the player's "Play from another server" button (null: nothing else to play from). */
++        fun orcaSwitchAction(): (() -> Unit)? = if (this::currentItem.isInitialized && sourcePicker.canSwitch(currentItem.item.id)) ::orcaSwitchCopy else null
++
++        /** Orca+: the picker over the title (paused); the copy chosen plays from the same spot, Back keeps this one. */
++        fun orcaSwitchCopy() {
++            if (!this::currentItem.isInitialized) return
++            viewModelScope.launch(WholphinDispatchers.Main + ExceptionHandler()) {
++                val wasPlaying = player.playWhenReady
++                player.pause()
++                controllerViewState.hideControls()
++                if (!sourcePicker.chooseAgain(currentItem.item.id)) {
++                    if (wasPlaying) player.play()
++                    return@launch
++                }
++                val position = player.currentPosition
++                state.value.currentPlayback?.let { sourcePicker.carryTracks(currentItem.item.id, it.mediaSourceInfo, it.audioIndex, it.subtitleIndex) }
++                _state.update { it.copy(loading = LoadingState.Loading) }
++                play(currentItem, position)
++            }
++        }
++
++        private var orcaAway = false
++        private var orcaAwayCleanup = false
++
++        /**
++         * Orca+: Orca+ went to the background with this screen on (Home, another app). Upstream
++         * closed the player and went back a page on return; the owner wants to come back to it.
++         * Pauses, tells the servers it stopped (no progress chatter while away), and lets go of the
++         * decoder and the connection; the stream and the spot stay. False: not playing, close as usual.
++         */
++        fun orcaBackground(): Boolean {
++            if (!this::player.isInitialized || !this::currentItem.isInitialized || state.value.loading !is LoadingState.Success) return false
++            player.pause()
++            activityListener?.let {
++                it.release()
++                player.removeListener(it)
++            }
++            activityListener = null
++            sourcePicker.close()
++            (player as? ExoPlayer)?.stop()
++            orcaAway = true
++            com.wholphinplus.sources.cinema.PlayerAway.kept = true
++            if (!orcaAwayCleanup) addCloseable { com.wholphinplus.sources.cinema.PlayerAway.kept = false }
++            orcaAwayCleanup = true
++            Timber.i("Player kept in the background at %d s", player.currentPosition / 1000)
++            return true
++        }
++
++        /** Orca+: back from [orcaBackground]: the stream opens again, paused, with the controls up. */
++        fun orcaForeground() {
++            com.wholphinplus.sources.cinema.PlayerAway.kept = false
++            if (!orcaAway) return
++            orcaAway = false
++            val playback = state.value.currentPlayback ?: return
++            val playbackItemState = PlaybackItemState(playback)
++            val listener = TrackActivityPlaybackListener(api = api, player = player, getState = { playbackItemState })
++            player.addListener(listener)
++            activityListener = listener
++            sourcePicker.track(player, currentItem.item.id)
++            player.prepare()
++            controllerViewState.showControls()
++            Timber.i("Player back from the background at %d s", player.currentPosition / 1000)
++        }
++
++        /** Orca+: the main server's subtitle path as an address the player can open. */
++        private fun orcaMainSubtitleUrl(path: String): String = com.wholphinplus.sources.EmbyBridge.forPlayer(api.createUrl(path), api.accessToken)
++
 +        /** Orca+: the trouble screen plays the title again where it stopped (that copy, another, or the picker). */
 +        fun orcaRetry(retry: com.wholphinplus.sources.Retry) {
 +            viewModelScope.launch(WholphinDispatchers.Main + ExceptionHandler()) {
@@ -1073,6 +1256,20 @@ index fa32950b5..e8b6ddbf0 100644
                  }
                  ChapterCard(
                      chapter = chapter,
+diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/PlaybackControls.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/PlaybackControls.kt
+index ba77d8b71..27d27517b 100644
+--- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/PlaybackControls.kt
++++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/PlaybackControls.kt
+@@ -348,6 +348,9 @@ fun LeftPlaybackButtons(
+             onControllerInteraction = onControllerInteraction,
+             modifier = Modifier,
+         )
++        com.wholphinplus.sources.cinema.LocalSwitchCopy.current?.let { switchCopy -> // Orca+: play from another server
++            PlaybackButton(iconRes = com.wholphinplus.sources.R.drawable.orca_switch_server, onClick = { onControllerInteraction.invoke(); switchCopy() }, onControllerInteraction = onControllerInteraction) // Orca+
++        } // Orca+
+     }
+ }
+ 
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/PlaybackOverlay.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/PlaybackOverlay.kt
 index d00fefea2..5bc663704 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/overlay/PlaybackOverlay.kt

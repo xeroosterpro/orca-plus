@@ -172,6 +172,7 @@ private fun PickerScreen(ui: PickerUi) {
                                     r,
                                     best = index == 0 && !ui.searching && ui.rows.size > 1 && !failed,
                                     failed = failed,
+                                    playing = ui.playing == com.wholphinplus.sources.copyKey(r),
                                     onClick = { ui.onSelect(r) },
                                     modifier = if (index == 0) Modifier.focusRequester(first) else Modifier,
                                 )
@@ -256,6 +257,7 @@ private fun CopyRow(
     best: Boolean,
     onClick: () -> Unit,
     failed: Boolean = false,
+    playing: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val f = rememberFocusFade(Color.White.copy(alpha = 0.06f), Color(0xFF26262A), Ink, Ink)
@@ -328,6 +330,16 @@ private fun CopyRow(
                     if (tooMuch && !failed) {
                         Text(
                             "TOO MUCH FOR THIS TV",
+                            color = Ink,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.5.sp,
+                            modifier = Modifier.background(Color.White.copy(alpha = 0.16f), RoundedCornerShape(3.dp)).padding(horizontal = 7.dp, vertical = 3.dp),
+                        )
+                    }
+                    if (playing) {
+                        Text(
+                            "PLAYING NOW",
                             color = Ink,
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Black,

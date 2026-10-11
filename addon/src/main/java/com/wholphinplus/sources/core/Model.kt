@@ -104,11 +104,28 @@ data class ExternalSource(
     val width: Int = 0,
     val height: Int = 0,
     val frameRate: Float = 0f,
+    // The file's subtitle tracks, in it or beside it (Emby/Jellyfin/Plex lookups; empty: unknown)
+    val subtitles: List<CopySubtitle> = emptyList(),
 ) {
     val size: String get() = formatBytes(sizeBytes)
 
     // A log line or crash report gets the copy, never its stream URL (it carries the server's token)
     override fun toString(): String = "ExternalSource($serverLabel, $quality, $container, ${size}, item $itemId)"
+}
+
+/**
+ * A subtitle track of a copy on an extra server. [url] is set for a separate file beside the video
+ * (the player adds it); tracks inside the file need nothing. Image tracks (PGS) can't be added.
+ */
+data class CopySubtitle(
+    val language: String,
+    val title: String,
+    val codec: String,
+    val forced: Boolean,
+    val image: Boolean,
+    val url: String? = null,
+) {
+    override fun toString(): String = "CopySubtitle($language, $title, $codec, forced=$forced, separate=${url != null})"
 }
 
 /** A copy's pictures for the player: chapter pictures by start (ms), and Emby's thumbnail track (BIF). */

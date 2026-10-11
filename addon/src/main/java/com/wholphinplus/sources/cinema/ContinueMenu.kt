@@ -156,7 +156,7 @@ internal fun ContinueMenu(
 }
 
 @Composable
-private fun MenuRow(
+internal fun MenuRow(
     text: String,
     icon: ImageVector?,
     modifier: Modifier = Modifier,
@@ -259,7 +259,7 @@ private suspend fun focusCard(state: RowState) {
 /** How long an episode marked watched waits for the show's next one before it just leaves. */
 private const val NEXT_WAIT_MS = 4_000L
 
-private val CloseIcon: ImageVector =
+internal val CloseIcon: ImageVector =
     ImageVector
         .Builder("Close", 24.dp, 24.dp, 24f, 24f)
         .addPath(

@@ -1006,7 +1006,25 @@ class ServerClient(
             width = media.width,
             height = media.height,
             frameRate = media.frameRate,
+            subtitles = media.subtitles.map { copySubtitle(c, item, it) },
         )
+    }
+
+    private fun copySubtitle(
+        c: ServerConnection,
+        item: Item,
+        t: SubTrack,
+    ): CopySubtitle {
+        val image = t.codec in IMAGE_SUBTITLES
+        val url =
+            t.path?.takeUnless { image }?.let { path ->
+                if (c.isPlex) {
+                    withPlexToken(absolutePlexUrl(c.serverUrl, path), c)
+                } else {
+                    endpoint(c.serverUrl, path.replace("{item}", item.id), "api_key" to c.accessToken).toString()
+                }
+            }
+        return CopySubtitle(t.language, t.title, t.codec, t.forced, image, url)
     }
 
     /**
@@ -1396,6 +1414,20 @@ class ServerClient(
             partIndex = 0,
             variantKey = "",
             frameRate = (video?.string("RealFrameRate")?.toFloatOrNull() ?: video?.string("AverageFrameRate")?.toFloatOrNull()) ?: 0f,
+            subtitles =
+                streams.filter { it.string("Type").equals("Subtitle", ignoreCase = true) }.mapNotNull { st ->
+                    val index = st.int("Index") ?: return@mapNotNull null
+                    val separate = st.boolean("IsExternal") == true || st.string("DeliveryMethod").equals("External", ignoreCase = true)
+                    SubTrack(
+                        index = index,
+                        language = st.string("Language"),
+                        title = st.string("DisplayTitle").ifBlank { st.string("Title") },
+                        codec = st.string("Codec").lowercase(),
+                        forced = st.boolean("IsForced") == true,
+                        // Emby and Jellyfin both convert a track to SRT at this address (needs the media source)
+                        path = if (separate) "Videos/{item}/${o.string("Id")}/Subtitles/$index/0/Stream.srt" else null,
+                    )
+                },
         )
     }
 
@@ -1484,6 +1516,18 @@ class ServerClient(
                     .filter { it.isNotBlank() }
                     .joinToString("|"),
             frameRate = video?.string("frameRate")?.toFloatOrNull() ?: plexFrameRate(m.string("videoFrameRate")),
+            subtitles =
+                streams.filter { it.string("streamType") == "3" }.mapIndexed { i, st ->
+                    SubTrack(
+                        index = st.int("index") ?: i,
+                        language = st.string("languageCode").ifBlank { st.string("language") },
+                        title = st.string("displayTitle").ifBlank { st.string("title") },
+                        codec = st.string("codec").lowercase(),
+                        forced = st.boolean("forced") == true || st.string("forced") == "1",
+                        // A separate file has its own key (/library/streams/<id>); a track in the file has none
+                        path = st.string("key").ifBlank { null },
+                    )
+                },
         )
     }
 
@@ -1697,6 +1741,16 @@ class ServerClient(
     }
 
     /** One playable version (Emby media source, or Plex media + part). */
+    /** A subtitle track as the server lists it; [path] is the separate file's address on that server. */
+    private data class SubTrack(
+        val index: Int,
+        val language: String,
+        val title: String,
+        val codec: String,
+        val forced: Boolean,
+        val path: String?,
+    )
+
     private data class Media(
         val id: String,
         val key: String,
@@ -1722,6 +1776,7 @@ class ServerClient(
         val frameRate: Float = 0f,
         /** Parts of the Plex media this part belongs to. */
         val partCount: Int = 1,
+        val subtitles: List<SubTrack> = emptyList(),
     ) {
         val identity: String
             get() =
@@ -1763,6 +1818,7 @@ class ServerClient(
         private const val MOVIE = "Movie"
         private const val SERIES = "Series"
         private const val EPISODE = "Episode"
+        private val IMAGE_SUBTITLES = setOf("pgssub", "pgs", "hdmv_pgs_subtitle", "dvdsub", "dvd_subtitle", "dvbsub", "dvb_subtitle", "vobsub", "xsub")
         private const val ITEM_FIELDS = "ProviderIds,MediaSources,MediaStreams,Path,PremiereDate,ProductionYear"
         private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
         private val unsafeIdChars = Regex("[^A-Za-z0-9:._-]+")

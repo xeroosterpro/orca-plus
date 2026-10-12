@@ -41,6 +41,16 @@ data class TmdbItem(
     fun backdropUrl(width: Int = 1280): String? = backdropPath?.let { "$IMAGES$width$it" }
 }
 
+/** A TMDB collection: a film series ("Harry Potter Collection"). */
+data class TmdbCollection(
+    val id: Int,
+    val name: String,
+    val posterPath: String?,
+    val backdropPath: String?,
+) {
+    fun backdropUrl(width: Int = 780): String? = backdropPath?.let { "$IMAGES$width$it" }
+}
+
 data class TmdbPerson(
     val id: Int,
     val name: String,
@@ -77,6 +87,8 @@ data class TitleArt(
     val services: List<String> = emptyList(),
     val tmdbScore: Double? = null,
     val released: String? = null,
+    /** Original language, ISO 639-1 ("en", "ko"); null in art cached before it was kept. */
+    val lang: String? = null,
 ) {
     fun logoUrl(): String? = logo?.let { "${IMAGES}500$it" }
 
@@ -294,6 +306,17 @@ class TmdbClient(
     }
 
     /** Recommendations, topped up with "similar" titles when TMDB has few. */
+    /** Film series matching [query] (search results' Collections). */
+    fun searchCollections(query: String): List<TmdbCollection> =
+        get("search/collection", "query" to query, "include_adult" to "false").objects("results").mapNotNull { o ->
+            val id = o.int("id") ?: return@mapNotNull null
+            TmdbCollection(id, o.string("name").ifBlank { return@mapNotNull null }, o.string("poster_path").ifBlank { null }, o.string("backdrop_path").ifBlank { null })
+        }
+
+    /** A film series' films, oldest first. */
+    fun collectionParts(id: Int): List<TmdbItem> =
+        get("collection/$id").objects("parts").mapNotNull { toItem(it, TmdbType.MOVIE) }.sortedBy { it.year ?: Int.MAX_VALUE }
+
     fun recommendations(
         type: TmdbType,
         id: Int,
@@ -341,6 +364,7 @@ class TmdbClient(
             services = services,
             tmdbScore = o.string("vote_average").toDoubleOrNull()?.takeIf { it > 0 && votes >= 10 },
             released = o.string(if (tv) "first_air_date" else "release_date").ifBlank { null },
+            lang = o.string("original_language").ifBlank { null },
         )
     }
 

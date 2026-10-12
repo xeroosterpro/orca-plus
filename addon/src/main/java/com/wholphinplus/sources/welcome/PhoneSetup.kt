@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.welcome
 
+import com.wholphinplus.sources.core.cancellable
 import com.wholphinplus.sources.SourceHook
 import com.wholphinplus.sources.sync.SetupCrypto
 import com.wholphinplus.sources.sync.SetupStart
@@ -80,7 +81,7 @@ object PhoneSetup {
                 while (_phase.value != Phase.DONE) {
                     val keys = SetupCrypto.newKeys()
                     val s =
-                        runCatching { hook.profileSync.setupStart(Base64.Default.encode(SetupCrypto.rawPublic(keys.public as ECPublicKey))) }
+                        runCatching { hook.profileSync.setupStart(Base64.Default.encode(SetupCrypto.rawPublic(keys.public as ECPublicKey))) }.cancellable()
                             .onFailure { Timber.w(it, "Phone setup: no code") }
                             .getOrNull()
                     if (s == null) {
@@ -94,7 +95,7 @@ object PhoneSetup {
                     val until = System.currentTimeMillis() + 19 * 60 * 1000
                     while (System.currentTimeMillis() < until && _phase.value != Phase.DONE) {
                         delay(2_000)
-                        val box = runCatching { hook.profileSync.setupCollect(s) }.getOrElse { e ->
+                        val box = runCatching { hook.profileSync.setupCollect(s) }.cancellable().getOrElse { e ->
                             // The code ran out or was refused: a fresh one
                             if (e is com.wholphinplus.sources.sync.CloudException && e.code in 400..499) break
                             null
@@ -170,7 +171,7 @@ object PhoneSetup {
     ) {
         val h = hook ?: return
         val s = session ?: return
-        h.background.launch { runCatching { h.profileSync.setupResult(s, ok, message, final) }.onFailure { Timber.w(it, "Phone setup: report") } }
+        h.background.launch { runCatching { h.profileSync.setupResult(s, ok, message, final) }.cancellable().onFailure { Timber.w(it, "Phone setup: report") } }
     }
 
     /** Same server? (the phone may type it without the scheme or port Wholphin saved). */

@@ -1,22 +1,17 @@
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
@@ -25,24 +20,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentWidth
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -51,7 +37,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -63,7 +48,6 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -78,16 +62,11 @@ import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.lerp
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.input.key.Key
@@ -96,30 +75,18 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.runtime.withFrameNanos
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.text.PlatformTextStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.LineHeightStyle
-import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import androidx.tv.material3.Border
 import androidx.tv.material3.Card
-import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Surface
-import androidx.tv.material3.LocalTextStyle
 import androidx.tv.material3.Text
-import coil3.compose.AsyncImage
 import com.wholphinplus.sources.ui.SourcesEntryPoint
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.delay
@@ -130,8 +97,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.decodeFromStream
-import kotlinx.serialization.json.encodeToStream
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.CollectionType
 import java.util.UUID
@@ -156,13 +121,11 @@ private object NavReturn {
     @Volatile var to: CinemaNav? = null
 }
 
-/** Is Cinema mode on? Read by Wholphin's navigation to show Cinema screens. */
-@Composable
-fun cinemaModeOn(): Boolean {
-    val context = LocalContext.current
-    val hook = remember { EntryPointAccessors.fromApplication(context.applicationContext, SourcesEntryPoint::class.java).sourceHook() }
-    return hook.store.cinemaMode.collectAsState().value
-}
+/**
+ * Is Cinema mode on? Always: there's one look (2026-10-07). Kept for Wholphin's hooks, which ask
+ * it to pick Cinema's screens; a constant, so no screen watches a setting for it any more.
+ */
+fun cinemaModeOn(): Boolean = true
 
 @Composable
 fun CinemaHome(
@@ -203,7 +166,7 @@ fun CinemaHome(
                                 val t = elsewhere.title
                                 val tmdbId =
                                     t.tmdbId ?: kotlinx.coroutines.withTimeoutOrNull(EPISODE_LOOKUP_MS) {
-                                        runCatching { search.search(t.name) }.getOrNull()?.items?.firstOrNull { r ->
+                                        runCatching { search.search(t.name) }.cancellable().getOrNull()?.items?.firstOrNull { r ->
                                             (r.type == com.wholphinplus.sources.core.TmdbType.TV) == t.series &&
                                                 (t.year == null || r.year == null || kotlin.math.abs(r.year - t.year) <= 1) &&
                                                 com.wholphinplus.sources.core.Matcher.normalizeTitle(r.title) == com.wholphinplus.sources.core.Matcher.normalizeTitle(t.name)
@@ -215,7 +178,7 @@ fun CinemaHome(
                                     return@launch
                                 }
                                 val item = ServerTitles.tmdbItem(t, tmdbId)
-                                when (val a = kotlinx.coroutines.withTimeoutOrNull(10_000L) { runCatching { search.availability(item) }.getOrNull() }) {
+                                when (val a = kotlinx.coroutines.withTimeoutOrNull(10_000L) { runCatching { search.availability(item) }.cancellable().getOrNull() }) {
                                     is com.wholphinplus.sources.Availability.Library ->
                                         if (moves.get() == moved) {
                                             if (play && !a.series) playTitle(a.itemId, 0L) else openTitle(a.itemId, if (a.series) BaseItemKind.SERIES else BaseItemKind.MOVIE)
@@ -471,6 +434,9 @@ fun CinemaHome(
     // Once Home is up, quietly load Shows and Movies so switching tabs is instant
     LaunchedEffect(pages[CinemaTab.HOME] != null) {
         if (pages[CinemaTab.HOME] == null) return@LaunchedEffect
+        // Not on Light boxes: two more tabs (~2,000 titles) right after start was most of the
+        // start's garbage collection on the 1 GB bench, and each tab opens from its saved copy anyway
+        if (com.wholphinplus.sources.DeviceClass.light) return@LaunchedEffect
         delay(1_500)
         listOf(CinemaTab.SHOWS to RowsPage.SHOWS, CinemaTab.MOVIES to RowsPage.MOVIES).forEach { (t, rowsPage) ->
             if (pages[t] == null) {
@@ -587,8 +553,15 @@ fun CinemaHome(
             CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalStreamLookup provides StreamLookup(repo::streamTagsOf), LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings, LocalRowActions provides rowActions) {
                 AnimatedContent(
                     targetState = tab,
-                    // Overlapping: the old tab eases out as the new one comes in, no dip to black between
-                    transitionSpec = { fadeIn(tween(420, delayMillis = 60, easing = CinemaEase)) togetherWith fadeOut(tween(260, easing = CinemaFade)) },
+                    // Overlapping: the old tab eases out as the new one comes in, no dip to black between.
+                    // Light boxes switch at once: the overlap drew two whole tabs for ~half a second
+                    transitionSpec = {
+                        if (com.wholphinplus.sources.DeviceClass.simpleMotion) {
+                            EnterTransition.None togetherWith ExitTransition.None
+                        } else {
+                            fadeIn(tween(420, delayMillis = 60, easing = CinemaEase)) togetherWith fadeOut(tween(260, easing = CinemaFade))
+                        }
+                    },
                     label = "tab",
                 ) { t ->
                     val d = pages[t]
@@ -596,7 +569,7 @@ fun CinemaHome(
                     Box(Modifier.fillMaxSize()) {
                         when {
                             d == null && error != null ->
-                                LoadError(error, onRetry = { attempt++ }, onClassic = null, Modifier.align(Alignment.Center))
+                                LoadError(error, onRetry = { attempt++ }, modifier = Modifier.align(Alignment.Center))
                             // The logo only shows while the app starts; other tabs just fade in
                             d == null -> if (t == CinemaTab.HOME) Wordmark(Modifier.align(Alignment.Center), size = 34)
                             t == CinemaTab.MY_LIST -> {
@@ -886,7 +859,6 @@ private fun EmptyPage(
 internal fun LoadError(
     message: String,
     onRetry: () -> Unit,
-    onClassic: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val retry = remember { FocusRequester() }
@@ -898,7 +870,6 @@ internal fun LoadError(
         Spacer(Modifier.height(18.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             HeroButton("Try again", Icons.Filled.Refresh, primary = true, modifier = Modifier.focusRequester(retry), onClick = onRetry)
-            onClassic?.let { HeroButton("Use the classic home", Icons.Filled.Settings, primary = false, onClick = it) }
         }
     }
 }
@@ -938,19 +909,6 @@ private val CinemaTab.rowsPage: RowsPage?
         }
 
 internal val TopNavHeight = 54.dp
-
-// The billboard panel's heights (full, buttons hidden, rolled up) and the gap below it. The rows
-// sit at RowsTopRolled and slide down by the panel's extra height (see CinemaScreen).
-private val PanelTop = 16.dp
-private val PanelFull = 262.dp
-private val PanelNoButtons = 210.dp
-private val PanelRolled = 52.dp
-private val GapFull = 18.dp
-private val GapRolled = 8.dp
-private val RowsTopRolled = TopNavHeight + PanelTop + PanelRolled + GapRolled
-
-private val RolledLogoHeight = 44.dp
-private val RolledShadow = androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.75f), blurRadius = 10f)
 
 /**
  * The app's first screen waits up to [WAIT_MS] while the first rows' art and card pictures load
@@ -1006,7 +964,7 @@ private const val IDLE_MS = 120_000L
  * top panel and backdrop but never the rows themselves.
  */
 @Stable
-private class HomeFocus {
+internal class HomeFocus {
     var billboard by mutableStateOf(true)
     var focused by mutableStateOf<CinemaItem?>(null)
 
@@ -1080,7 +1038,8 @@ internal fun CinemaScreen(
     val columnState = rememberLazyListState(cacheWindow = remember { androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow(
                     // Full: about three rows each way (held Up/Down reuses them instead of rebuilding); lighter boxes keep less
                     ahead = if (com.wholphinplus.sources.DeviceClass.tier == com.wholphinplus.sources.DeviceClass.Tier.FULL) 900.dp else 520.dp * com.wholphinplus.sources.DeviceClass.cacheScale,
-                    // Behind: about three rows on Full (eight made every press heavier, measured 2026-10-09)
+                    // Behind: about three rows on Full (eight made every press heavier, measured 2026-10-09).
+                    // (Light tried 640/420 dp on the Fire Stick bench, 2026-10-11: more big frames, not fewer)
                     behind = if (com.wholphinplus.sources.DeviceClass.tier == com.wholphinplus.sources.DeviceClass.Tier.FULL) 900.dp else 260.dp * com.wholphinplus.sources.DeviceClass.cacheScale,
                 ) })
     // The page counts as moving too (one counter for the billboard to wait on)
@@ -1126,7 +1085,8 @@ internal fun CinemaScreen(
 
     LaunchedEffect(focus.billboard, featuredIndex, data.featured.size) {
         if (focus.billboard && data.featured.size > 1) {
-            delay(10_000)
+            // Light boxes change it half as often (each change redraws the whole screen)
+            delay(if (com.wholphinplus.sources.DeviceClass.simpleMotion) 20_000 else 10_000)
             // Nobody has touched the remote for 2 minutes: hold this title, so the screen comes
             // to rest (nothing redrawn), until the next key press
             if (android.os.SystemClock.uptimeMillis() - lastInput.longValue > IDLE_MS) {
@@ -1392,1036 +1352,6 @@ private fun NavIcon(
     }
 }
 
-/** A top bar entered with Up (from Play) lands on [selected], the pill of the page being shown. */
-internal fun Modifier.upToSelected(selected: FocusRequester): Modifier =
-    focusProperties {
-        onEnter = {
-            if (requestedFocusDirection == androidx.compose.ui.focus.FocusDirection.Up) runCatching { selected.requestFocus() }
-        }
-    }.focusGroup()
-
-/** Height eased between [full] and [rolled] by [roll] (0..1), in the layout pass only. */
-private fun Modifier.rollHeight(
-    full: Dp,
-    rolled: Dp,
-    roll: () -> Float,
-): Modifier = animatedHeight { lerp(full, rolled, roll()) }
-
-/** Width eased between [full] and [rolled] by [roll] (0..1), in the layout pass only. */
-private fun Modifier.rollWidth(
-    full: Dp,
-    rolled: Dp,
-    roll: () -> Float,
-): Modifier =
-    layout { measurable, constraints ->
-        val w = lerp(full, rolled, roll()).roundToPx().coerceAtMost(constraints.maxWidth)
-        val placeable = measurable.measure(constraints.copy(minWidth = w, maxWidth = w))
-        layout(w, placeable.height) { placeable.place(0, 0) }
-    }
-
-/**
- * A height read in the layout pass only, so animating it never recomposes. Clips its content,
- * allowing [slack] past the left, right and bottom edges (a focused button's zoom).
- */
-private fun Modifier.animatedHeight(
-    slack: Dp = 0.dp,
-    height: () -> Dp,
-): Modifier =
-    (if (slack == 0.dp) clipToBounds() else drawWithContent {
-        val s = slack.toPx()
-        clipRect(-s, 0f, size.width + s, size.height + s) { this@drawWithContent.drawContent() }
-    }).layout { measurable, constraints ->
-        val h = height().roundToPx()
-        val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
-        layout(placeable.width, h) { placeable.place(0, 0) }
-    }
-
-/**
- * Fixed-height panel: the focused title changing or the buttons fading never change its size,
- * so the rows below don't move. Only rolling up (the setting) shrinks it, to a quarter: a small
- * logo and the episode or Top 10 line stay, the rest fades out.
- */
-/** Back while browsing rows brings the billboard back (its own scope: flips don't recompose the screen). */
-@Composable
-private fun BillboardBack(
-    focus: HomeFocus,
-    toBillboard: () -> Unit,
-) {
-    BackHandler(enabled = !focus.billboard) { toBillboard() }
-}
-
-/** The server's backdrop, else TMDB's clean picture (some servers have none for a title). */
-@Composable
-private fun ShownBackdrop(
-    shown: androidx.compose.runtime.State<CinemaItem?>,
-    focus: HomeFocus,
-) {
-    val item = shown.value
-    val art = rememberArt(item)
-    StableBackdrop(item?.backdropUrl ?: art?.cleanBackdrop?.let { "https://image.tmdb.org/t/p/w1280$it" }, drift = focus.billboard)
-}
-
-@Composable
-private fun InfoPanel(
-    item: () -> CinemaItem?,
-    billboard: () -> Boolean,
-    roll: () -> Float,
-    noButtons: () -> Float,
-    playFocus: FocusRequester,
-    onPlay: () -> Unit,
-    onMoreInfo: () -> Unit,
-    onButtonsFocused: () -> Unit,
-) {
-    // Full: details + buttons (262). Buttons hidden: details only (210). Rolled up: a quarter (72).
-    // Wide enough for the rolled-up details beside the logo; the text below keeps 480 dp
-    Box(Modifier.padding(start = 48.dp, top = PanelTop).animatedHeight(slack = 12.dp) { lerp(lerp(PanelFull, PanelNoButtons, noButtons()), PanelRolled, roll()) }.widthIn(max = 1000.dp)) {
-        AnimatedContent(
-            targetState = item(),
-            // The fade is drawn below with the alpha: AnimatedContent's own fade put each panel in
-            // a layer of its own for every frame of it (the Shield's GPU draws that twice)
-            transitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
-            contentKey = { it?.key },
-            label = "info",
-        ) { shownItem ->
-            val shownAlpha by transition.animateFloat(
-                // Overlapping, not out-then-in: the old text eases away as the new one comes up
-                transitionSpec = { if (targetState == EnterExitState.Visible) tween(520, delayMillis = 60, easing = CinemaEase) else tween(260, easing = CinemaFade) },
-                label = "infoAlpha",
-            ) { if (it == EnterExitState.Visible) 1f else 0f }
-            // The new title rises the last few dp into place as it fades in; the old one stays put
-            val rising = transition.targetState == EnterExitState.Visible
-            // The rolled-up details and the full ones are never seen together (each is invisible past
-            // half the roll), so only one is built: a change measured both (~16 texts, 9 ms on the
-            // Shield). They swap at the halfway point, where both are transparent.
-            val rolledNow by remember { derivedStateOf { roll() > 0.5f } }
-            Column(
-                Modifier.graphicsLayer {
-                    alpha = shownAlpha
-                    if (rising) translationY = (1f - shownAlpha) * 14.dp.toPx()
-                    compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
-                },
-            ) {
-                if (shownItem == null) return@Column
-                val logo = rememberArt(shownItem)?.logoUrl() ?: shownItem.logoUrl
-                // The logo's shape once loaded: rolled up, its box hugs it, so the details sit
-                // right beside it instead of after a fixed 220 dp slot (a narrow logo left a gap)
-                var logoAspect by remember(logo) { mutableFloatStateOf(0f) }
-                val rolledLogo = if (logo != null && logoAspect > 0f) (RolledLogoHeight * logoAspect).coerceIn(48.dp, 220.dp) else 220.dp
-                Row(Modifier.rollHeight(70.dp, RolledLogoHeight, roll), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.fillMaxHeight().rollWidth(340.dp, rolledLogo, roll), contentAlignment = Alignment.BottomStart) {
-                    // A logo that arrives a moment late crossfades over the title text
-                    Crossfade(targetState = logo, animationSpec = tween(300, easing = CinemaEase), label = "logo") { l ->
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
-                            if (l != null) {
-                                AsyncImage(
-                                    model = rememberPlain(l),
-                                    contentDescription = shownItem.title,
-                                    contentScale = ContentScale.Fit,
-                                    alignment = Alignment.BottomStart,
-                                    onSuccess = { r -> r.painter.intrinsicSize.let { if (it.height > 0f) logoAspect = it.width / it.height } },
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            } else {
-                                // No logo: the name shrinks to fit two lines of the logo's box rather than
-                                // being cut off ("Echoes of the Ice A…" at one line of 34 sp)
-                                androidx.compose.foundation.text.BasicText(
-                                    shownItem.title,
-                                    style = TextStyle(color = Ink, fontWeight = FontWeight.ExtraBold, lineHeight = 1.05.em),
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    autoSize = androidx.compose.foundation.text.TextAutoSize.StepBased(minFontSize = 16.sp, maxFontSize = 34.sp, stepSize = 2.sp),
-                                )
-                            }
-                        }
-                    }
-                }
-                // Rolled up, the details sit beside the logo, after a hairline: still there while
-                // browsing rows. A soft shadow keeps them legible over a bright picture.
-                if (rolledNow) Row(
-                    Modifier.graphicsLayer {
-                        alpha = ((roll() - 0.5f) * 2f).coerceIn(0f, 1f)
-                        compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
-                    },
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.padding(horizontal = 18.dp).width(1.dp).height(30.dp).background(Ink.copy(alpha = 0.3f)))
-                    CompositionLocalProvider(LocalTextStyle provides LocalTextStyle.current.copy(shadow = RolledShadow)) {
-                        Column(Modifier.widthIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                // The Top 10 place joins the details (its own line folds away rolled up)
-                                shownItem.rank?.takeIf { shownItem.subtitle == null }?.let { RankLine(it, null) }
-                                MetaLine(Meta(shownItem.meta, shownItem.rating))
-                            }
-                            // An episode's name says more than the show's story here
-                            Text(
-                                shownItem.subtitle ?: shownItem.overview,
-                                color = if (shownItem.subtitle != null) Ink else Ink.copy(alpha = 0.85f),
-                                fontSize = 12.sp,
-                                fontWeight = if (shownItem.subtitle != null) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-                }
-                Box(Modifier.rollHeight(8.dp, 0.dp, roll))
-                // One fixed line: the episode, else the title's Top 10 place, else blank. Rolled up it
-                // folds away (the details beside the logo carry it), so the rows sit 20 dp higher
-                Box(Modifier.rollHeight(20.dp, 0.dp, roll), contentAlignment = Alignment.CenterStart) {
-                    val rank = shownItem.rank
-                    when {
-                        shownItem.subtitle != null ->
-                            Text(shownItem.subtitle, color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        rank != null -> RankLine(rank, shownItem.rankLabel)
-                    }
-                }
-                Box(Modifier.rollHeight(8.dp, 0.dp, roll))
-                if (!rolledNow) Column(Modifier.widthIn(max = 480.dp).graphicsLayer {
-                    alpha = (1f - roll() * 2f).coerceIn(0f, 1f)
-                    compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
-                }, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetaLine(Meta(shownItem.meta, shownItem.rating))
-                    Text(shownItem.overview, color = Ink.copy(alpha = 0.86f), fontSize = 14.sp, lineHeight = 20.sp, minLines = 3, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                }
-            }
-        }
-        AnimatedVisibility(
-            visible = billboard(),
-            // Waits for the panel to mostly grow back (~0.4 s on CinemaGlide), so the buttons never fade in
-            // over the description while there's no room for them yet
-            enter = fadeIn(tween(320, delayMillis = 360, easing = CinemaEase)),
-            exit = fadeOut(tween(200, easing = CinemaFade)),
-            modifier = Modifier.align(Alignment.BottomStart),
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                HeroButton("Play", Icons.Filled.PlayArrow, primary = true, modifier = Modifier.focusRequester(playFocus), onFocused = onButtonsFocused, onClick = onPlay)
-                HeroButton("More Info", Icons.Filled.Info, primary = false, onFocused = onButtonsFocused, onClick = onMoreInfo)
-            }
-        }
-    }
-}
-
-/**
- * A row still on its way: its name with a small spinner, and cards of the real size gently
- * pulsing, so it fills in where it stands. Not focusable: the remote passes over it until it's in.
- * The pulse and the spinner are drawn only (no recomposition per frame).
- */
-@Composable
-private fun LoadingRow(row: CinemaRow) {
-    val motion = androidx.compose.animation.core.rememberInfiniteTransition(label = "loading")
-    val glow =
-        motion.animateFloat(
-            0.05f,
-            0.11f,
-            androidx.compose.animation.core.infiniteRepeatable(tween(900, easing = CinemaEase), androidx.compose.animation.core.RepeatMode.Reverse),
-            label = "glow",
-        )
-    val turn = motion.animateFloat(0f, 360f, androidx.compose.animation.core.infiniteRepeatable(tween(1000, easing = androidx.compose.animation.core.LinearEasing)), label = "turn")
-    fun Modifier.pulse(corner: Dp) =
-        drawBehind { drawRoundRect(Color.White.copy(alpha = glow.value), cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner.toPx())) }
-    val captions = LocalOverlays.current.captions
-    // Laid out like CinemaRowView: the same name line, gaps and card sizes
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.padding(start = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(row.title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-            Box(
-                Modifier.size(12.dp).drawBehind {
-                    rotate(turn.value) {
-                        drawArc(Plus, 0f, 270f, false, style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
-                    }
-                },
-            )
-        }
-        Row(
-            Modifier.fillMaxWidth().clipToBounds().wrapContentWidth(Alignment.Start, unbounded = true).padding(start = 48.dp, top = 8.dp, bottom = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(if (row.ranked) 4.dp else 10.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            repeat(6) {
-                if (row.ranked) {
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        Spacer(Modifier.width(NumeralWidth).height(PosterHeight))
-                        Box(Modifier.width(PosterWidth).height(PosterHeight).pulse(4.dp))
-                    }
-                } else {
-                    Column(Modifier.width(208.dp)) {
-                        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).pulse(6.dp))
-                        // The caption's room, so the row is as tall as it will be
-                        if (captions) {
-                            Column(Modifier.fillMaxWidth().padding(top = 9.dp, start = 2.dp, end = 2.dp)) {
-                                Text(" ", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                                Row(Modifier.padding(top = 2.dp)) { Text(" ", fontSize = 11.sp, maxLines = 1) }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun CinemaRowView(
-    row: CinemaRow,
-    state: RowState,
-    cardSpec: BringIntoViewSpec,
-    onItemFocused: (CinemaItem) -> Unit,
-    onItemClick: (CinemaItem) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(Modifier.onPreviewKeyEvent(state::stepButtons).then(modifier).onFocusChanged { state.focused = it.hasFocus }, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        // The name and how many titles the whole row has
-        Row(Modifier.padding(start = 48.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(row.title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-            state.count?.takeIf { it > 0 }?.let { Text("$it titles", color = InkDim, fontSize = 13.sp, modifier = Modifier.padding(bottom = 1.dp)) }
-        }
-        // The controls sit in the left margin, so the first card stays where every row starts
-        val actions = LocalRowActions.current
-        val controls = !row.ranked && state.source != null && actions != null
-        // The cards just off screen to the side are built only for the row you rest on (owner,
-        // 2026-10-09: rows "don't have to load too many horizontal unless the user stops on the
-        // row"): a row passed through builds its visible cards only, about 5 instead of 7
-        val rested = remember { mutableStateOf(false) }
-        LaunchedEffect(state) {
-            snapshotFlow { state.focused }.collectLatest { here ->
-                if (here) kotlinx.coroutines.delay(ROW_REST_MS)
-                rested.value = here
-            }
-        }
-        val rowState = androidx.compose.foundation.lazy.rememberLazyListState(cacheWindow = remember { RestedRowWindow(rested) })
-        // The row you rest on looks up the art of the next cards ahead of you: the page's warm-up
-        // covers each row's first 8, and past them every card waited for its art (up to 1.5 s)
-        // before its picture even started (owner: "the posters can't keep up… even though I'm
-        // moving slow")
-        val artAhead = LocalArt.current
-        LaunchedEffect(state, rowState) {
-            snapshotFlow { if (rested.value) rowState.firstVisibleItemIndex else -1 }.collectLatest { first ->
-                if (first < 0 || artAhead == null) return@collectLatest
-                state.items.drop(first).take(com.wholphinplus.sources.DeviceClass.artAhead).forEach { item ->
-                    item.tmdbId?.let { id -> launch { runCatching { artAhead.art(item.tmdbTv, id) } } }
-                }
-            }
-        }
-        ReportMotion(rowState)
-        // Continue Watching after a play: the title just watched comes first, and the list kept its
-        // place on the card it showed, leaving the new first card off screen. Back to its start
-        // (not while the remote is in the row: focus keeps its card then).
-        if (row.continueWatching) {
-            val first = state.items.firstOrNull()?.key
-            val seen = remember { mutableStateOf(first) }
-            LaunchedEffect(first) {
-                if (first == seen.value) return@LaunchedEffect
-                seen.value = first
-                // Glides back (the browsing glide); it used to jump there in one frame
-                if (!state.focused) glideToStart(rowState)
-            }
-        }
-        // Continue Watching's long-press menu, and the cards it took out this session
-        var menuFor by remember { mutableStateOf<CinemaItem?>(null) }
-        val openMenu = remember { { item: CinemaItem -> menuFor = item } }
-        val menuScope = rememberCoroutineScope()
-        val continueRepo = rememberContinueRepo()
-        val shownItems = if (row.continueWatching) state.items.filterNot { ContinueEdits.hides(it, continueRepo.first.overlay) } else state.items
-        // Left and Right move by position ([RowSteps])
-        val steps = remember { RowSteps() }
-        val stepKeys = (if (row.ranked) row.items else shownItems).map { it.key }
-        val focusedHere: (CinemaItem) -> Unit = { steps.at = it.key; onItemFocused(it) }
-        // Nearing the end asks for more: a row goes on as long as its list
-        if (actions != null && !row.ranked) LoadNearEnd({ state.more(actions.load) }) { rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index to rowState.layoutInfo.totalItemsCount }
-        DisposableEffect(state, rowState, controls) {
-            state.reveal = { key ->
-                val at = state.items.indexOfFirst { it.key == key }
-                if (at >= 0) rowState.scrollToItem(at + if (controls) 1 else 0)
-            }
-            onDispose { state.reveal = null }
-        }
-        // The row reaches one card past the screen's left edge ([LeftReach]): the card before the
-        // focused one is placed there, out of sight, so Left finds it like Right finds the next
-        val reach = with(LocalDensity.current) { LeftReach.roundToPx() }
-        val reachSpec = remember(cardSpec, reach) { cardSpec.reaching(reach.toFloat()) }
-        CompositionLocalProvider(LocalBringIntoViewSpec provides reachSpec.gliding(rowState), LocalRowRested provides rested) {
-            LazyRow(
-                state = rowState,
-                // Right after the last card (a Top 10's #10) stays there; it used to reach the top menu
-                modifier =
-                    Modifier
-                        .layout { m, c ->
-                            val p = m.measure(c.copy(minWidth = c.minWidth + reach, maxWidth = if (c.hasBoundedWidth) c.maxWidth + reach else c.maxWidth))
-                            layout((p.width - reach).coerceAtLeast(0), p.height) { p.place(-reach, 0) }
-                        }.staysInRow()
-                        .onPreviewKeyEvent { steps.step(it, stepKeys, rowState) },
-                horizontalArrangement = Arrangement.spacedBy(if (row.ranked) 4.dp else 10.dp),
-                contentPadding = PaddingValues(start = (if (controls) 4.dp else 48.dp) + LeftReach, end = 400.dp, top = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                if (row.ranked) {
-                    items(row.items, key = { it.key }, contentType = { "top10" }) { item ->
-                        Top10Card(item, item.rank ?: (row.items.indexOf(item) + 1), focusedHere, onItemClick, if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier)
-                    }
-                } else {
-                    // Above the cards, so a button's label can show over the first one
-                    if (controls) item(key = "controls", contentType = "controls") { Box(Modifier.zIndex(1f)) { RowControls(state, actions!!) } }
-                    if (row.continueWatching) {
-                        // Held OK opens its menu: Remove / Mark as watched; cards then glide closed
-                        items(shownItems, key = { it.key }, contentType = { "card" }) { item ->
-                            Box(Modifier.animateItem(fadeInSpec = tween(420, easing = CinemaFade), placementSpec = CardsClose, fadeOutSpec = tween(280, easing = CinemaFade))) {
-                                CinemaCard(item, focusedHere, onItemClick, modifier = if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier, onLongClick = openMenu)
-                                if (menuFor?.key == item.key) {
-                                    ContinueMenu(item, onClose = { menuFor = null }) { action ->
-                                        menuFor = null
-                                        val shownNow = shownItems
-                                        menuScope.launch { applyContinueAction(action, item, state, shownNow, continueRepo.first, continueRepo.second) }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        val items = state.items
-                        items(items, key = { it.key }, contentType = { "card" }) { item ->
-                            CinemaCard(item, focusedHere, onItemClick, modifier = if (item.key == state.returnKey) Modifier.focusRequester(state.cardFocus) else Modifier)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** How far a card row reaches past the screen's left edge: two wide cards (a held Left outruns the glide by about that). */
-private val LeftReach = 560.dp
-
-/** [this] for a list whose viewport starts [reachPx] left of the screen: the pivot measured from the screen's edge. */
-private fun BringIntoViewSpec.reaching(reachPx: Float): BringIntoViewSpec {
-    val inner = this
-    return object : BringIntoViewSpec {
-        override fun calculateScrollDistance(
-            offset: Float,
-            size: Float,
-            containerSize: Float,
-        ): Float = inner.calculateScrollDistance(offset - reachPx, size, containerSize - reachPx)
-    }
-}
-
-/**
- * Held Left along a row: a press whose card isn't on screen yet waits (owner, 2026-10-09: "going
- * reverse horizontal on a row it's not smooth and bugging out"). The glide trails the focus; going
- * right the next card is always on screen, going left it was still past the left edge, so
- * Compose's focus search laid the row out ~10 times, found nothing and lost the press: two of three
- * held Left presses, the costliest key work on the Shield. Asking that card for focus directly
- * moved it but made the glide jump back ~70 px; skipping the press is cheap, and the next repeat,
- * once the glide has brought the card in, moves as usual.
- */
-private class RowSteps {
-    var at: Any? = null
-
-    fun step(
-        e: androidx.compose.ui.input.key.KeyEvent,
-        keys: List<Any>,
-        list: androidx.compose.foundation.lazy.LazyListState,
-    ): Boolean {
-        if (e.type != KeyEventType.KeyDown || e.key != androidx.compose.ui.input.key.Key.DirectionLeft) return false
-        // Only a held key's repeat waits: a single press always goes through
-        if (e.nativeKeyEvent.repeatCount == 0) return false
-        val i = keys.indexOf(at)
-        if (i <= 0) return false
-        val target = keys[i - 1]
-        return list.layoutInfo.visibleItemsInfo.none { it.key == target }
-    }
-}
-
-/** How long the remote rests on a row before the cards just off its side are built ([RestedRowWindow]). */
-private const val ROW_REST_MS = 300L
-
-/** A row's side cache: none until it's [rested] on, then about four cards each way. */
-@OptIn(ExperimentalFoundationApi::class)
-private class RestedRowWindow(
-    private val rested: androidx.compose.runtime.State<Boolean>,
-) : androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow {
-    override fun androidx.compose.ui.unit.Density.calculateAheadWindow(viewport: Int): Int =
-        if (rested.value) com.wholphinplus.sources.DeviceClass.rowAheadDp.dp.roundToPx() else 0
-
-    override fun androidx.compose.ui.unit.Density.calculateBehindWindow(viewport: Int): Int =
-        // As much as ahead: the focused card sits at the row's left edge, so going left the next
-        // card is always off screen; with one card kept there, each Left press built one and
-        // spamming Left felt slower than Right (owner, 2026-10-09)
-        if (rested.value) com.wholphinplus.sources.DeviceClass.rowAheadDp.dp.roundToPx() else 0
-}
-
-/** The billboard's chart line: a red TOP 10 badge and "#2 in Movies This Week". */
-@Composable
-private fun RankLine(
-    rank: Int,
-    label: String?,
-) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Column(
-            Modifier.size(20.dp).background(Label, RoundedCornerShape(2.dp)),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text("TOP", color = Color.White, style = BadgeText.copy(fontSize = 5.5.sp, lineHeight = 6.sp))
-            Text("10", color = Color.White, style = BadgeText.copy(fontSize = 9.sp, lineHeight = 9.sp))
-        }
-        Text(listOfNotNull("#$rank", label?.let { "in $it" }).joinToString(" "), color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-    }
-}
-
-private val BadgeText =
-    TextStyle(
-        fontWeight = FontWeight.Black,
-        platformStyle = PlatformTextStyle(includeFontPadding = false),
-        lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.Both),
-    )
-
-private val NumeralWidth = 84.dp
-
-/**
- * Scrolls a row back to its first card on [CinemaGlide]: the distance from the cards' own size
- * (a lazy row only knows the ones built), the last bit by the list itself. Far along (past what a
- * glide reads as one move), the stock jump, as the page does.
- */
-private suspend fun glideToStart(state: androidx.compose.foundation.lazy.LazyListState) {
-    val first = state.firstVisibleItemIndex
-    if (first == 0 && state.firstVisibleItemScrollOffset == 0) return
-    if (first > GLIDE_BACK_MAX) return state.scrollToItem(0)
-    val info = state.layoutInfo
-    val step = info.visibleItemsInfo.firstOrNull()?.let { it.size + info.mainAxisItemSpacing } ?: 0
-    state.animateScrollBy(-(first * step + state.firstVisibleItemScrollOffset).toFloat(), CinemaGlide)
-    if (state.firstVisibleItemIndex != 0 || state.firstVisibleItemScrollOffset != 0) state.scrollToItem(0)
-}
-
-/** Cards a row glides back over to its start; further, it jumps. */
-private const val GLIDE_BACK_MAX = 12
-
-/** Continue Watching's cards closing the gap a removed one leaves: the browsing glide, no snap. */
-private val CardsClose = androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 110f, visibilityThreshold = androidx.compose.ui.unit.IntOffset.VisibilityThreshold)
-
-/** The Top 10 numbers' style: filled, and the outline drawn over it. */
-@Composable
-private fun rememberNumeral(): Pair<TextStyle, Stroke> {
-    val density = LocalDensity.current
-    return remember(density) {
-        TextStyle(
-            fontSize = 136.sp,
-            lineHeight = 136.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = (-14).sp,
-            platformStyle = PlatformTextStyle(includeFontPadding = false),
-            lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Bottom, LineHeightStyle.Trim.Both),
-        ) to Stroke(width = with(density) { 2.5.dp.toPx() })
-    }
-}
-
-/** Set once the Top 10 numbers have been drawn in this process ([NumeralWarmup]). */
-private var numeralsWarm = false
-
-/**
- * Draws the Top 10 numbers once, out of sight, while the page is still. The outlined 136 sp
- * digits are built as paths the first time each is drawn: 40 ms on the Shield, which landed on
- * the move that first brought a Top 10 row into view. Drawn under an opaque box, then removed.
- */
-@Composable
-private fun NumeralWarmup() {
-    var on by remember { mutableStateOf(!numeralsWarm) }
-    if (!on) return
-    val (numeral, stroke) = rememberNumeral()
-    Box(Modifier.size(NumeralWidth * 6, PosterHeight)) {
-        Text("1234567890", color = Stage, style = numeral, maxLines = 1, softWrap = false)
-        Text("1234567890", color = Color(0xFF8A8A8A), style = numeral.copy(drawStyle = stroke), maxLines = 1, softWrap = false)
-        Box(Modifier.matchParentSize().background(Stage))
-    }
-    LaunchedEffect(Unit) {
-        // A few frames on screen, after Home's own first frames
-        delay(1_200)
-        numeralsWarm = true
-        on = false
-    }
-}
-internal val PosterWidth = 112.dp
-internal val PosterHeight = 168.dp
-
-/**
- * A Top 10 tile: a big outlined number with the poster tucked over its right edge, the way the
- * streaming charts row looks.
- */
-@Composable
-private fun Top10Card(
-    item: CinemaItem,
-    rank: Int,
-    onFocused: (CinemaItem) -> Unit,
-    onClick: (CinemaItem) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val context = LocalContext.current
-    val shape = RoundedCornerShape(4.dp)
-    val (numeral, stroke) = rememberNumeral()
-    Row(verticalAlignment = Alignment.Bottom) {
-        Box(Modifier.width(if (rank >= 10) NumeralWidth + 56.dp else NumeralWidth).height(PosterHeight), contentAlignment = Alignment.BottomEnd) {
-            // Filled in stage black, outlined in grey, nudged under the poster
-            Text("$rank", color = Stage, style = numeral, maxLines = 1, softWrap = false, modifier = Modifier.offset(x = 16.dp, y = 6.dp))
-            Text("$rank", color = Color(0xFF8A8A8A), style = numeral.copy(drawStyle = stroke), maxLines = 1, softWrap = false, modifier = Modifier.offset(x = 16.dp, y = 6.dp))
-        }
-        Card(
-            onClick = { onClick(item) },
-            shape = CardDefaults.shape(shape),
-            border = CardDefaults.border(focusedBorder = Border.None),
-            scale = CardDefaults.scale(focusedScale = 1f),
-            glow = CardDefaults.glow(),
-            colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
-            modifier = modifier.width(PosterWidth).height(PosterHeight).glideLift(corner = 4.dp) { onFocused(item) }.tapToClick { onClick(item) },
-        ) {
-            if (rememberCardFilled(item.key)) PosterFace(item)
-        }
-    }
-}
-
-/** A Top 10 poster's picture and tags; shared with the settings preview. */
-@Composable
-internal fun PosterFace(item: CinemaItem) {
-    val context = LocalContext.current
-    Box(Modifier.fillMaxSize()) {
-        val url = item.posterUrl ?: item.cardUrl
-        if (url != null) {
-            CardPicture(url, 224, 336, contentDescription = item.title, modifier = Modifier.fillMaxSize())
-        }
-        if (item.posterUrl == null) {
-            Text(item.title, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
-        }
-        if (LocalOverlays.current.progress) item.progress?.let { p -> ProgressBar(p, Modifier.align(Alignment.BottomStart)) }
-        PosterBadges(item, tall = true)
-    }
-}
-
-@Composable
-internal fun CinemaCard(
-    item: CinemaItem,
-    onFocused: (CinemaItem) -> Unit,
-    onClick: (CinemaItem) -> Unit,
-    width: Dp = 208.dp,
-    /** On the card itself (the focusable part): a focus requester to come back to it. */
-    modifier: Modifier = Modifier,
-    /** OK held on the card (Continue Watching's menu); null: a long press is just a press. */
-    onLongClick: ((CinemaItem) -> Unit)? = null,
-) {
-    val shape = RoundedCornerShape(6.dp)
-    Column(Modifier.width(width)) {
-        // Built while the remote moves: the shell now, the face once still ([CardFill])
-        val filled = rememberCardFilled(item.key)
-        // One art lookup for the picture, logo, scores and caption, with the face (Home's warm-up
-        // looks up the art of each row's first cards ahead; a lookup per shell made every key
-        // press that brought in a row twice as heavy)
-        val art = if (filled) rememberArtState(item) else null
-        Card(
-            onClick = { onClick(item) },
-            onLongClick = onLongClick?.let { l -> { l(item) } },
-            shape = CardDefaults.shape(shape),
-            border = CardDefaults.border(focusedBorder = Border.None),
-            scale = CardDefaults.scale(focusedScale = 1f),
-            glow = CardDefaults.glow(),
-            colors = CardDefaults.colors(containerColor = Color(0xFF1F1F1F)),
-            modifier = modifier.width(width).aspectRatio(16f / 9f).glideLift { onFocused(item) }.tapToClick { onClick(item) },
-        ) {
-            if (art != null) CinemaCardFace(item, width, art)
-        }
-        if (LocalOverlays.current.captions) CardCaption(item, art?.art)
-    }
-}
-
-/** "Apr 24, 2019", in the device's language. */
-private val CAPTION_DATE = java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy")
-
-/** Under a card (Poster tags → Title and date): the name, then its date and length. */
-@Composable
-internal fun CardCaption(
-    item: CinemaItem,
-    art: com.wholphinplus.sources.core.TitleArt? = rememberArt(item),
-) {
-    Column(Modifier.fillMaxWidth().padding(top = 9.dp, start = 2.dp, end = 2.dp)) {
-        Text(item.title, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            // The full release date from TMDB when the server only knows the year
-            val released = art?.released?.takeIf { item.kind != BaseItemKind.EPISODE }
-            val date = released?.let { runCatching { CAPTION_DATE.format(java.time.LocalDate.parse(it)) }.getOrNull() } ?: item.captionDate.orEmpty()
-            Text(date, color = InkDim, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f))
-            item.captionLength?.let { Text(it, color = InkDim, fontSize = 11.sp, maxLines = 1) }
-        }
-    }
-}
-
-/**
- * A wide card's picture and every tag on it (Settings → Orca+ → Poster tags). Shared by the
- * rows and the settings preview, so the preview is exactly what the rows draw.
- */
-@Composable
-internal fun CinemaCardFace(
-    item: CinemaItem,
-    width: Dp,
-    artState: ArtState = rememberArtState(item),
-) {
-    val context = LocalContext.current
-    val o = LocalOverlays.current
-    val art = artState.art
-    // TMDB's art is on its way (for a moment at most): the picture and the logo or name wait for
-    // it, rather than the server's picture loading and then being swapped
-    val waiting = artState.waiting
-    val choice = cardChoice(item, art, o)
-    val logo = choice.logo
-    val clean = choice.clean
-    val titled = choice.titled
-    val url = choice.url
-    // No logo: the name is written on the picture only when it isn't already under the card
-    val drawName = clean != null || (titled == null && !item.cardHasTitleArt && !o.captions)
-    Box(Modifier.fillMaxSize()) {
-        if (waiting) {
-            Unit
-        } else if (url != null) {
-            // Decoded at card size: small, fast, and cached for the next visit
-            CardPicture(url, 416, 234, contentDescription = item.title, modifier = Modifier.fillMaxSize())
-        } else {
-            // No wide art on the server or TMDB: the poster filling the card, or a plain title
-            // card, instead of an empty grey box
-            NoWideArt(item.posterUrl, context)
-        }
-        if (drawName && !waiting) {
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.4f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.8f))))
-            val bottom = if (item.badge != null && o.newLabels) 22.dp else 10.dp
-            if (logo != null && clean != null) {
-                FittedLogo(
-                    logo,
-                    height = width * 0.23f,
-                    // Up to 60% of the card: the small score in the opposite corner still clears it
-                    maxWidth = width * 0.6f,
-                    alignment = Alignment.BottomStart,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = bottom),
-                )
-            } else {
-                Text(
-                    item.title,
-                    color = Ink,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 10.dp, end = 10.dp, bottom = bottom),
-                )
-            }
-        }
-        item.badge?.takeIf { o.newLabels }?.let {
-            Text(
-                it,
-                color = Color.White,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.BottomCenter).background(Label, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)).padding(horizontal = 7.dp, vertical = 2.dp),
-            )
-        }
-        if (o.progress) item.progress?.let { p -> ProgressBar(p, Modifier.align(Alignment.BottomStart)) }
-        // A second pass: the streaming logos, quality tags and scores are ~35% of a card's cost,
-        // built a frame after the picture and logo so no frame builds a whole card
-        if (rememberCardFilled(CardExtras(item.key))) {
-            PosterBadges(item)
-            ServiceLogos(item, art?.serviceUrls().orEmpty().take(o.maxServices))
-            CardRatings(item, art)
-        }
-    }
-}
-
-/** [CinemaCardFace]'s second pass, by title ([rememberCardFilled]). */
-private data class CardExtras(
-    val key: Any,
-)
-
-/** Which pictures a wide card draws ([CinemaCardFace]); the start-up warm-up asks for the same. */
-internal class CardChoice(
-    val logo: String?,
-    val clean: String?,
-    val titled: String?,
-    val url: String?,
-)
-
-internal fun cardChoice(
-    item: CinemaItem,
-    art: com.wholphinplus.sources.core.TitleArt?,
-    o: PosterOverlays,
-): CardChoice {
-    // Card-size logos: drawn at most ~250 px wide ([PosterSize.cardLogo])
-    val logo = (art?.logoUrl() ?: item.logoUrl)?.let(PosterSize::cardLogo)
-    // A title with a logo: its clean picture with the logo laid over the bottom corner, the same
-    // on every card (art with the name baked in puts it anywhere, at any size). Without one, or
-    // with title logos off: art with the name baked in, else the picture with the name on it
-    // TMDB's picture first: its CDN answers in ~0.1 s on a connection of its own, where the
-    // server's (often the same TMDB picture) took 0.4-0.7 s and queued behind the rows' requests
-    val clean = if (logo != null && o.titleLogos) art?.cleanCardUrl() ?: item.cleanCardUrl else null
-    val titled = if (clean == null) art?.cardUrl() else null
-    return CardChoice(logo, clean, titled, clean ?: titled ?: item.cardUrl)
-}
-
-/**
- * A wide card's picture for a title that only has a poster, or nothing at all. The poster fills
- * the card, cropped to its upper middle: the key art sits there on most posters, and the title
- * printed lower down would only repeat the name the card shows anyway.
- */
-@Composable
-private fun NoWideArt(
-    poster: String?,
-    context: android.content.Context,
-) {
-    if (poster != null) {
-        CardPicture(
-            poster,
-            416,
-            624,
-            contentDescription = null,
-            alignment = androidx.compose.ui.BiasAlignment(0f, -0.35f),
-            modifier = Modifier.fillMaxSize(),
-        )
-    } else {
-        Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF2B2734), Color(0xFF141318))))) {
-            Text("+", color = Plus.copy(alpha = 0.35f), fontSize = 44.sp, fontWeight = FontWeight.Black, modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp))
-        }
-    }
-}
-
-/**
- * What a card already knows about a title, handed to its Cinema page so the page draws at once
- * (art, logo, overview, Play) while the rest loads. Episodes aren't handed over: their card
- * opens the series.
- */
-internal object DetailsPreview {
-    private val map = java.util.concurrent.ConcurrentHashMap<UUID, CinemaItem>()
-
-    fun put(item: CinemaItem) {
-        if (item.id == item.detailsId) map[item.id] = item
-    }
-
-    operator fun get(id: UUID): CinemaItem? = map[id]
-}
-
-/** Titles to suggest before you search: what's on your home, billboard first. */
-internal fun homeSuggestions(): List<CinemaItem> {
-    val home = TabCache.data[CinemaTab.HOME] ?: return emptyList()
-    return (home.featured + home.rows.flatMap { it.items })
-        .filter { it.kind != BaseItemKind.EPISODE && (it.backdropUrl != null || it.cardUrl != null) }
-        .distinctBy { it.detailsId }
-        .take(18)
-}
-
-/**
- * A real title from your home for the Poster tags preview: one with a logo and streaming
- * services if there is one (so those tags show), else any title with art; null before Home
- * has loaded.
- */
-internal fun previewTitle(art: CinemaArt?): CinemaItem? {
-    val all = TabCache.data[CinemaTab.HOME]?.rows?.flatMap { it.items }.orEmpty().filter { it.kind != BaseItemKind.EPISODE && it.tmdbId != null }
-    fun known(i: CinemaItem) = art?.cached(i.tmdbTv, i.tmdbId!!)
-    return all.firstOrNull { known(it)?.let { a -> a.logo != null && a.services.isNotEmpty() } == true }
-        ?: all.firstOrNull { known(it)?.logo != null }
-        ?: all.firstOrNull { it.cardUrl != null }
-}
-
-/**
- * Loads Home ahead of time (the welcome tour does, so Home is there the moment it ends) and the
- * title art of its first rows, so previews can show a real title.
- */
-internal suspend fun preloadHome(
-    repo: CinemaRepository,
-    art: CinemaArt,
-) {
-    val gen = repo.listsGeneration
-    val plays = repo.plays
-    val d = repo.load(RowsPage.HOME)
-    TabCache.data[CinemaTab.HOME] = d
-    if (d.failed == 0) TabCache.stamp(CinemaTab.HOME, gen, plays)
-    kotlinx.coroutines.coroutineScope {
-        d.rows.take(3).flatMap { it.items.take(6) }.filter { it.tmdbId != null && it.kind != BaseItemKind.EPISODE }.forEach { i ->
-            launch { runCatching { art.art(i.tmdbTv, i.tmdbId!!) } }
-        }
-    }
-}
-
-/**
- * The card (or the billboard: [row] null) a page opened a title page or the player from, so Back
- * lands on it instead of on Play (Home) or on nothing (the other tabs). Taken once, by that page.
- */
-internal object ReturnCard {
-    class Spot(
-        val screen: String,
-        val row: String?,
-        val key: String?,
-    )
-
-    @Volatile private var spot: Spot? = null
-
-    fun mark(
-        screen: String,
-        row: String?,
-        key: String?,
-    ) {
-        spot = Spot(screen, row, key)
-    }
-
-    fun take(screen: String): Spot? = spot?.takeIf { it.screen == screen }?.also { spot = null }
-}
-
-/** What Down from a page's top menu lands on (its Play, My List's first title), by page. */
-internal object DownTargets {
-    private val map = java.util.concurrent.ConcurrentHashMap<String, FocusRequester>()
-
-    fun of(screen: String): FocusRequester? = map[screen]
-
-    @Composable
-    fun Register(
-        screen: String,
-        target: FocusRequester,
-    ) {
-        DisposableEffect(screen, target) {
-            map[screen] = target
-            onDispose { map.remove(screen, target) }
-        }
-    }
-}
-
-/** Each tab's last page, kept for the life of the app so returning to it is instant. */
-private object TabCache {
-    val data = java.util.concurrent.ConcurrentHashMap<CinemaTab, CinemaHomeData>()
-    val at = java.util.concurrent.ConcurrentHashMap<CinemaTab, Long>()
-
-    /** The [HomeCollections.changed] each tab's page was loaded under (when it started). */
-    private val under = java.util.concurrent.ConcurrentHashMap<CinemaTab, Int>()
-
-    /** The progress overlay's [ProgressOverlay.changes] each tab's page was loaded under. */
-    private val watched = java.util.concurrent.ConcurrentHashMap<CinemaTab, Long>()
-
-    /** [tab]'s page was loaded just now, from the lists as they were at [changed] and the plays as at [plays]. */
-    fun stamp(
-        tab: CinemaTab,
-        changed: Int,
-        plays: Long,
-    ) {
-        at[tab] = System.currentTimeMillis()
-        under[tab] = changed
-        watched[tab] = plays
-    }
-
-    /**
-     * [tab]'s page is recent and from the current lists. A load that began before a refresh
-     * announced new rows (and so finished after the caches were cleared) isn't fresh: the
-     * announcement's reload would otherwise skip it and the new rows wait for the next visit.
-     */
-    fun fresh(
-        tab: CinemaTab,
-        changed: Int,
-        plays: Long,
-    ) = under[tab] == changed && watched[tab] == plays && System.currentTimeMillis() - (at[tab] ?: 0L) < 2 * 60_000
-}
-
-/**
- * Each tab's last full page on the device, so a cold start (Android often closes Orca+ while
- * other apps run) shows the page at once instead of after its 2-6 s of requests; the fresh load
- * replaces it when it lands. Kept per server and profile, for a week.
- */
-@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-internal object PageSnapshots {
-    /** Tabs never saved: My List is quick, My Servers' extra-server titles mean nothing after a restart ([ServerTitles]). */
-    val UNSAVED = setOf(CinemaTab.MY_LIST, CinemaTab.SERVERS)
-
-    @kotlinx.serialization.Serializable
-    private class Saved(
-        val owner: String,
-        val at: Long,
-        val page: CinemaHomeData,
-    )
-
-    private val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-    private var dir: java.io.File? = null
-
-    fun attach(context: android.content.Context) {
-        if (dir == null) dir = java.io.File(context.applicationContext.noBackupFilesDir, "cinema_pages")
-    }
-
-    private fun file(tab: CinemaTab) = dir?.let { java.io.File(it, "${tab.name.lowercase()}.json") }
-
-    /** [whose]: [CinemaRepository.owner], asked off the main thread (it may ask the server once). */
-    suspend fun read(
-        tab: CinemaTab,
-        whose: () -> String?,
-    ): CinemaHomeData? =
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val started = System.currentTimeMillis()
-            val owner = whose()
-            val f = file(tab)?.takeIf { owner != null && it.exists() }
-            if (f == null) {
-                timber.log.Timber.i("Cinema snapshot %s: none (signed in: %b)", tab.name, owner != null)
-                return@withContext null
-            }
-            val saved = runCatching { f.inputStream().buffered().use { json.decodeFromStream(Saved.serializer(), it) } }.getOrNull()
-            if (saved == null) f.delete()
-            val page = saved?.takeIf { it.owner == owner && System.currentTimeMillis() - it.at < MAX_AGE_MS }?.page
-            timber.log.Timber.i("Cinema snapshot %s: %s in %d ms", tab.name, if (page != null) "shown" else "not used", System.currentTimeMillis() - started)
-            page
-        }
-
-    /** What each tab's file holds (its rows and titles) and when it was written, to skip rewriting the same page. */
-    private val written = java.util.concurrent.ConcurrentHashMap<CinemaTab, Pair<Int, Long>>()
-
-    /**
-     * Written once the remote rests (encoding ~1.4 MB on the Shield's cores while a row glides
-     * cost frames), streamed to the file, and not at all when the same rows and titles were saved
-     * within the day (most reloads change nothing but progress).
-     */
-    suspend fun save(
-        tab: CinemaTab,
-        whose: () -> String?,
-        page: CinemaHomeData,
-    ) {
-        if (tab in UNSAVED) return
-        Conductor.later {
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                val owner = whose() ?: return@withContext
-                val f = file(tab) ?: return@withContext
-                val shape = snapshotShape(owner, page)
-                val now = System.currentTimeMillis()
-                written[tab]?.let { (was, at) -> if (was == shape && now - at < RESAVE_MS && f.exists()) return@withContext }
-                runCatching {
-                    f.parentFile?.mkdirs()
-                    val tmp = java.io.File(f.path + ".tmp")
-                    tmp.outputStream().buffered().use { json.encodeToStream(Saved.serializer(), Saved(owner, now, page), it) }
-                    tmp.renameTo(f)
-                    written[tab] = shape to now
-                }.onFailure { timber.log.Timber.w(it, "Cinema snapshot %s not saved", tab.name) }
-            }
-        }
-    }
-
-    /** The rows were rearranged: a saved page no longer matches its layout. */
-    fun clear() {
-        written.clear()
-        dir?.listFiles()?.forEach { it.delete() }
-    }
-
-    private const val MAX_AGE_MS = 7 * 24 * 60 * 60_000L
-
-    /** A page with the same rows and titles is written again after this long (its age counts). */
-    private const val RESAVE_MS = 24 * 60 * 60_000L
-}
-
-/** A page's rows and titles in order (and whose they are), as a number: equal when a save would write the same page. */
-internal fun snapshotShape(
-    owner: String,
-    page: CinemaHomeData,
-): Int {
-    var h = owner.hashCode()
-    page.featured.forEach { h = h * 31 + it.key.hashCode() }
-    page.rows.forEach { row ->
-        h = h * 31 + row.title.hashCode()
-        row.items.forEach { h = h * 31 + it.key.hashCode() }
-        row.tiles.forEach { h = h * 31 + it.id.hashCode() }
-    }
-    return h
-}
-
 /** How long the billboard waits after a press before it checks the rows have stopped ([RowMotion]). */
 private const val SETTLE_MS = 160L
 
@@ -2433,45 +1363,6 @@ private val DPAD = setOf(Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, 
 /** Rows that are on screen when a page opens; their art and badges load first. */
 private const val ON_SCREEN_ROWS = 2
 
-/** What MemoryTrim may drop: every tab's page but Home (they reload in the background). */
-internal object CinemaCaches {
-    fun trim() {
-        TabCache.data.keys.filter { it != CinemaTab.HOME }.forEach {
-            TabCache.data.remove(it)
-            TabCache.at.remove(it)
-        }
-        RowMemory.trim { it == "tab:${CinemaTab.HOME.name}" }
-        trimDetails()
-    }
-
-    /** My Servers' rows changed (its extra servers switched on or off): it loads afresh next time it shows. */
-    fun serversChanged() {
-        TabCache.data.remove(CinemaTab.SERVERS)
-        TabCache.at.remove(CinemaTab.SERVERS)
-        RowMemory.trim { it != "tab:${CinemaTab.SERVERS.name}" && !it.startsWith("server:") }
-    }
-
-    /** The rows were rearranged: every tab loads afresh next time it shows. */
-    fun homeChanged() {
-        TabCache.data.clear()
-        TabCache.at.clear()
-        RowMemory.clear()
-        PageSnapshots.clear()
-    }
-
-    /**
-     * Rows kept their places but gained or lost titles (the 6-hourly match, a new day's charts):
-     * every tab loads afresh, but the pages saved on the device stay. They show at once and the
-     * fresh load fills in over them. Deleting them (as [homeChanged] did for this too) meant the
-     * first open after nearly every refresh built the page row by row, slow rows pushing in
-     * between the ones already shown.
-     */
-    fun rowsRefreshed() {
-        TabCache.data.clear()
-        TabCache.at.clear()
-    }
-}
-
 /** My List: every saved title in a calm grid, the focused one's art behind it. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -2482,7 +1373,63 @@ private fun MyListScreen(
 ) {
     val first = remember { FocusRequester() }
     DownTargets.Register("tab:${CinemaTab.MY_LIST.name}", first)
-    TitleGrid("My List", items, "Titles you add with My List on a title's page show up here.", onOpen, focusAt = focusAt, firstFocus = first)
+    // Collections saved from search (and your own lists), above your titles; OK opens one's page
+    val (hook, repo) = rememberContinueRepo()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val finder =
+        remember {
+            val tmdb = dagger.hilt.android.EntryPointAccessors.fromApplication(context.applicationContext, com.wholphinplus.sources.ui.SourcesEntryPoint::class.java).searchService().tmdb
+            CollectionSearch(hook, repo, tmdb)
+        }
+    val lists by hook.collections.lists.collectAsState()
+    val saved = remember(lists) { finder.saved(lists) }
+    var open by remember { mutableStateOf<CollectionSearch.Hit?>(null) }
+    val tileFocus = remember { HashMap<String, FocusRequester>() }
+    val scope = rememberCoroutineScope()
+    TitleGrid(
+        "My List",
+        items,
+        "Titles you add with My List on a title's page show up here.",
+        onOpen,
+        focusAt = focusAt,
+        firstFocus = first,
+        header =
+            if (saved.isEmpty()) {
+                null
+            } else {
+                { SavedCollections(saved, tileFocus) { open = it } }
+            },
+    )
+    open?.let { hit ->
+        CollectionPage(hit, finder, hook, onOpen = onOpen, onClose = {
+            open = null
+            // Back on the tile it was opened from
+            scope.launch {
+                androidx.compose.runtime.withFrameNanos {}
+                runCatching { tileFocus[hit.key]?.requestFocus() }
+            }
+        })
+    }
+}
+
+/** My List's "Saved collections": one tile each, newest saved last (the order you saved them in). */
+@Composable
+private fun SavedCollections(
+    saved: List<CollectionSearch.Hit>,
+    focus: HashMap<String, FocusRequester>,
+    onOpen: (CollectionSearch.Hit) -> Unit,
+) {
+    Column(Modifier.padding(top = 6.dp)) {
+        Text("Saved collections", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 48.dp, bottom = 2.dp))
+        androidx.compose.foundation.lazy.LazyRow(
+            contentPadding = PaddingValues(horizontal = 48.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            items(saved, key = { it.key }) { hit ->
+                CollectionTile(hit, 240.dp, Modifier.focusRequester(focus.getOrPut(hit.key) { FocusRequester() })) { onOpen(hit) }
+            }
+        }
+    }
 }
 
 /** Settings' left side in Cinema mode: a faded billboard image, the wordmark and the heading. */

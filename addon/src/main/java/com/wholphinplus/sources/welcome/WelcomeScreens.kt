@@ -1,8 +1,8 @@
 package com.wholphinplus.sources.welcome
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -16,10 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -47,7 +44,6 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -72,7 +68,6 @@ import com.wholphinplus.sources.cinema.CinemaFade
 import com.wholphinplus.sources.cinema.CinemaRepository
 import com.wholphinplus.sources.cinema.Ink
 import com.wholphinplus.sources.cinema.InkDim
-import com.wholphinplus.sources.cinema.Label
 import com.wholphinplus.sources.cinema.Plus
 import com.wholphinplus.sources.cinema.Stage
 import kotlinx.coroutines.CancellationException
@@ -301,7 +296,7 @@ private fun ServerStep(
     LaunchedEffect(error) {
         wrongKind = null
         if (error != null && address.isNotBlank()) {
-            val kind = withContext(Dispatchers.IO) { runCatching { hook.client.fetchPublicInfo(com.wholphinplus.sources.core.normalizeServerUrl(address.trim())).serverKind }.getOrNull() }
+            val kind = withContext(Dispatchers.IO) { runCatching { hook.client.fetchPublicInfo(com.wholphinplus.sources.core.normalizeServerUrl(address.trim())).serverKind }.cancellable().getOrNull() }
             // Emby is welcome as the main server (EmbyBridge); Plex isn't
             wrongKind = kind?.takeIf { it == ServerKind.PLEX }
         }
@@ -548,7 +543,7 @@ private fun StepDotsAtBottom(current: Int) {
 
 // ======================================================================== after sign-in
 
-private enum class FinishStep { CHECKING, RESTORE, NO_PROFILE, TAGS, PAGES, POWERUPS, SAVE, LIBRARIES, EMBY_CHOOSE, EMBY, EMBY_PICK, EMBY_ADDRESS, PLEX, JELLYFIN_CHOOSE, SILO_CHOOSE, JELLYFIN, OTHER_ADDRESS, LOOK, OUTRO }
+private enum class FinishStep { CHECKING, RESTORE, NO_PROFILE, DEVICE, TAGS, SAVE, LIBRARIES, EMBY_CHOOSE, EMBY, EMBY_PICK, EMBY_ADDRESS, PLEX, JELLYFIN_CHOOSE, SILO_CHOOSE, JELLYFIN, OTHER_ADDRESS, OUTRO }
 
 /**
  * Signed in: bring in other libraries (Emby Connect, Plex, more Jellyfin) and choose the look,
@@ -563,10 +558,6 @@ fun WelcomeFinish(
     val hook = remember { context.welcomeHook() }
     val scope = rememberCoroutineScope()
     val connections by hook.store.connections.collectAsState()
-    val cinemaMode by hook.store.cinemaMode.collectAsState()
-    // Until a look is picked the tour counts Cinema's stops (it's the one offered first)
-    var lookPicked by rememberSaveable { mutableStateOf(false) }
-    val cinema = cinemaMode || !lookPicked
     var step by rememberSaveable { mutableStateOf(FinishStep.CHECKING) }
     // Whether the account already has a cloud profile (null: the cloud couldn't be asked)
     var cloudHas by rememberSaveable { mutableStateOf<Boolean?>(null) }
@@ -594,7 +585,7 @@ fun WelcomeFinish(
     var posters by remember { mutableStateOf<List<String>>(emptyList()) }
     var message by remember { mutableStateOf<String?>(null) }
     var otherIsSilo by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(Unit) { posters = runCatching { CinemaRepository(hook, hook.collections).posterWall() }.getOrDefault(emptyList()) }
+    LaunchedEffect(Unit) { posters = runCatching { CinemaRepository(hook, hook.collections).posterWall() }.cancellable().getOrDefault(emptyList()) }
 
     fun save(c: ServerConnection) {
         hook.store.save(c)
@@ -611,11 +602,8 @@ fun WelcomeFinish(
                 when (step) {
                     FinishStep.CHECKING, FinishStep.LIBRARIES -> step
                     FinishStep.SAVE -> FinishStep.TAGS
-                    // One look now: no "pick your home screen" stop between libraries and tags
-                    FinishStep.POWERUPS -> FinishStep.PAGES
-                    FinishStep.PAGES -> FinishStep.TAGS
-                    FinishStep.TAGS -> FinishStep.LIBRARIES
-                    FinishStep.LOOK -> FinishStep.LIBRARIES
+                    FinishStep.TAGS -> FinishStep.DEVICE
+                    FinishStep.DEVICE -> FinishStep.LIBRARIES
                     FinishStep.EMBY_PICK -> FinishStep.EMBY
                     FinishStep.EMBY, FinishStep.EMBY_ADDRESS -> FinishStep.EMBY_CHOOSE
                     FinishStep.JELLYFIN, FinishStep.OTHER_ADDRESS -> if (otherIsSilo) FinishStep.SILO_CHOOSE else FinishStep.JELLYFIN_CHOOSE
@@ -624,7 +612,7 @@ fun WelcomeFinish(
         }
         // Two stops that only explained things (your pages, power-ups) left the tour 2026-10-09:
         // Home shows the pages, Settings → Keys & Services takes keys (from the phone too)
-        val stops = TourStop.entries - TourStop.LOOK - TourStop.PAGES - TourStop.POWERUPS
+        val stops = TourStop.entries
         androidx.compose.runtime.CompositionLocalProvider(LocalTourStops provides stops) {
             AnimatedContent(
                 targetState = step,
@@ -652,9 +640,8 @@ fun WelcomeFinish(
                             modifier = Modifier.fillMaxSize().background(Stage.copy(alpha = 0.82f)),
                         )
                     FinishStep.NO_PROFILE -> NoProfileStep(offline = cloudHas == null, onNew = { step = FinishStep.LIBRARIES })
+                    FinishStep.DEVICE -> DeviceStep(hook, onNext = { step = FinishStep.TAGS })
                     FinishStep.TAGS -> TagsStep(hook, onNext = { step = if (cloudHas == false && !hook.profileSync.status.value.on) FinishStep.SAVE else FinishStep.OUTRO })
-                    FinishStep.PAGES -> PagesStep(hook, onNext = { step = FinishStep.POWERUPS })
-                    FinishStep.POWERUPS -> PowerUpsStep(hook, onNext = { step = if (cloudHas == false && !hook.profileSync.status.value.on) FinishStep.SAVE else FinishStep.OUTRO })
                     FinishStep.SAVE ->
                         com.wholphinplus.sources.ui.CloudPinFlow(
                             hook,
@@ -668,7 +655,7 @@ fun WelcomeFinish(
                             nameFirst = true,
                             modifier = Modifier.fillMaxSize().background(Stage.copy(alpha = 0.82f)),
                         )
-                    FinishStep.LIBRARIES -> LibrariesStep(connections, message, onPick = { step = it }, onNext = { step = FinishStep.TAGS })
+                    FinishStep.LIBRARIES -> LibrariesStep(connections, message, onPick = { step = it }, onNext = { step = FinishStep.DEVICE })
                     FinishStep.EMBY_CHOOSE ->
                         ChooseStep(
                             "Add your Emby server",
@@ -733,12 +720,6 @@ fun WelcomeFinish(
                         save(it)
                         step = FinishStep.LIBRARIES
                     }, onCancel = { step = if (otherIsSilo) FinishStep.SILO_CHOOSE else FinishStep.JELLYFIN_CHOOSE })
-                    FinishStep.LOOK -> LookStep(onChoose = { cinema ->
-                        hook.store.setCinemaMode(cinema)
-                        lookPicked = true
-                        // Cinema shows poster tags and its pages; both looks then see power-ups
-                        step = if (cinema) FinishStep.TAGS else FinishStep.POWERUPS
-                    })
                     FinishStep.OUTRO -> Outro(onFinished = {
                         hook.store.setOnboarding(Onboarding.DONE)
                         onDone()
@@ -884,7 +865,7 @@ internal fun EmbyPickStep(
     LaunchedEffect(error) { if (error != null) busy = false }
     LaunchedEffect(account) {
         if (account == null) return@LaunchedEffect onCancel()
-        servers = runCatching { withContext(Dispatchers.IO) { hook.client.embyConnectServers(account) } }.onFailure { problem = it.message }.getOrDefault(emptyList())
+        servers = runCatching { withContext(Dispatchers.IO) { hook.client.embyConnectServers(account) } }.cancellable().onFailure { problem = it.message }.getOrDefault(emptyList())
         // A few: all ticked. An account with many (owner, 2026-10-08: too many to scroll): pick
         if (!single) servers?.takeIf { it.size <= 3 }?.forEach { chosen += it.systemId.ifBlank { it.name } }
         delay(100)
@@ -1102,90 +1083,6 @@ internal fun JellyfinStep(
                     PillButton("Continue", enabled = address.isNotBlank(), onClick = { go = address.trim() })
                     PillButton("Back", primary = false, onClick = onCancel)
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LookStep(onChoose: (Boolean) -> Unit) {
-    val cinemaCard = remember { FocusRequester() }
-    var cinema by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) { runCatching { cinemaCard.requestFocus() } }
-    Column(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 32.dp), verticalArrangement = Arrangement.Center) {
-        StepHeader(tourStep(TourStop.LOOK), "Pick your home screen", "Cinema is the big-screen look with a featured billboard. Classic is the familiar home with a side menu. Switch any time in Settings.")
-        Spacer(Modifier.height(20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-            LookCard("Cinema", "Billboard, tall rows, title art", selected = cinema, modifier = Modifier.width(360.dp).focusRequester(cinemaCard), onFocus = { cinema = true }, onClick = { onChoose(true) }) { CinemaPreview() }
-            LookCard("Classic", "The familiar home with a side menu", selected = !cinema, modifier = Modifier.width(360.dp), onFocus = { cinema = false }, onClick = { onChoose(false) }) { ClassicPreview() }
-        }
-        Spacer(Modifier.height(12.dp))
-        Text("Press OK to start watching", color = InkDim, fontSize = 13.sp)
-    }
-}
-
-@Composable
-private fun LookCard(
-    title: String,
-    subtitle: String,
-    selected: Boolean,
-    modifier: Modifier,
-    onFocus: () -> Unit,
-    onClick: () -> Unit,
-    preview: @Composable () -> Unit,
-) {
-    val f = com.wholphinplus.sources.cinema.rememberFocusFade(Glass, Color(0x33FFFFFF), Ink, Ink)
-    Surface(
-        onClick = onClick,
-        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(20.dp)),
-        colors = ClickableSurfaceDefaults.colors(containerColor = f.fill, contentColor = f.content, focusedContainerColor = f.fill, focusedContentColor = f.content),
-        border =
-            ClickableSurfaceDefaults.border(
-                border = androidx.tv.material3.Border(androidx.compose.foundation.BorderStroke(1.dp, GlassLine), shape = RoundedCornerShape(20.dp)),
-            ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
-        interactionSource = f.source,
-        modifier = modifier.onFocusChanged { if (it.isFocused) onFocus() }.tapClick(onClick).then(com.wholphinplus.sources.cinema.glideEdge(1.03f, 20.dp)),
-    ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(12.dp)).background(Stage)) { preview() }
-            Spacer(Modifier.height(2.dp))
-            Text(title, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
-            Text(subtitle, fontSize = 13.sp, color = InkDim, maxLines = 1)
-        }
-    }
-}
-
-/** A miniature of Cinema mode: billboard, title, buttons, a row of wide cards. */
-@Composable
-private fun CinemaPreview() {
-    Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF3A2D6B), Color(0xFF151320), Color(0xFF5B2238))))) {
-        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Stage, Color.Transparent))))
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("+ SERIES", color = InkDim, fontSize = 7.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-            Box(Modifier.width(110.dp).height(16.dp).clip(RoundedCornerShape(3.dp)).background(Ink))
-            Box(Modifier.width(80.dp).height(5.dp).clip(RoundedCornerShape(3.dp)).background(InkDim))
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Box(Modifier.width(30.dp).height(10.dp).clip(RoundedCornerShape(50)).background(Ink))
-                Box(Modifier.width(36.dp).height(10.dp).clip(RoundedCornerShape(50)).background(Color(0x55FFFFFF)))
-            }
-        }
-        Row(Modifier.align(Alignment.BottomStart).padding(10.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            repeat(4) { i -> Box(Modifier.width(48.dp).height(27.dp).clip(RoundedCornerShape(3.dp)).background(listOf(Violet, Rose, Indigo, Label)[i].copy(alpha = 0.8f))) }
-        }
-    }
-}
-
-/** A miniature of the classic home: side menu and a grid of posters. */
-@Composable
-private fun ClassicPreview() {
-    Row(Modifier.fillMaxSize().background(Color(0xFF1B1A24))) {
-        Column(Modifier.width(26.dp).fillMaxHeight().background(Color(0xFF24222F)).padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            repeat(6) { Box(Modifier.size(12.dp).clip(CircleShape).background(Color(0x55FFFFFF))) }
-        }
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            repeat(2) {
-                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) { repeat(6) { j -> Box(Modifier.width(22.dp).height(33.dp).clip(RoundedCornerShape(3.dp)).background(listOf(Violet, Indigo, Rose)[j % 3].copy(alpha = 0.7f))) } }
             }
         }
     }

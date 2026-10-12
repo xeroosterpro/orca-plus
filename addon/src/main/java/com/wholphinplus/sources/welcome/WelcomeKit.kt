@@ -95,9 +95,21 @@ internal fun WelcomeBackdrop(
     posters: List<String>,
     modifier: Modifier = Modifier,
 ) {
-    val t = rememberInfiniteTransition(label = "aurora")
-    val phase by t.animateFloat(0f, (2 * PI).toFloat(), infiniteRepeatable(tween(26_000, easing = LinearEasing)), label = "phase")
-    val rise by t.animateFloat(0f, 1f, infiniteRepeatable(tween(18_000, easing = LinearEasing)), label = "rise")
+    // Light boxes (DeviceClass): a still aurora; drifting, it redrew the whole screen every frame.
+    // States read only in the Canvas below (draw time), as before
+    val still = com.wholphinplus.sources.DeviceClass.simpleMotion
+    val phaseState: androidx.compose.runtime.State<Float>
+    val riseState: androidx.compose.runtime.State<Float>
+    if (still) {
+        phaseState = remember { androidx.compose.runtime.mutableFloatStateOf(0.9f) }
+        riseState = remember { androidx.compose.runtime.mutableFloatStateOf(0.35f) }
+    } else {
+        val t = rememberInfiniteTransition(label = "aurora")
+        phaseState = t.animateFloat(0f, (2 * PI).toFloat(), infiniteRepeatable(tween(26_000, easing = LinearEasing)), label = "phase")
+        riseState = t.animateFloat(0f, 1f, infiniteRepeatable(tween(18_000, easing = LinearEasing)), label = "rise")
+    }
+    val phase by phaseState
+    val rise by riseState
     Box(modifier.fillMaxSize().background(Stage)) {
         if (posters.isNotEmpty()) PosterWall(posters)
         Canvas(Modifier.fillMaxSize()) {
@@ -138,8 +150,10 @@ internal fun WelcomeBackdrop(
 @Composable
 private fun BoxScope.PosterWall(posters: List<String>) {
     val context = LocalContext.current
-    val t = rememberInfiniteTransition(label = "wall")
-    val drift by t.animateFloat(0f, 1f, infiniteRepeatable(tween(90_000, easing = LinearEasing)), label = "drift")
+    // Light boxes: the wall stands still
+    val driftState: androidx.compose.runtime.State<Float> =
+        if (com.wholphinplus.sources.DeviceClass.simpleMotion) remember { androidx.compose.runtime.mutableFloatStateOf(0.3f) } else rememberInfiniteTransition(label = "wall").animateFloat(0f, 1f, infiniteRepeatable(tween(90_000, easing = LinearEasing)), label = "drift")
+    val drift by driftState
     val fade = remember { Animatable(0f) }
     LaunchedEffect(posters) { fade.animateTo(1f, tween(1600, easing = CinemaEase)) }
     Column(

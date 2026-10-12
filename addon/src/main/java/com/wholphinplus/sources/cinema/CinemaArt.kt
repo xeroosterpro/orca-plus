@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import android.content.Context
 import com.wholphinplus.sources.SearchService
 import com.wholphinplus.sources.core.TitleArt
@@ -31,8 +32,7 @@ class CinemaArt
         @param:ApplicationContext context: Context,
         private val search: SearchService,
     ) {
-        private val prefs = context.getSharedPreferences("wholphinplus_art", Context.MODE_PRIVATE)
-        private val file = java.io.File(context.filesDir, "cinema_art_v4.json")
+        private val file = CacheFiles.at(context, "cinema_art_v4.json")
         private val cache = ConcurrentHashMap<String, TitleArt>()
 
         /** When each title's art was last shown, so the cache drops the ones not seen for longest. */
@@ -51,7 +51,7 @@ class CinemaArt
 
         // Description tags' facts (budget, box office, studio…), per session: asked only when a
         // title page or the editor's preview shows one of them
-        private val facts = ConcurrentHashMap<String, com.wholphinplus.sources.core.TitleFacts>()
+        private val facts = com.wholphinplus.sources.core.lruMap<String, com.wholphinplus.sources.core.TitleFacts>(300)
 
         fun cachedFacts(
             tv: Boolean,
@@ -67,7 +67,7 @@ class CinemaArt
             if (!enabled) return null
             cachedFacts(tv, tmdbId, director)?.let { return it }
             return withContext(Dispatchers.IO) {
-                gate.withPermit { runCatching { search.tmdb.facts(tv, tmdbId, director) }.getOrNull() }
+                gate.withPermit { runCatching { search.tmdb.facts(tv, tmdbId, director) }.cancellable().getOrNull() }
             }?.also { facts["${key(tv, tmdbId)}|$director"] = it }
         }
 
@@ -129,6 +129,26 @@ class CinemaArt
             }
         }
 
+        /**
+         * The title's art with its original language: art cached before the language was kept is
+         * asked again once (a grid's Language filter needs it; cards never did).
+         */
+        suspend fun withLanguage(
+            tv: Boolean,
+            tmdbId: Int,
+        ): TitleArt? {
+            val known = art(tv, tmdbId) ?: return null
+            if (known.lang != null) return known
+            val key = key(tv, tmdbId)
+            val fresh =
+                gate.withPermit {
+                    withContext(Dispatchers.IO) { runCatching { search.tmdb.titleArt(tv, tmdbId) }.cancellable().getOrNull() }
+                } ?: return known
+            cache[key] = fresh
+            save()
+            return fresh
+        }
+
         /** Writes the cache a few seconds after the last new title, off the UI thread (it's big). */
         fun save() {
             pending?.cancel()
@@ -150,13 +170,7 @@ class CinemaArt
             if (saved != null) {
                 saved.items.forEach { (k, v) -> cache.putIfAbsent(k, v) }
                 saved.used.forEach { (k, v) -> used.putIfAbsent(k, v) }
-                return
             }
-            // Carried over once from the preferences it used to live in
-            val old = CacheFiles.legacy(prefs.getString(KEY, null), TitleArt.serializer())
-            old.forEach { (k, v) -> cache.putIfAbsent(k, v) }
-            prefs.edit().clear().apply()
-            if (old.isNotEmpty()) CacheFiles.write(file, TitleArt.serializer(), CacheFiles.Saved(HashMap(cache), HashMap(used)))
         }
 
         private fun key(
@@ -165,9 +179,6 @@ class CinemaArt
         ) = (if (tv) "tv:" else "movie:") + tmdbId
 
         private companion object {
-            // v4: titles carry their services, TMDB score and release date; older entries are fetched again
-            const val KEY = "art_v4"
-
             // ~250 bytes a title: five tabs alone show ~3,000, and dropping titles that are on
             // screen meant looking them up again on the next start
             const val MAX = 10_000

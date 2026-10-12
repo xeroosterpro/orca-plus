@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.welcome
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -39,12 +40,10 @@ import androidx.tv.material3.Text
 import coil3.compose.AsyncImage
 import com.wholphinplus.sources.SourceHook
 import com.wholphinplus.sources.cinema.CinemaRepository
-import com.wholphinplus.sources.cinema.HomeRowType
 import com.wholphinplus.sources.cinema.Ink
 import com.wholphinplus.sources.cinema.InkDim
 import com.wholphinplus.sources.cinema.Plus
 import com.wholphinplus.sources.cinema.PosterOverlays
-import com.wholphinplus.sources.cinema.RowsPage
 import com.wholphinplus.sources.sync.PairStart
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.Dispatchers
@@ -53,7 +52,7 @@ import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 /** The tour's stops, in order. Poster tags and pages are Cinema's only; saving with a PIN follows the tour. */
-internal enum class TourStop { SERVERS, LOOK, TAGS, PAGES, POWERUPS }
+internal enum class TourStop { SERVERS, DEVICE, TAGS }
 
 /** The stops this person's tour has (Classic skips Cinema's). */
 internal val LocalTourStops = compositionLocalOf { TourStop.entries.toList() }
@@ -92,6 +91,174 @@ internal fun NoProfileStep(
     }
 }
 
+/**
+ * This TV: what Orca+ found on the box and how much it should do (owner, 2026-10-11: "showing what
+ * device was detected and what profile to pick… adjust settings and profile to fit the device").
+ * The pick is Settings → This TV → Performance; Light also suggests the Clean poster look next.
+ */
+@Composable
+internal fun DeviceStep(
+    hook: SourceHook,
+    onNext: () -> Unit,
+    // The one-time prompt on an older install ([DevicePrompt]) has no tour around it
+    eyebrow: String? = null,
+    body: String = "Orca+ looked at this box and picked how much it does. Keep that, or choose; Settings → This TV changes it any time.",
+) {
+    val device = com.wholphinplus.sources.DeviceClass
+    // The decoders and the screen are read on a background thread at start: shown as they come
+    var facts by remember { mutableStateOf(device.facts) }
+    LaunchedEffect(Unit) {
+        var tries = 0
+        while (facts.decoders.isEmpty() && facts.screenHeight == 0 && tries++ < 24) {
+            delay(250)
+            facts = device.facts
+        }
+    }
+    val mode by hook.store.deviceMode.collectAsState()
+    val recommended = device.auto
+    val choices =
+        listOf(
+            Triple(device.AUTO, "Auto  ·  ${recommended.label}", "Recommended, and it adjusts itself"),
+            Triple(com.wholphinplus.sources.DeviceClass.Tier.FULL.name, "Full", "Every effect, the most kept ready"),
+            Triple(com.wholphinplus.sources.DeviceClass.Tier.BALANCED.name, "Balanced", "Less kept ready, for mid-range boxes"),
+            Triple(com.wholphinplus.sources.DeviceClass.Tier.LIGHT.name, "Light", "Quicker motion, lighter pictures, for sticks"),
+        )
+    var shown by remember { mutableStateOf(choices.indexOfFirst { it.first == mode }.coerceAtLeast(0)) }
+    val first = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
+    Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 40.dp), horizontalArrangement = Arrangement.spacedBy(48.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(0.46f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            StepHeader(eyebrow ?: tourStep(TourStop.DEVICE), "Tuned for this TV", body)
+            Spacer(Modifier.height(2.dp))
+            choices.forEachIndexed { i, (key, name, about) ->
+                ChoiceCard(
+                    name,
+                    about,
+                    listOf("A", "F", "B", "L")[i],
+                    listOf(Violet, Color(0xFF3E8E7E), Color(0xFF5A5A66), Rose)[i],
+                    modifier = Modifier.onFocusChanged { if (it.isFocused) shown = i }.let { if (i == shown) it.focusRequester(first) else it },
+                    trailing = if (key == mode) "✓" else null,
+                    compact = true,
+                ) {
+                    hook.store.setDeviceMode(key)
+                    hook.store.markDevicePrompted()
+                    onNext()
+                }
+            }
+        }
+        val tier = if (choices[shown].first == device.AUTO) recommended else com.wholphinplus.sources.DeviceClass.Tier.valueOf(choices[shown].first)
+        DevicePanel(facts, recommended, tier, Modifier.weight(0.54f))
+    }
+}
+
+/**
+ * "Tuned for this TV" once on a TV set up before the tour had that stop (owner, 2026-10-11), a few
+ * seconds after the app opens and after the cloud offer has had its turn. Skipped where the
+ * performance was already picked by hand. Any choice, or Back, and it isn't asked again.
+ */
+@Composable
+internal fun DevicePrompt(hook: SourceHook) {
+    var open by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val store = hook.store
+        if (store.devicePrompted) return@LaunchedEffect
+        if (store.deviceMode.value != com.wholphinplus.sources.DeviceClass.AUTO) {
+            store.markDevicePrompted()
+            return@LaunchedEffect
+        }
+        delay(4_000)
+        // Never on top of the cloud offer: wait until it's answered or won't come. (It used to wait
+        // for the offer's answer alone, so a TV where the offer never appeared never saw this.)
+        while (!com.wholphinplus.sources.ui.PromptTurn.cloudDone) delay(500)
+        delay(1_500)
+        if (!store.devicePrompted) open = true
+    }
+    if (!open) return
+    val close = {
+        hook.store.markDevicePrompted()
+        open = false
+    }
+    com.wholphinplus.sources.ui.PadDialog(onClose = close) {
+        Box(Modifier.fillMaxSize()) {
+            WelcomeBackdrop(emptyList())
+            DeviceStep(
+                hook,
+                onNext = close,
+                eyebrow = "NEW IN ORCA+",
+                body = "Orca+ can now fit itself to the box it runs on. Here's what it found on this one; keep its pick or choose. Settings → This TV changes it any time.",
+            )
+        }
+    }
+}
+
+/** The box's facts, why Orca+ recommends its class, and what the focused choice changes. */
+@Composable
+private fun DevicePanel(
+    f: com.wholphinplus.sources.DeviceClass.Facts,
+    recommended: com.wholphinplus.sources.DeviceClass.Tier,
+    tier: com.wholphinplus.sources.DeviceClass.Tier,
+    modifier: Modifier = Modifier,
+) {
+    val device = com.wholphinplus.sources.DeviceClass
+    val screen =
+        (
+            listOfNotNull(
+                when {
+                    f.screenHeight >= 2160 -> "4K"
+                    f.screenHeight > 0 -> "${f.screenHeight}p"
+                    else -> null
+                },
+            ) + listOf("Dolby Vision", "HDR10+", "HDR10", "HLG").filter { it in f.screenHdr }
+        ).joinToString("  ·  ").ifBlank { "Reading…" }
+    val facts =
+        listOf(
+            "Processor" to listOfNotNull(f.soc.takeIf { it.isNotBlank() }, if (f.maxGhz >= 0.3f) "%d cores, %.1f GHz".format(java.util.Locale.US, f.cores, f.maxGhz) else "${f.cores} cores").joinToString("  ·  "),
+            "Memory" to if (f.ramMb > 0) "%.1f GB".format(java.util.Locale.US, f.ramMb / 1024f) else "Unknown",
+            "Screen" to screen,
+            "Plays in hardware" to
+                when {
+                    f.decoders.isNotEmpty() -> f.decoders.keys.sorted().joinToString("  ·  ")
+                    f.screenHeight > 0 -> "Software only"
+                    else -> "Reading…"
+                },
+        )
+    val changes =
+        when (tier) {
+            com.wholphinplus.sources.DeviceClass.Tier.FULL -> listOf("Every glide, fade and zoom as designed", "About three rows kept ready each way", "Sharp card pictures")
+            com.wholphinplus.sources.DeviceClass.Tier.BALANCED -> listOf("Glides and fades as designed", "Fewer rows kept ready", "Sharp pictures, smaller if they load slowly")
+            com.wholphinplus.sources.DeviceClass.Tier.LIGHT -> listOf("Quicker glides, simpler focus", "Cards fill in once you stop", "Smaller, lighter pictures", "Next: the Clean poster look is suggested")
+        }
+    Column(
+        modifier
+            .clip(RoundedCornerShape(22.dp))
+            .background(Glass)
+            .border(1.dp, GlassLine, RoundedCornerShape(22.dp))
+            .padding(horizontal = 30.dp, vertical = 22.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Text("THIS TV", color = Plus, fontSize = 12.sp, letterSpacing = 2.sp, fontWeight = FontWeight.Bold)
+        Text(device.nameOf(f), color = Ink, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        facts.forEach { (label, value) ->
+            Row(verticalAlignment = Alignment.Top) {
+                Text(label, color = InkDim, fontSize = 14.sp, modifier = Modifier.width(150.dp))
+                Text(value, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(GlassLine))
+        Text("Recommended: ${recommended.label}", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Text(device.reasonOf(f), color = InkDim, fontSize = 14.sp)
+        Spacer(Modifier.height(2.dp))
+        Text("WITH ${tier.label.uppercase()}", color = InkDim, fontSize = 11.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Bold)
+        changes.forEach { line ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(6.dp).clip(CircleShape).background(Plus))
+                Spacer(Modifier.width(10.dp))
+                Text(line, color = Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
 /** Poster tags: three looks for the cards, with the real card changing as you move between them. */
 @Composable
 internal fun TagsStep(
@@ -103,19 +270,22 @@ internal fun TagsStep(
     val art = remember { entry.cinemaArt() }
     val ratings = remember { entry.ratings() }
     val r by hook.store.ratingPrefs.collectAsState()
+    // A Light box (picked a step earlier) starts on Clean: fewer layers on every card
+    val light = com.wholphinplus.sources.DeviceClass.light
     val presets =
         listOf(
-            Triple("Clean", "Just the picture and the title", PosterOverlays.CLEAN),
+            Triple("Clean", if (light) "Suggested here: picture and title only" else "Just the picture and the title", PosterOverlays.CLEAN),
             Triple("Standard", "Adds Top 10, watched, new and services", PosterOverlays.STANDARD),
             Triple("Everything", "Every tag: 4K, HDR, audio and scores", PosterOverlays.EVERYTHING),
         )
-    var shown by remember { mutableStateOf(1) }
+    val start = if (light) 0 else 1
+    var shown by remember { mutableStateOf(start) }
     // Home loads behind the tour: the preview then wears a real title, and Home is ready at the end
     var homeReady by remember { mutableStateOf(0) }
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
     LaunchedEffect(Unit) {
-        runCatching { com.wholphinplus.sources.cinema.preloadHome(CinemaRepository(hook, hook.collections), art) }.onFailure { Timber.w(it, "Home for the tour") }
+        runCatching { com.wholphinplus.sources.cinema.preloadHome(CinemaRepository(hook, hook.collections), art) }.cancellable().onFailure { Timber.w(it, "Home for the tour") }
         homeReady++
     }
     Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 48.dp), horizontalArrangement = Arrangement.spacedBy(48.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -128,7 +298,7 @@ internal fun TagsStep(
                     about,
                     "${i + 1}",
                     listOf(Color(0xFF5A5A66), Violet, Rose)[i],
-                    modifier = Modifier.onFocusChanged { if (it.isFocused) shown = i }.let { if (i == 1) it.focusRequester(first) else it },
+                    modifier = Modifier.onFocusChanged { if (it.isFocused) shown = i }.let { if (i == start) it.focusRequester(first) else it },
                     compact = true,
                 ) {
                     hook.store.setOverlays(presets[i].third)
@@ -143,111 +313,7 @@ internal fun TagsStep(
     }
 }
 
-/** What each page comes with: the rows that start on, as they'll appear. */
-@Composable
-internal fun PagesStep(
-    hook: SourceHook,
-    onNext: () -> Unit,
-) {
-    val go = remember { FocusRequester() }
-    var pages by remember { mutableStateOf<List<Pair<RowsPage, List<String>>>?>(null) }
-    LaunchedEffect(Unit) {
-        val repo = CinemaRepository(hook, hook.collections)
-        // The cloud's charts by name (their titles are still being matched to the library)
-        withContext(Dispatchers.IO) { runCatching { hook.collections.syncCharts() }.onFailure { Timber.w(it, "Charts for the tour") } }
-        val libs = repo.libraries()
-        val names = hook.collections.lists.value.associate { it.id to it.name }
-        pages =
-            RowsPage.entries.filter { it != RowsPage.KIDS || hook.store.kidsTab.value }.map { page ->
-                page to
-                    repo.layoutFor(page, libs).rows.filter { it.on }.map { spec ->
-                        when (spec.type) {
-                            HomeRowType.CONTINUE_WATCHING -> "Continue Watching"
-                            HomeRowType.SERVICES -> "Streaming services"
-                            HomeRowType.GENRES -> "Browse by genre"
-                            HomeRowType.DECADES -> "Browse by decade"
-                            else -> spec.title.ifBlank { spec.defaultName(libs, names) }
-                        }
-                    }
-            }
-    }
-    // Once the button is on screen (asking before it's drawn does nothing)
-    LaunchedEffect(pages != null) { if (pages != null) runCatching { go.requestFocus() } }
-    Column(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 32.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        StepHeader(
-            tourStep(TourStop.PAGES),
-            "Your pages come ready",
-            "What's trending, the streaming Top 10s, a page for each service and genre, and your own newest titles, refreshed daily from your library. Rearrange them in Settings → Home & Look → Rows.",
-            Modifier.width(760.dp),
-        )
-        val p = pages
-        if (p == null) {
-            Text("Putting your pages together…", color = InkDim, fontSize = 15.sp)
-        } else {
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                p.forEach { (page, rows) ->
-                    Column(
-                        Modifier.weight(1f).clip(RoundedCornerShape(16.dp)).background(Glass).padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(5.dp),
-                    ) {
-                        Text(page.label.uppercase(), color = Plus, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-                        Spacer(Modifier.height(2.dp))
-                        rows.take(SHOWN_ROWS).forEach { name ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(Modifier.size(5.dp).clip(CircleShape).background(InkDim))
-                                Spacer(Modifier.width(8.dp))
-                                // Long row names shrink a little before they're cut ("Prime Video Top 10 Sh…")
-                                androidx.compose.foundation.text.BasicText(
-                                    name,
-                                    style = androidx.compose.ui.text.TextStyle(color = Ink),
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis,
-                                    autoSize = androidx.compose.foundation.text.TextAutoSize.StepBased(minFontSize = 10.5.sp, maxFontSize = 13.sp, stepSize = 0.5.sp),
-                                )
-                            }
-                        }
-                        if (rows.size > SHOWN_ROWS) Text("+ ${rows.size - SHOWN_ROWS} more", color = InkDim, fontSize = 12.sp)
-                    }
-                }
-            }
-            PillButton("Looks good", modifier = Modifier.focusRequester(go), onClick = onNext)
-        }
-    }
-}
-
 private const val SHOWN_ROWS = 8
-
-/** Power-ups: keys added from a phone, by scanning the TV's QR code. */
-@Composable
-internal fun PowerUpsStep(
-    hook: SourceHook,
-    onNext: () -> Unit,
-) {
-    val go = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { go.requestFocus() } }
-    Row(Modifier.fillMaxSize().padding(horizontal = StepGutter, vertical = 48.dp), horizontalArrangement = Arrangement.spacedBy(40.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(0.34f), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            StepHeader(
-                tourStep(TourStop.POWERUPS, "OPTIONAL"),
-                "Power-ups, from your phone",
-                "Everything already works without these. Have an MDBList, Trakt, Top Streaming or TMDB account of your own? Scan the code, paste your keys on your phone, and they appear here. No typing with the remote.",
-            )
-            PillButton("Continue", modifier = Modifier.focusRequester(go), onClick = onNext)
-        }
-        if (com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) {
-            KeysFromPhone(hook, Modifier.weight(0.66f))
-        } else {
-            // No cloud in this build, so no phone pairing: keys go in by hand later
-            androidx.tv.material3.Text(
-                "Add your keys any time in Settings → Keys & Services.",
-                color = com.wholphinplus.sources.cinema.InkDim,
-                fontSize = 18.sp,
-                modifier = Modifier.weight(0.66f),
-            )
-        }
-    }
-}
 
 /**
  * The QR code for the phone, the code and address to type instead, and what each key unlocks
@@ -267,7 +333,7 @@ internal fun KeysFromPhone(
     LaunchedEffect(Unit) {
         // A code lasts 15 minutes; after the phone sends, a fresh one lets it send more
         while (true) {
-            val p = runCatching { hook.profileSync.pairStart() }.getOrNull()
+            val p = runCatching { hook.profileSync.pairStart() }.cancellable().getOrNull()
             if (p == null) {
                 note = "Can't reach the Orca+ cloud right now."
                 delay(10_000)
@@ -278,7 +344,7 @@ internal fun KeysFromPhone(
             val until = System.currentTimeMillis() + 14 * 60 * 1000
             while (System.currentTimeMillis() < until) {
                 delay(2_000)
-                val got = runCatching { hook.profileSync.pairCollect(p) }.getOrNull() ?: continue
+                val got = runCatching { hook.profileSync.pairCollect(p) }.cancellable().getOrNull() ?: continue
                 note = "Got it: " + applyKeys(hook, got).joinToString(", ") + " ✓"
                 break
             }

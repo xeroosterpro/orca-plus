@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.sync
 
+import com.wholphinplus.sources.core.cancellable
 import android.content.Context
 import com.wholphinplus.sources.ConnectionStore
 import com.wholphinplus.sources.HomeCollections
@@ -90,7 +91,7 @@ class ProfileSync
 
         /** The cloud's profile for the signed-in user and any pending reset (null: can't tell right now). */
         suspend fun cloudState(hook: SourceHook): CloudState? =
-            withContext(Dispatchers.IO) { runCatching { client.state(identity(hook)) }.onFailure { Timber.w(it, "Cloud check failed") }.getOrNull() }
+            withContext(Dispatchers.IO) { runCatching { client.state(identity(hook)) }.cancellable().onFailure { Timber.w(it, "Cloud check failed") }.getOrNull() }
 
         /**
          * "Forgot PIN": the cloud deletes this account's profile a day from now, unless a TV that
@@ -389,7 +390,7 @@ class ProfileSync
         suspend fun accountChanged(hook: SourceHook) =
             withContext(Dispatchers.IO) {
                 mutex.withLock {
-                    val now = runCatching { identity(hook) }.getOrNull() ?: return@withLock
+                    val now = runCatching { identity(hook) }.cancellable().getOrNull() ?: return@withLock
                     val before = prefs.getString(ACTIVE, null)
                     if (before == now) return@withLock
                     if (before != null) {
@@ -513,7 +514,7 @@ class ProfileSync
          */
         private suspend fun noKeys(hook: SourceHook): Exception {
             val id = prefs.getString(ID, null)
-            if (id != null && id == runCatching { identity(hook) }.getOrNull()) {
+            if (id != null && id == runCatching { identity(hook) }.cancellable().getOrNull()) {
                 turnOff()
                 prefs.edit().remove(PROMPTED).apply()
                 return IllegalStateException("This TV lost its sync key. Enter your sync PIN again to keep syncing.")

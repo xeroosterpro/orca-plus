@@ -189,7 +189,7 @@ fun CinemaDetails(
         when {
             // A card's preview of a show can't play (its episode never came): show the error
             failed != null && (d == null || d.play?.pending == true) ->
-                LoadError(failed, onRetry = { attempt++ }, onClassic = null, modifier = Modifier.align(Alignment.Center))
+                LoadError(failed, onRetry = { attempt++ }, modifier = Modifier.align(Alignment.Center))
             d != null -> CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalDescriptionTags provides descriptionTags, LocalStreamLookup provides StreamLookup(repo::streamTagsOf), LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) { DetailsScreen(d, repo, onPlay, onOpen) }
         }
         // The lower edge fades into the stage: a row peeking in from below (the season tabs
@@ -212,6 +212,9 @@ private class DetailsFocus {
 
 /** Quiet re-asks of a season that came back empty while it's open (5 s, 10 s, 15 s). */
 private const val EPISODE_RETRIES = 3
+
+/** Light boxes: how long after the page's first frame the sections below the top are built. */
+private const val BELOW_AFTER_MS = 450L
 
 /** Where the Episodes heading rests while you browse episodes. */
 private val EpisodesTop = 36.dp
@@ -279,9 +282,21 @@ private fun DetailsScreen(
         runCatching { list.scrollToItem(0) }
         runCatching { playFocus.requestFocus() }
     }
-    // Entrance: the whole page rises a touch and fades in, once
-    val enter = remember { Animatable(0f) }
+    // Entrance: the whole page rises a touch and fades in, once (Light boxes: the screen change's fade only)
+    val simple = com.wholphinplus.sources.DeviceClass.simpleMotion
+    val enter = remember { Animatable(if (simple) 1f else 0f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, tween(480, easing = CinemaEase)) }
+    // Light boxes build the top first and what's below it once the page is up: on a Fire Stick the
+    // episodes, cast and More Like This built with it made opening a title 1.5-2 s of stutter
+    // (Back from an actor builds it all at once: focus goes straight to the cast)
+    var below by remember { mutableStateOf(!simple || castBack != null) }
+    if (!below) {
+        LaunchedEffect(Unit) {
+            withFrameNanos {}
+            kotlinx.coroutines.delay(BELOW_AFTER_MS)
+            below = true
+        }
+    }
 
     // Keyed on the facts, not the whole page: More Like This arriving must not undo a tick
     var favorite by remember(d.item.id, d.favorite) { mutableStateOf(d.favorite) }
@@ -305,15 +320,16 @@ private fun DetailsScreen(
                     },
             ) {
                 item(key = "hero") {
-                    // At least 90% of the screen (the episodes peek in below), taller when it has
-                    // to be: a show with a progress line and a long overview got its "13m left"
-                    // cut in half by the Episodes heading at a fixed 90%
+                    // As tall as its content, so the episodes (or cast) follow right under it
+                    // (owner, 2026-10-11: "move everything up to fill it in"; it was at least 90% of
+                    // the screen, a gap above Episodes on most titles). A floor keeps a title with
+                    // little to say from pulling the next section up to its middle
                     val screen = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
                     Column(
                         Modifier
-                            .heightIn(min = screen * 0.9f)
+                            .heightIn(min = screen * 0.6f)
                             .graphicsLayer { alpha = heroAlpha.value }
-                            .padding(start = 58.dp, top = 56.dp, end = 58.dp)
+                            .padding(start = 58.dp, top = 44.dp, end = 58.dp, bottom = 30.dp)
                             .onFocusChanged {
                                 if (it.hasFocus && !focus.hero) {
                                     focus.hero = true
@@ -349,7 +365,7 @@ private fun DetailsScreen(
                         )
                     }
                 }
-                if (d.series && d.seasons.isNotEmpty()) {
+                if (below && d.series && d.seasons.isNotEmpty()) {
                     item(key = "episodes") {
                         Box(
                             Modifier.onFocusChanged {
@@ -377,7 +393,7 @@ private fun DetailsScreen(
                 }
                 // Cast, right under the title (owner, 2026-10-08: it sat below More Like This): round
                 // photos; OK opens the actor's page (Back lands here again)
-                if (d.people.isNotEmpty() || (item.tmdbId != null && repo.hasTmdb)) {
+                if (below && (d.people.isNotEmpty() || (item.tmdbId != null && repo.hasTmdb))) {
                     item(key = "cast") {
                         val dimmed by animateFloatAsState(if (focus.episodes) 0.35f else 1f, tween(320, easing = CinemaEase), label = "castDim")
                         Box(
@@ -394,7 +410,7 @@ private fun DetailsScreen(
                         }
                     }
                 }
-                if (d.similar.isNotEmpty()) {
+                if (below && d.similar.isNotEmpty()) {
                     item(key = "similar") {
                         // Dimmed while the episodes have focus, and lights up when you come down to it
                         val dimmed by animateFloatAsState(if (focus.episodes) 0.35f else 1f, tween(320, easing = CinemaEase), label = "similarDim")
@@ -449,7 +465,15 @@ private fun Hero(
     // The logo's shape once it's loaded: it then fills 460 x 120 dp as far as its shape allows
     // (before, the full box, so it loads at that size)
     var logoRatio by remember(logo) { mutableStateOf<Float?>(null) }
-    Box(Modifier.height(120.dp).widthIn(max = 460.dp), contentAlignment = Alignment.BottomStart) {
+    // Once its shape is known the block hugs the logo: a wide one (BELOW, ~7:1) filled half the
+    // 120 dp and left a gap above it (owner, 2026-10-11). The text below moves up with it, eased
+    val logoBox = logoRatio?.let { (460.dp / it).coerceIn(48.dp, 120.dp) } ?: 120.dp
+    val boxHeight by androidx.compose.animation.core.animateDpAsState(
+        logoBox,
+        if (com.wholphinplus.sources.DeviceClass.simpleMotion) androidx.compose.animation.core.snap() else tween(260, easing = CinemaEase),
+        label = "logoBox",
+    )
+    Box(Modifier.height(boxHeight).widthIn(max = 460.dp), contentAlignment = Alignment.BottomStart) {
         Column {
             if (logo != null) {
                 AsyncImage(
@@ -631,9 +655,9 @@ private fun Episodes(
             LazyRow(
                 state = row,
                 contentPadding = PaddingValues(horizontal = 58.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                // Down from the season tabs lands on your episode
-                modifier = Modifier.height(300.dp).focusRestorer(if (current != null) currentEp else FocusRequester.Default),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                // Down from the season tabs lands on your episode. Fits a 250 dp card lifted 5%
+                modifier = Modifier.height(240.dp).focusRestorer(if (current != null) currentEp else FocusRequester.Default),
             ) {
                 if (eps == null && missing[id] == true) {
                     item(key = "missing") {
@@ -696,7 +720,8 @@ private fun EpisodeCard(
 ) {
     val context = LocalContext.current
     val shape = RoundedCornerShape(6.dp)
-    Column(Modifier.width(340.dp)) {
+    // 250 dp: about 3½ episodes in view (340 showed 2½; owner, 2026-10-12)
+    Column(Modifier.width(250.dp)) {
         Card(
             onClick = onClick,
             shape = CardDefaults.shape(shape),
@@ -720,22 +745,25 @@ private fun EpisodeCard(
                     )
                 }
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.6f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.6f))))
-                if (e.played) {
+                // Partway through a rewatch the server keeps it played as well: where you are wins
+                // (it's what Resume picks up), so not "Watched" over the episode you're resuming
+                val partway = e.progress?.takeIf { e.resumeMs > 0 }
+                if (e.played && partway == null) {
                     Text("Watched", color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(3.dp)).padding(horizontal = 6.dp, vertical = 2.dp))
                 }
-                e.progress?.let { if (!e.played) ProgressBar(it, Modifier.align(Alignment.BottomStart)) }
+                (partway ?: e.progress?.takeIf { !e.played })?.let { ProgressBar(it, Modifier.align(Alignment.BottomStart)) }
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("${e.number}. ${e.title}", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Text("${e.number}. ${e.title}", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             e.runtime?.let {
                 Spacer(Modifier.width(8.dp))
                 Text(it, color = InkDim, fontSize = 12.sp)
             }
         }
         Spacer(Modifier.height(4.dp))
-        Text(e.overview, color = InkDim, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(e.overview, color = InkDim, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 

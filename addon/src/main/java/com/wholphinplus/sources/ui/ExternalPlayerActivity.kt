@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.ui
 
+import com.wholphinplus.sources.core.logged
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -90,6 +91,7 @@ class ExternalPlayerActivity : Activity() {
             val ask =
                 RESUME.async {
                     runCatching { request.client.userData(request.connection, request.source.itemId) }
+                        .logged("Resume point for the external player")
                         .getOrNull()
                         ?.takeIf { !it.played }
                         ?.positionTicks

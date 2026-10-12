@@ -313,7 +313,7 @@ class ProgressOverlay internal constructor(
             val request = chain.request()
             userOf(request.url)?.let(::setUser)
             listRow(chain)?.let { return it }
-            val response = chain.proceed(request)
+            val response = Cultures.fallback(request, chain.proceed(request))
             noteMark(request, response)
             val entries = bucket(null)
             if (request.method != "GET" || !response.isSuccessful) return response

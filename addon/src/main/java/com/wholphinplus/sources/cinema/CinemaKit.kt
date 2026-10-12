@@ -97,7 +97,17 @@ internal val CinemaFade = CubicBezierEasing(0.42f, 0f, 0.58f, 1f)
  * (it was 260: there in ~0.25 s, which read as a jump). Unlike a fixed-length ease it keeps its
  * speed when the next press lands mid-move, so quick presses glide on instead of restarting.
  */
-internal val CinemaGlide = androidx.compose.animation.core.spring<Float>(dampingRatio = 1f, stiffness = 110f)
+internal val CinemaGlide: androidx.compose.animation.core.SpringSpec<Float>
+    get() = if (com.wholphinplus.sources.DeviceClass.simpleMotion) LightGlide else FullGlide
+
+private val FullGlide = androidx.compose.animation.core.spring<Float>(dampingRatio = 1f, stiffness = 110f)
+
+/**
+ * Light boxes' glide (owner, 2026-10-11): the same no-bounce spring, settled in ~0.3 s instead of
+ * ~0.55. Every frame of a glide rebuilds and redraws what moves; on a Fire Stick each of those
+ * frames ran over budget, so a shorter glide is fewer late frames, and it lands before the next press.
+ */
+private val LightGlide = androidx.compose.animation.core.spring<Float>(dampingRatio = 1f, stiffness = 260f)
 
 /**
  * The page's lower edge fading into the stage, so a row or grid peeking in from below fades out
@@ -122,7 +132,7 @@ internal val LocalRowRested = androidx.compose.runtime.staticCompositionLocalOf<
  * remote's own repeats start ~0.4 s after the press, and by then the first press's glide had
  * landed (the page counted as still at ~380 ms in Shield traces): every hold stopped, then took
  * off again (owner, 2026-10-09: "as soon as I hold down or up it hits a stutter off the jump").
- * Now the moves keep coming before the glide slows, one every [STEP_MS], each as a key event
+ * Now the moves keep coming before the glide slows, one every [com.wholphinplus.sources.DeviceClass.holdStepMs], each as a key event
  * through the page (so every key handler still applies); the remote's repeats are ignored while
  * it drives, and letting go (or any other key) stops it.
  */
@@ -192,7 +202,7 @@ internal class HoldRepeat(
             // Each move drawn before the next (as [HeldKeys] asks of the remote's repeats)
             androidx.compose.runtime.withFrameNanos {}
             androidx.compose.runtime.withFrameNanos {}
-            val left = STEP_MS - (android.os.SystemClock.uptimeMillis() - started)
+            val left = com.wholphinplus.sources.DeviceClass.holdStepMs - (android.os.SystemClock.uptimeMillis() - started)
             if (left > 0) kotlinx.coroutines.delay(left)
         }
     }
@@ -201,8 +211,7 @@ internal class HoldRepeat(
         /** A press held this long becomes a hold (a tap is let go well before). */
         const val HOLD_START_MS = 220L
 
-        /** One row per step while held: about the pace the remote's repeats managed through [HeldKeys]. */
-        const val STEP_MS = 105L
+        /** One row per step while held ([com.wholphinplus.sources.DeviceClass.holdStepMs]: 105 ms, Light 170). */
     }
 }
 
@@ -218,10 +227,10 @@ internal fun Modifier.holdRepeat(): Modifier {
 
 /** Held D-pad keys: a repeat waits for the last move to be drawn ([behind]). */
 internal object HeldKeys {
-    /** Frames that must start after a move before a held key's next repeat is taken. */
-    private const val FRAMES = 2
+    /** Frames that must start after a move before a held key's next repeat is taken (Light: 3). */
+    private val FRAMES: Int get() = com.wholphinplus.sources.DeviceClass.heldFrames
 
-    private var framesSince = FRAMES
+    private var framesSince = 2
     private var lastEvent: android.view.KeyEvent? = null
     private var lastDropped = false
     private val count: android.view.Choreographer.FrameCallback =
@@ -251,9 +260,10 @@ internal object HeldKeys {
         // The same event seen by an outer and an inner page: the same answer
         if (n === lastEvent) return lastDropped
         lastEvent = n
+        com.wholphinplus.sources.FrameWatch.keyed()
         lastDropped = n.repeatCount > 0 && framesSince < FRAMES
         // Held or pressed, the remote is in use: cards coming in wait to fill
-        CardFill.keyed(upDown = n.keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP || n.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN)
+        CardFill.keyed(upDown = n.keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP || n.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN, held = n.repeatCount > 0)
         if (!lastDropped) {
             framesSince = 0
             android.view.Choreographer.getInstance().removeFrameCallback(count)
@@ -289,13 +299,20 @@ internal object CardFill {
 
     private val keyActive = androidx.compose.runtime.mutableStateOf(false)
     private val upDownActive = androidx.compose.runtime.mutableStateOf(false)
+
+    // A D-pad key held (repeating), any direction: Light boxes wait with the faces then ([busy])
+    private val heldActive = androidx.compose.runtime.mutableStateOf(false)
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val quiet = Runnable { keyActive.value = false }
     private val upDownQuiet = Runnable { upDownActive.value = false }
 
-    /** A D-pad press was taken ([HeldKeys.behind]); [upDown]: Up or Down. Busy while it's held. */
-    fun keyed(upDown: Boolean) {
+    /** A D-pad press was taken ([HeldKeys.behind]); [upDown]: Up or Down; [held]: a repeat. Busy while it's held. */
+    fun keyed(
+        upDown: Boolean,
+        held: Boolean = false,
+    ) {
         keyActive.value = true
+        if (held) heldActive.value = true
         handler.removeCallbacks(quiet)
         // A fallback only: the key's release normally ends it ([released])
         handler.postDelayed(quiet, KEY_QUIET_MS)
@@ -312,6 +329,7 @@ internal object CardFill {
      * stays busy until this, through its repeat delay too.
      */
     fun released() {
+        heldActive.value = false
         handler.removeCallbacks(quiet)
         handler.removeCallbacks(upDownQuiet)
         handler.postDelayed(quiet, RELEASE_QUIET_MS)
@@ -321,14 +339,18 @@ internal object CardFill {
     private const val RELEASE_QUIET_MS = 120L
 
     /** Titles whose card face was built this run ([rememberCardFilled]). */
-    val seen: MutableSet<Any> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+    val seen: MutableSet<Any> = com.wholphinplus.sources.core.lruSet(4_000)
 
     /**
      * Cards wait to fill while the page moves up or down: each step brings a whole row. Along a
      * row they fill as they come (one card a step, smooth on the Shield; owner, 2026-10-09:
-     * sideways "never seen it that fast… but posters don't show").
+     * sideways "never seen it that fast… but posters don't show"). Light boxes wait sideways while
+     * the key is held: a face built inside each step of a held Right put most of its frames over a
+     * Fire Stick's budget (bench 2026-10-11: 58 late frames → 12). Single presses still fill as
+     * they come: waiting for the row to stop made them fill in a burst just as the next press
+     * started its glide (more late frames, not fewer).
      */
-    val busy: Boolean get() = upDownActive.value || RowMotion.pageMoving.intValue > 0
+    val busy: Boolean get() = upDownActive.value || RowMotion.pageMoving.intValue > 0 || heldActive.value && com.wholphinplus.sources.DeviceClass.simpleMotion
 
     /** The remote is in use or anything still glides (the billboard waits for this). */
     val anyBusy: Boolean get() = keyActive.value || RowMotion.moving.intValue > 0
@@ -357,41 +379,75 @@ internal object CardFill {
         return true
     }
 
-    private var frame = 0L
     private var stillFrames = 0
 
-    private var pictureFrame = 0L
-    private var pictures = 0
+    /**
+     * Cards waiting for a face, and pictures waiting to start, in the order they asked (top row,
+     * leftmost card first). One frame callback serves them all: each waiter used to run its own
+     * loop and wake on every frame to ask again (30-60 wake-ups a frame on the main thread while
+     * rows moved, bench 2026-10-11).
+     */
+    private class Waiter(
+        val urgent: Boolean,
+        val go: kotlinx.coroutines.CancellableContinuation<Unit>,
+    )
 
-    /** Waits for a frame with room for one more picture to start. */
-    suspend fun pictureSlot() {
-        while (true) {
-            val t = androidx.compose.runtime.withFrameNanos { it }
-            if (t != pictureFrame) {
-                pictureFrame = t
-                pictures = 0
+    private val faces = ArrayDeque<Waiter>()
+    private val pictures = ArrayDeque<kotlinx.coroutines.CancellableContinuation<Unit>>()
+    private var serving = false
+    private val serve: android.view.Choreographer.FrameCallback =
+        object : android.view.Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+            stillFrames = if (busy) 0 else stillFrames + 1
+            // Pictures: a few start each frame
+            var started = 0
+            while (started < com.wholphinplus.sources.DeviceClass.picturesPerFrame) {
+                val c = pictures.removeFirstOrNull() ?: break
+                if (c.isActive) {
+                    c.resumeWith(Result.success(Unit))
+                    started++
+                }
             }
-            if (pictures < com.wholphinplus.sources.DeviceClass.picturesPerFrame) {
-                pictures++
-                return
+            // Faces: ones whose picture is in memory at any time, the rest once things are still
+            val settled = stillFrames > com.wholphinplus.sources.DeviceClass.settleFrames
+            val it = faces.iterator()
+            while (it.hasNext()) {
+                val w = it.next()
+                if (!w.go.isActive) {
+                    it.remove()
+                    continue
+                }
+                if (!(w.urgent || settled)) continue
+                if (!claim()) break
+                it.remove()
+                w.go.resumeWith(Result.success(Unit))
+            }
+            if (faces.isEmpty() && pictures.isEmpty()) serving = false else android.view.Choreographer.getInstance().postFrameCallback(this)
             }
         }
+
+    private fun wake() {
+        if (serving) return
+        serving = true
+        android.view.Choreographer.getInstance().postFrameCallback(serve)
     }
+
+    /** Waits for a frame with room for one more picture to start (main thread). */
+    suspend fun pictureSlot() =
+        kotlinx.coroutines.suspendCancellableCoroutine { c ->
+            pictures.addLast(c)
+            wake()
+        }
 
     /**
-     * Waits for a frame with room for one face: after a few still frames, or for a card shown
-     * before ([urgent]: its picture is in memory, so it comes back without waiting for stillness).
+     * Waits for a frame with room for one face (main thread): after a few still frames, or for a
+     * card shown before ([urgent]: its picture is in memory, so it comes back without waiting).
      */
-    suspend fun ticket(urgent: Boolean) {
-        while (true) {
-            val t = androidx.compose.runtime.withFrameNanos { it }
-            if (t != frame) {
-                frame = t
-                stillFrames = if (busy) 0 else stillFrames + 1
-            }
-            if ((urgent || stillFrames > com.wholphinplus.sources.DeviceClass.settleFrames) && claim()) return
+    suspend fun ticket(urgent: Boolean) =
+        kotlinx.coroutines.suspendCancellableCoroutine { c ->
+            faces.addLast(Waiter(urgent, c))
+            wake()
         }
-    }
 }
 
 /**
@@ -451,8 +507,11 @@ internal fun Modifier.glideLift(
     onFocused: () -> Unit = {},
 ): Modifier {
     var focused by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    val lift = androidx.compose.animation.core.animateFloatAsState(if (focused) scale else 1f, CinemaGlide, label = "lift")
-    val edgeAlpha = androidx.compose.animation.core.animateFloatAsState(if (focused && edge) 1f else 0f, tween(if (focused) 320 else 220, easing = CinemaFade), label = "edge")
+    // Light boxes: no lift (it redraws the card's layer every frame of the spring) and the edge
+    // switches with focus instead of fading
+    val simple = com.wholphinplus.sources.DeviceClass.simpleMotion
+    val lift = androidx.compose.animation.core.animateFloatAsState(if (focused && !simple) scale else 1f, CinemaGlide, label = "lift")
+    val edgeAlpha = androidx.compose.animation.core.animateFloatAsState(if (focused && edge) 1f else 0f, if (simple) androidx.compose.animation.core.snap() else tween(if (focused) 320 else 220, easing = CinemaFade), label = "edge")
     // The edge's stroke, made once (not on every frame of the fade)
     val strokes = remember { arrayOfNulls<androidx.compose.ui.graphics.drawscope.Stroke>(1) }
     return graphicsLayer {
@@ -517,7 +576,9 @@ internal fun rememberFocusFade(
 ): FocusFade {
     val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val on by source.collectIsFocusedAsState()
-    val spec = tween<Color>(if (quick) 130 else if (on) 240 else 200, easing = CinemaFade)
+    // Light boxes switch the colours with focus (each frame of a fade recomposes nothing but redraws the control)
+    val spec: androidx.compose.animation.core.AnimationSpec<Color> =
+        if (com.wholphinplus.sources.DeviceClass.simpleMotion) androidx.compose.animation.core.snap() else tween(if (quick) 130 else if (on) 240 else 200, easing = CinemaFade)
     val fill = androidx.compose.animation.animateColorAsState(if (on) focused else rest, spec, label = "fill")
     val ink = androidx.compose.animation.animateColorAsState(if (on) focusedInk else restInk, spec, label = "ink")
     return remember(source) { FocusFade(source, fill, ink) }
@@ -793,7 +854,8 @@ internal fun StableBackdrop(
             fade.snapTo(1f)
         } else {
             fade.snapTo(0f)
-            fade.animateTo(1f, tween(900, easing = CinemaFade))
+            // Light boxes: a short fade (each frame draws two full-screen pictures)
+            fade.animateTo(1f, tween(if (com.wholphinplus.sources.DeviceClass.simpleMotion) 300 else 900, easing = CinemaFade))
         }
         before = null
     }

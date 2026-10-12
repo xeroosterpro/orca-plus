@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,11 +36,11 @@ internal object PosterPrefetch {
     private val gate = Semaphore(3)
 
     /** Pictures already loaded this run: into memory, or to disk only. */
-    private val inMemory = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    private val inMemory = com.wholphinplus.sources.core.lruSet<String>(3_000)
 
     /** Titles whose card picture (and art) are in memory: their cards may fill while the page moves. */
-    val ready: MutableSet<Any> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
-    private val onDisk = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    val ready: MutableSet<Any> = com.wholphinplus.sources.core.lruSet(3_000)
+    private val onDisk = com.wholphinplus.sources.core.lruSet<String>(8_000)
 
     @Composable
     fun Follow(
@@ -103,14 +104,14 @@ internal object PosterPrefetch {
                                 if (row.ranked) {
                                     item.posterUrl ?: item.cardUrl
                                 } else {
-                                    val a = item.tmdbId?.let { id -> runCatching { art?.art(item.tmdbTv, id) }.getOrNull() }
+                                    val a = item.tmdbId?.let { id -> runCatching { art?.art(item.tmdbTv, id) }.cancellable().getOrNull() }
                                     cardChoice(item, a, overlays).url
                                 } ?: return@withPermit
                             val (w, h) = if (row.ranked) 224 to 336 else 416 to 234
                             if (memory) {
                                 if (url !in inMemory) {
                                     // The card's own request: a memory hit when it's built
-                                    val ok = runCatching { loader.execute(cardRequest(context, url, w, h)) }.getOrNull() is coil3.request.SuccessResult
+                                    val ok = runCatching { loader.execute(cardRequest(context, url, w, h)) }.cancellable().getOrNull() is coil3.request.SuccessResult
                                     if (!ok) return@withPermit
                                     inMemory += url
                                 }
@@ -128,7 +129,7 @@ internal object PosterPrefetch {
                                             .allowHardware(false)
                                             .build(),
                                     )
-                                }
+                                }.cancellable()
                                 onDisk += url
                             }
                         }

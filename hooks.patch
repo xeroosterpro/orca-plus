@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index e005cb6f2..eb906ae1a 100644
+index e9fc3516c..90413ff80 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -72,7 +72,7 @@ configure<ApplicationExtension> {
@@ -12,7 +12,7 @@ index e005cb6f2..eb906ae1a 100644
          targetSdk = libs.versions.targetSdk.getInt()
          versionCode = gitTags.trim().lines().size
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index 582e000a2..4b93d14e5 100644
+index 5be4d55a2..2b87cc245 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
 @@ -37,10 +37,11 @@
@@ -30,7 +30,7 @@ index 582e000a2..4b93d14e5 100644
          android:supportsRtl="true"
          android:theme="@style/Theme.Wholphin"
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
-index 62f0e39b4..f6a36e5ba 100644
+index 62f0e39b4..0664165b2 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/MainActivity.kt
 @@ -31,6 +31,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -103,7 +103,7 @@ index 62f0e39b4..f6a36e5ba 100644
          fun appStart(intent: Intent?) {
              viewModelScope.launchDefault {
                  mutex.withLock {
-@@ -489,16 +526,33 @@ class MainActivityViewModel
+@@ -489,16 +526,35 @@ class MainActivityViewModel
                      try {
                          val needUpgrade = appUpgradeHandler.needUpgrade()
                          if (needUpgrade) {
@@ -135,6 +135,8 @@ index 62f0e39b4..f6a36e5ba 100644
 +                                            accessToken = login.token,
 +                                        ),
 +                                    )
++                                    // Orca+: an imported login means "sign this TV in": also when sign-in was left manual
++                                    preferences.updateData { it.toBuilder().setSignInAutomatically(true).build() }
 +                                } catch (ex: Exception) {
 +                                    Timber.e(ex, "Imported Jellyfin login failed")
 +                                    showToast(context, "Imported login failed: ${ex.message}")
@@ -144,7 +146,7 @@ index 62f0e39b4..f6a36e5ba 100644
                          val prefs =
                              preferences.data.firstOrNull() ?: AppPreferences.getDefaultInstance()
                          val profileProtected =
-@@ -507,10 +561,12 @@ class MainActivityViewModel
+@@ -507,10 +563,12 @@ class MainActivityViewModel
                                  ?.isProtected == true
                          if (prefs.signInAutomatically && !profileProtected) {
                              val current =
@@ -161,7 +163,7 @@ index 62f0e39b4..f6a36e5ba 100644
                              if (current != null) {
                                  if (current.user.isProtected) {
                                      setupNavigationManager.navigateTo(
-@@ -567,7 +623,8 @@ class MainActivityViewModel
+@@ -567,7 +625,8 @@ class MainActivityViewModel
                  mutex.withLock {
                      try {
                          Timber.v("Updating userDto")
@@ -207,10 +209,10 @@ index 26dda9082..160187798 100644
                                      Box(
                                          modifier = Modifier.size(200.dp),
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt b/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt
-index bd25a2d45..0862edaf2 100644
+index f027bbae4..6c84be8cf 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/WholphinApplication.kt
-@@ -44,7 +44,7 @@ class WholphinApplication :
+@@ -43,7 +43,7 @@ class WholphinApplication :
                          message: String,
                          t: Throwable?,
                      ) {
@@ -219,7 +221,7 @@ index bd25a2d45..0862edaf2 100644
                      }
                  },
              )
-@@ -97,9 +97,9 @@ class WholphinApplication :
+@@ -95,9 +95,9 @@ class WholphinApplication :
                  )
              dialog {
                  text =
@@ -232,10 +234,10 @@ index bd25a2d45..0862edaf2 100644
                  negativeButtonText = "Do not send"
              }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt b/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt
-index e6d9c4684..25eae9ee4 100644
+index 5deba4c33..18ceecd22 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/data/ServerRepository.kt
-@@ -171,6 +171,19 @@ class ServerRepository
+@@ -175,6 +175,19 @@ class ServerRepository
              return null
          }
  
@@ -256,7 +258,7 @@ index e6d9c4684..25eae9ee4 100644
              withContext(ioDispatcher) {
                  serverId?.let { serverDao.getServer(serverId)?.server }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
-index 43d2d53a7..6ecac86ed 100644
+index 4213fe94e..038e67587 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreference.kt
 @@ -233,7 +233,7 @@ sealed interface AppPreference<Pref, T> {
@@ -286,7 +288,7 @@ index 43d2d53a7..6ecac86ed 100644
          private val bitrateValues =
              listOf(
                  500 * 1024L,
-@@ -446,7 +446,7 @@ sealed interface AppPreference<Pref, T> {
+@@ -459,7 +459,7 @@ sealed interface AppPreference<Pref, T> {
          val DirectPlayDoviProfile7 =
              AppSwitchPreference<AppPreferences>(
                  title = R.string.force_dovi_profile_7,
@@ -295,7 +297,7 @@ index 43d2d53a7..6ecac86ed 100644
                  getter = { it.playbackPreferences.overrides.directPlayDolbyVisionEL },
                  setter = { prefs, value ->
                      prefs.updatePlaybackOverrides { directPlayDolbyVisionEL = value }
-@@ -563,7 +563,7 @@ sealed interface AppPreference<Pref, T> {
+@@ -576,7 +576,7 @@ sealed interface AppPreference<Pref, T> {
          val UpdateUrl =
              AppStringPreference<AppPreferences>(
                  title = R.string.update_url,
@@ -304,7 +306,7 @@ index 43d2d53a7..6ecac86ed 100644
                  getter = { it.updateUrl },
                  setter = { prefs, value ->
                      prefs.update { updateUrl = value }
-@@ -645,7 +645,7 @@ sealed interface AppPreference<Pref, T> {
+@@ -658,7 +658,7 @@ sealed interface AppPreference<Pref, T> {
          val SkipRecaps =
              AppChoicePreference<AppPreferences, SkipSegmentBehavior>(
                  title = R.string.skip_recap_behavior,
@@ -314,7 +316,7 @@ index 43d2d53a7..6ecac86ed 100644
                  setter = { prefs, value ->
                      prefs.updatePlaybackPreferences { skipRecaps = value }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreferencesSerializer.kt b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreferencesSerializer.kt
-index c6dcd8ec9..1d4bf0a96 100644
+index cb47ca946..e032316f2 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreferencesSerializer.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/preferences/AppPreferencesSerializer.kt
 @@ -65,6 +65,7 @@ class AppPreferencesSerializer
@@ -326,10 +328,10 @@ index c6dcd8ec9..1d4bf0a96 100644
                                                  AppPreference.FfmpegPreference.defaultValue
                                              assPlaybackMode =
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
-index e7b5db000..8277a7884 100644
+index c070b37e7..f35462f1a 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/HomeSettingsService.kt
-@@ -97,7 +97,29 @@ class HomeSettingsService
+@@ -98,7 +98,29 @@ class HomeSettingsService
          private val imageUrlService: ImageUrlService,
          private val suggestionService: SuggestionService,
          private val displayPreferencesService: DisplayPreferencesService,
@@ -359,7 +361,7 @@ index e7b5db000..8277a7884 100644
          @OptIn(ExperimentalSerializationApi::class)
          val jsonParser =
              Json {
-@@ -251,6 +273,7 @@ class HomeSettingsService
+@@ -252,6 +274,7 @@ class HomeSettingsService
                  }
  
              currentSettings.update { resolvedSettings }
@@ -367,9 +369,9 @@ index e7b5db000..8277a7884 100644
          }
  
          /**
-@@ -263,6 +286,7 @@ class HomeSettingsService
+@@ -267,6 +290,7 @@ class HomeSettingsService
                  }
-             val resolvedSettings = HomePageResolvedSettings(resolvedRows)
+             val resolvedSettings = HomePageResolvedSettings(userId, resolvedRows)
              currentSettings.update { resolvedSettings }
 +            currentSettings.update { withAddonRows(it) } // Orca+: merge in the collection rows (own line, so upgrades merge)
          }
@@ -410,10 +412,10 @@ index 01ed9dd28..c6951f2c7 100644
              } catch (ex: Exception) {
                  Timber.e(ex, "Error during updateRemovedFromNextUp")
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt b/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt
-index cf4128fb0..b35d5b3bb 100644
+index 9b16718d9..676acf36b 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/PlayerFactory.kt
-@@ -101,7 +101,7 @@ class PlayerFactory
+@@ -106,7 +106,7 @@ class PlayerFactory
                                  MediaExtensionStatus.MES_DISABLED -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF
                                  else -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
                              }
@@ -421,8 +423,8 @@ index cf4128fb0..b35d5b3bb 100644
 +                        val dataSourceFactory = DefaultDataSource.Factory(context, com.wholphinplus.sources.RetryingDataSource.Factory(androidx.media3.datasource.DefaultHttpDataSource.Factory())) // Orca+: ride out a server's random 404s
                          val extractorsFactory = createExtractorsFactory()
                          var renderersFactory: RenderersFactory =
-                             WholphinRenderersFactory(context, decodeAv1)
-@@ -149,6 +149,7 @@ class PlayerFactory
+                             WholphinRenderersFactory(context, decodeAv1, preferDolbyVision)
+@@ -154,6 +154,7 @@ class PlayerFactory
                              .setTrackSelector(trackSelector)
                              .build()
                              .apply {
@@ -431,10 +433,10 @@ index cf4128fb0..b35d5b3bb 100644
                                  withContext(WholphinDispatchers.Main) {
                                      setAudioAttributes(
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt b/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt
-index 708eb8b5b..955ac6aa5 100644
+index ca6cceb86..b36e220e4 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/ServerEventListener.kt
-@@ -59,6 +59,8 @@ class ServerEventListener
+@@ -64,6 +64,8 @@ class ServerEventListener
          ) {
              if (server != null && user != null && api.baseUrl != null && api.accessToken != null) {
                  (context as AppCompatActivity).lifecycleScope.launchIO {
@@ -443,16 +445,16 @@ index 708eb8b5b..955ac6aa5 100644
                      api.sessionApi.postCapabilities(
                          playableMediaTypes = listOf(MediaType.VIDEO),
                          supportedCommands =
-@@ -68,6 +70,7 @@ class ServerEventListener
+@@ -73,6 +75,7 @@ class ServerEventListener
                              ),
                          supportsMediaControl = true,
                      )
 +                    } // Orca+
-                     setupListeners()
+                     subscribeToWebSocket()
                  }
              }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt b/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt
-index 09450b34a..2af328cd9 100644
+index 09450b34a..6f1ca4e96 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/StreamChoiceService.kt
 @@ -118,6 +118,7 @@ class StreamChoiceService
@@ -487,11 +489,13 @@ index 09450b34a..2af328cd9 100644
              val subtitleLanguage =
                  seriesLang ?: getPreferredLanguage(MediaStreamType.SUBTITLE, prefs, userConfig)
              if (itemPlayback?.subtitleIndex == TrackIndex.ONLY_FORCED) {
-@@ -303,6 +307,7 @@ class StreamChoiceService
+@@ -302,7 +306,8 @@ class StreamChoiceService
+ 
                      SubtitlePlaybackMode.SMART -> {
                          if (subtitleLanguage.isNotNullOrBlank()) {
-                             val audioLanguage = userConfig?.audioLanguagePreference
-+                                .let(com.wholphinplus.sources.Lang::code) // Orca+
+-                            val audioLanguage = userConfig?.audioLanguagePreference
++                            // Orca+: the audio language set in the app wins over the server profile's
++                            val audioLanguage = getPreferredLanguage(MediaStreamType.AUDIO, prefs, userConfig)
                              if (
                                  // Has preferred subtitle lang & preferred audio, so only show subtitles if actual audio is different
                                  (audioLanguage.isNotNullOrBlank() && audioLanguage != audioStreamLang) ||
@@ -502,7 +506,7 @@ index 09450b34a..2af328cd9 100644
 +        ?.let(com.wholphinplus.sources.Lang::code) // Orca+: "eng" and the server's "en" are one language
  }
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
-index 8c2d84cbc..9312c087e 100644
+index a00de8e4d..1628cfc97 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/services/UpdateChecker.kt
 @@ -64,7 +64,7 @@ class UpdateChecker
@@ -535,17 +539,17 @@ index 8c2d84cbc..9312c087e 100644
                  val request =
                      Request
                          .Builder()
-@@ -213,6 +215,9 @@ class UpdateChecker
-                         withContext(WholphinDispatchers.Main) {
-                             callback.contentLength(it.body.contentLength())
-                         }
+@@ -211,6 +213,9 @@ class UpdateChecker
+                     if (it.isSuccessful) {
+                         Timber.v("Request successful for ${release.downloadUrl}")
+                         callback.contentLength(it.body.contentLength())
 +                        // Orca+: download to a private file; install only this app, signed with this app's key
 +                        val checked = File(context.cacheDir, APK_NAME).also { f -> f.outputStream().use { out -> it.body.byteStream().use { input -> copyTo(input, out, callback = callback) } } }
 +                        if (!com.wholphinplus.sources.UpdateGuard.isAllowedUrl(it.request.url.toString()) || !com.wholphinplus.sources.UpdateGuard.isUpdateOfThisApp(context, checked)) { checked.delete(); showToast(context, "Update refused: it isn't this app signed with its own key"); return@use } // Orca+
                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                              val contentValues =
                                  ContentValues().apply {
-@@ -230,7 +235,7 @@ class UpdateChecker
+@@ -228,7 +233,7 @@ class UpdateChecker
                                      contentValues,
                                  )
                              if (uri != null) {
@@ -554,7 +558,7 @@ index 8c2d84cbc..9312c087e 100644
                                      resolver.openOutputStream(uri).use { output ->
                                          copyTo(input, output!!, callback = callback)
                                      }
-@@ -243,7 +248,7 @@ class UpdateChecker
+@@ -241,7 +246,7 @@ class UpdateChecker
                              } else {
                                  Timber.e("Resolver URI is null, trying fallback")
  //                                showToast(context, "Unable to download the apk")
@@ -563,7 +567,7 @@ index 8c2d84cbc..9312c087e 100644
                                  val intent = Intent(Intent.ACTION_INSTALL_PACKAGE)
                                  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
                                  intent.data =
-@@ -255,7 +260,7 @@ class UpdateChecker
+@@ -253,7 +258,7 @@ class UpdateChecker
                                  context.startActivity(intent)
                              }
                          } else {
@@ -572,7 +576,7 @@ index 8c2d84cbc..9312c087e 100644
                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                                  val intent = Intent(Intent.ACTION_INSTALL_PACKAGE)
                                  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-@@ -282,7 +287,7 @@ class UpdateChecker
+@@ -280,7 +285,7 @@ class UpdateChecker
          }
  
          private suspend fun fallbackDownload(
@@ -581,7 +585,7 @@ index 8c2d84cbc..9312c087e 100644
              callback: DownloadCallback,
          ): File {
              val downloadDir =
-@@ -290,7 +295,7 @@ class UpdateChecker
+@@ -288,7 +293,7 @@ class UpdateChecker
              downloadDir.mkdirs()
              val targetFile = File(downloadDir, APK_NAME)
              targetFile.outputStream().use { output ->
@@ -857,7 +861,7 @@ index 63789d6ce..ecb769f5e 100644
  
          Destination.Debug -> {
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
-index 6ed210a2d..4334db796 100644
+index 483083f20..365aa79de 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackPage.kt
 @@ -120,14 +120,20 @@ fun PlaybackPage(
@@ -909,7 +913,7 @@ index 6ed210a2d..4334db796 100644
          }
      }
  }
-@@ -323,6 +335,8 @@ fun PlaybackPageContent(
+@@ -325,6 +337,8 @@ fun PlaybackPageContent(
          }
      }
  
@@ -919,10 +923,10 @@ index 6ed210a2d..4334db796 100644
          state.currentSegment?.interacted == false &&
              state.nextUp == null && !controllerViewState.controlsVisible && skipIndicatorDuration == 0L
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
-index 79d2ae579..a924db084 100644
+index 012038a84..1867f7512 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/playback/PlaybackViewModel.kt
-@@ -152,6 +152,7 @@ class PlaybackViewModel
+@@ -155,6 +155,7 @@ class PlaybackViewModel
          private val imageUrlService: ImageUrlService,
          private val screensaverService: ScreensaverService,
          private val musicService: MusicService,
@@ -930,7 +934,7 @@ index 79d2ae579..a924db084 100644
          @Assisted private val destination: Destination,
      ) : ViewModel(),
          Player.Listener,
-@@ -163,6 +164,9 @@ class PlaybackViewModel
+@@ -166,6 +167,9 @@ class PlaybackViewModel
  
          val currentPlayer = MutableStateFlow<PlayerInstance?>(null)
  
@@ -940,7 +944,7 @@ index 79d2ae579..a924db084 100644
          internal lateinit var player: Player
  
          private var mediaSession: MediaSession? = null
-@@ -465,6 +469,19 @@ class PlaybackViewModel
+@@ -469,6 +473,19 @@ class PlaybackViewModel
  
                  val isLiveTv = item.type == BaseItemKind.TV_CHANNEL
                  val base = item.data
@@ -960,7 +964,7 @@ index 79d2ae579..a924db084 100644
  
                  // Use the provided playback parameters or else check if the database has some
                  val itemPlayback =
-@@ -480,7 +497,8 @@ class PlaybackViewModel
+@@ -484,7 +501,8 @@ class PlaybackViewModel
                      }
                  val mediaSource =
                      if (!isLiveTv) {
@@ -970,7 +974,7 @@ index 79d2ae579..a924db084 100644
                      } else {
                          null
                      }
-@@ -510,7 +528,7 @@ class PlaybackViewModel
+@@ -514,7 +532,7 @@ class PlaybackViewModel
                          }
  
                  // Create the correct player for the media
@@ -979,28 +983,40 @@ index 79d2ae579..a924db084 100644
  
                  val subtitleStreams = mediaSource?.let { getSubtitleStreams(mediaSource) }.orEmpty()
                  val audioStreams = mediaSource?.let { getAudioStreams(mediaSource) }.orEmpty()
-@@ -525,7 +543,7 @@ class PlaybackViewModel
+@@ -529,8 +547,9 @@ class PlaybackViewModel
                                  prefs = preferences,
                              )
                      }
 -                val audioIndex = audioStream?.index
 +                val audioIndex = sourcePicker.carriedAudio(base.id, mediaSource) ?: audioStream?.index // Orca+: a server switch keeps the language
  
++                val carried = sourcePicker.carrying(base.id) // Orca+
                  val subtitleIndex =
                      mediaSource?.let {
-@@ -538,6 +556,7 @@ class PlaybackViewModel
+                         streamChoiceService
+@@ -542,6 +561,17 @@ class PlaybackViewModel
                                  plc = plc,
                                  prefs = preferences,
                              )?.index
 +                            .let { sourcePicker.carriedSubtitle(base.id, mediaSource, it) } // Orca+: a server switch keeps the subtitles
++                    }
++                // Orca+: an extra server's copy may have the wanted subtitles the main copy lacks:
++                // the same rules over that file's own tracks (not after a pick by index or a server switch)
++                val copyText =
++                    if (subtitleIndex == null && !carried && itemPlayback?.subtitleIndexEnabled != true) {
++                        sourcePicker.copyTracks(base.id, mediaSource)?.let { copy ->
++                            streamChoiceService.chooseSubtitleStream(source = copy, audioStream = audioStream, seriesId = base.seriesId, itemPlayback = itemPlayback, plc = plc, prefs = preferences)
++                        }
++                    } else {
++                        null
                      }
                  Timber.d(
                      "Selected mediaSource=%s, audioIndex=%s, subtitleIndex=%s",
-@@ -584,17 +603,23 @@ class PlaybackViewModel
+@@ -588,17 +618,23 @@ class PlaybackViewModel
                      )
                  }
                  withContext(WholphinDispatchers.Main) {
-+                    sourcePicker.preferTracks(player, base.id, mediaSource, audioIndex, subtitleIndex) // Orca+: languages for an external file
++                    sourcePicker.preferTracks(player, base.id, mediaSource, audioIndex, subtitleIndex, copyText) // Orca+: languages for an external file
                      changeStreams(
                          item = item,
 -                        audioIndex = audioIndex,
@@ -1024,7 +1040,7 @@ index 79d2ae579..a924db084 100644
                  }
                  listenForSegments(item.id)
                  return@withContext true
-@@ -684,7 +709,8 @@ class PlaybackViewModel
+@@ -688,7 +724,8 @@ class PlaybackViewModel
                  val source = response.mediaSources.firstOrNull()
                  source?.let { source ->
                      val mediaUrl =
@@ -1034,7 +1050,7 @@ index 79d2ae579..a924db084 100644
                              if (source.isRemote && source.path.isNotNullOrBlank()) {
                                  Timber.i("Playback is remote for source: %s", source.id)
                                  source.path
-@@ -701,7 +727,7 @@ class PlaybackViewModel
+@@ -705,7 +742,7 @@ class PlaybackViewModel
                              source.transcodingUrl?.let(api::createUrl)
                          } else {
                              source.transcodingUrl?.let(api::createUrl)
@@ -1043,7 +1059,7 @@ index 79d2ae579..a924db084 100644
                      if (mediaUrl.isNullOrBlank()) {
                          _state.update {
                              it.copy(
-@@ -715,6 +741,9 @@ class PlaybackViewModel
+@@ -719,6 +756,9 @@ class PlaybackViewModel
                      }
                      val transcodeType =
                          when {
@@ -1053,7 +1069,7 @@ index 79d2ae579..a924db084 100644
  //                        playerBackend == PlayerBackend.MPV -> PlayMethod.DIRECT_PLAY
                              source.supportsDirectPlay -> PlayMethod.DIRECT_PLAY
  
-@@ -737,7 +766,7 @@ class PlaybackViewModel
+@@ -741,7 +781,7 @@ class PlaybackViewModel
                                  if (it.isDefault) flags = flags.or(C.SELECTION_FLAG_DEFAULT)
                                  MediaItem.SubtitleConfiguration
                                      .Builder(
@@ -1062,7 +1078,7 @@ index 79d2ae579..a924db084 100644
                                      ).setId("e:${it.index}")
                                      .setMimeType(subtitleMimeTypes[it.codec])
                                      .setLanguage(it.language)
-@@ -765,6 +794,7 @@ class PlaybackViewModel
+@@ -769,6 +809,7 @@ class PlaybackViewModel
                                  ),
                              ).setUri(mediaUrl.toUri())
                              .setSubtitleConfigurations(listOfNotNull(externalSubtitle))
@@ -1070,7 +1086,7 @@ index 79d2ae579..a924db084 100644
                              .apply {
                                  when (source.container) {
                                      Codec.Container.HLS -> setMimeType(MimeTypes.APPLICATION_M3U8)
-@@ -790,7 +820,7 @@ class PlaybackViewModel
+@@ -794,7 +835,7 @@ class PlaybackViewModel
                              ?.firstOrNull { it.type == MediaStreamType.VIDEO }
                              ?.let { stream ->
                                  refreshRateService.changeRefreshRate(
@@ -1079,7 +1095,7 @@ index 79d2ae579..a924db084 100644
                                      switchRefreshRate = prefs.refreshRateSwitching,
                                      switchResolution = prefs.resolutionSwitching,
                                  )
-@@ -812,6 +842,8 @@ class PlaybackViewModel
+@@ -816,6 +857,8 @@ class PlaybackViewModel
                              )
                          player.addListener(activityListener)
                          this@PlaybackViewModel.activityListener = activityListener
@@ -1088,7 +1104,7 @@ index 79d2ae579..a924db084 100644
  
                          _state.update {
                              it.copy(
-@@ -945,6 +977,7 @@ class PlaybackViewModel
+@@ -949,6 +992,7 @@ class PlaybackViewModel
                              currentPlayback = it.currentPlayback?.copy(audioIndex = index),
                          )
                      }
@@ -1096,7 +1112,7 @@ index 79d2ae579..a924db084 100644
  
                      // Resolve ONLY_FORCED to actual track based on new audio language
                      val resolvedSubtitleIndex =
-@@ -991,6 +1024,7 @@ class PlaybackViewModel
+@@ -995,6 +1039,7 @@ class PlaybackViewModel
                              subtitleIndex = index,
                              prefs = preferences,
                          )
@@ -1104,7 +1120,7 @@ index 79d2ae579..a924db084 100644
  
                      changeStreams(
                          item = currentItem.item,
-@@ -1371,6 +1405,7 @@ class PlaybackViewModel
+@@ -1375,6 +1420,7 @@ class PlaybackViewModel
  
          override fun onPlayerError(error: PlaybackException) {
              Timber.e(error, "Playback error")
@@ -1112,7 +1128,7 @@ index 79d2ae579..a924db084 100644
              viewModelScope.launch(WholphinDispatchers.Main + ExceptionHandler()) {
                  state.value.currentPlayback?.let {
                      when (it.playMethod) {
-@@ -1388,6 +1423,9 @@ class PlaybackViewModel
+@@ -1392,6 +1438,9 @@ class PlaybackViewModel
  
                          PlayMethod.DIRECT_STREAM, PlayMethod.DIRECT_PLAY -> {
                              Timber.w("Playback error during ${it.playMethod}, falling back to transcoding")
@@ -1122,7 +1138,7 @@ index 79d2ae579..a924db084 100644
                              val currentPlayback = state.value.currentPlayback
                              if (currentPlayback == null) {
                                  Timber.w("Playback error, currentPlayback is null")
-@@ -1395,12 +1433,14 @@ class PlaybackViewModel
+@@ -1399,12 +1448,14 @@ class PlaybackViewModel
                              changeStreams(
                                  item = currentItem.item,
                                  sourceId = currentPlayback?.mediaSourceInfo?.id,
@@ -1141,7 +1157,7 @@ index 79d2ae579..a924db084 100644
                              withContext(WholphinDispatchers.Main) {
                                  player.prepare()
                                  player.play()
-@@ -1411,6 +1451,89 @@ class PlaybackViewModel
+@@ -1415,6 +1466,89 @@ class PlaybackViewModel
              }
          }
  
@@ -1379,10 +1395,10 @@ index 4a7338e2c..6b629e6d2 100644
  fun PreferenceTitle(
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
 new file mode 100644
-index 000000000..7d56caa95
+index 000000000..cd42ba7a5
 --- /dev/null
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/OrcaSettings.kt
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,389 @@
 +package com.github.damontecres.wholphin.ui.preferences
 +
 +import androidx.activity.compose.BackHandler
@@ -1534,6 +1550,8 @@ index 000000000..7d56caa95
 +                ),
 +                group(
 +                    R.string.orca_settings_subtitles,
++                    // Languages and subtitle mode (they lived under Account as "More user profile settings")
++                    AppPreference.UserProfileSettings,
 +                    AppPreference.SubtitleStyle,
 +                    conditional = listOf(ConditionalPreferences(usesExoPlayer, listOf(AppPreference.AssSubtitleMode, AppPreference.DirectPlayPgs))),
 +                ),
@@ -1570,7 +1588,7 @@ index 000000000..7d56caa95
 +        OrcaSection.ACCOUNT ->
 +            listOf(
 +                group(R.string.orca_settings_signin, AppPreference.SignInAuto, AppPreference.QuickConnect),
-+                group(R.string.orca_settings_your_profile, AppPreference.ProtectProfilePreference, AppPreference.UserProfileSettings),
++                group(R.string.orca_settings_your_profile, AppPreference.ProtectProfilePreference),
 +            )
 +
 +        // Orca+ device card and performance first, then what belongs to the box
@@ -1771,7 +1789,7 @@ index 000000000..7d56caa95
 +    }
 +}
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
-index c97117b7d..3152db3b1 100644
+index d95d5abac..b0c64ca6b 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 @@ -96,10 +96,18 @@ fun PreferencesContent(
@@ -1857,7 +1875,7 @@ index c97117b7d..3152db3b1 100644
              LazyColumn(
                  state = state,
                  horizontalAlignment = Alignment.Start,
-@@ -248,19 +260,24 @@ fun PreferencesContent(
+@@ -259,19 +271,24 @@ fun PreferencesContent(
                          )
                      }
                  }
@@ -1892,7 +1910,7 @@ index c97117b7d..3152db3b1 100644
                      val groupPreferences =
                          group.preferences +
                              group.conditionalPreferences
-@@ -269,7 +286,9 @@ fun PreferencesContent(
+@@ -280,7 +297,9 @@ fun PreferencesContent(
                                  .flatten()
                      groupPreferences.forEachIndexed { prefIndex, pref ->
                          pref as AppPreference<AppPreferences, Any>
@@ -1903,7 +1921,7 @@ index c97117b7d..3152db3b1 100644
                          val isLast =
                              groupIndex == prefList.lastIndex && prefIndex == groupPreferences.lastIndex
                          item {
-@@ -816,6 +835,15 @@ fun PreferencesPage(
+@@ -827,6 +846,15 @@ fun PreferencesPage(
      Box(
          modifier = modifier.background(MaterialTheme.colorScheme.background),
      ) {
@@ -2388,7 +2406,7 @@ index 000000000..ca4d83c42
 +    <string name="orca_settings_requests">Requests</string>
 +</resources>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index cff98addc..ef5a2466a 100644
+index dd87f6da2..2fdc3cd22 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1,6 +1,7 @@
@@ -2512,9 +2530,9 @@ index cff98addc..ef5a2466a 100644
 -    <string name="force_dovi_profile_7">Direct play Dolby Vision Profile 7</string>
 +    <string name="force_dovi_profile_7">Direct play Dolby Vision profile 7</string>
      <string name="force_dovi_profile_7_summary">Ignores device compatibility checks</string>
- 
-     <string name="discover">Discover</string>
-@@ -585,8 +586,8 @@
+     <string name="prefer_dovi_over_hdr10_plus">Prefer Dolby Vision over HDR10+</string>
+     <string name="prefer_dovi_over_hdr10_plus_summary">Removes HDR10+ metadata from Dolby Vision videos, for TVs that otherwise play them as HDR10+</string>
+@@ -587,8 +588,8 @@
      <string name="content_scale_fill">Fill</string>
      <string name="content_scale_fill_width">Fill width</string>
      <string name="content_scale_fill_height">Fill height</string>
@@ -2525,7 +2543,7 @@ index cff98addc..ef5a2466a 100644
      <string name="display_preset_series_thumb">Series Thumb images</string>
      <string name="display_preset_episode_thumbnails">Episode Thumbnail images</string>
  
-@@ -747,7 +748,7 @@
+@@ -749,7 +750,7 @@
      <string name="search_and_download_subtitles"><![CDATA[Search & download subtitles]]></string>
      <string name="no_subtitles_found">No remote subtitles were found</string>
      <string name="series_continueing">Present</string>
@@ -2534,7 +2552,7 @@ index cff98addc..ef5a2466a 100644
      <string name="delete_item">Are you sure you want to delete this item?</string>
      <string name="show_media_management">Show media management options</string>
      <string-array name="backdrop_style_options">
-@@ -806,7 +807,7 @@
+@@ -808,7 +809,7 @@
      <string name="select_all">Select all</string>
      <string name="separate_types">Separate types</string>
      <string name="prefer_logos">Prefer showing logos for titles</string>
@@ -2543,7 +2561,7 @@ index cff98addc..ef5a2466a 100644
      <string name="remove_continue_watching">Remove from continue watching</string>
      <string name="remove_next_up">Remove series from next up</string>
      <string name="view_removed_next_up">View series removed from next up</string>
-@@ -820,7 +821,8 @@
+@@ -822,7 +823,8 @@
      <string name="ass_subtitle_mode_exoplayer">Direct play with ExoPlayer built-in</string>
      <string name="ass_subtitle_mode_transcode">Burn in/transcode on server</string>
      <string name="ass_subtitle_playback">SSA/ASS subtitle playback</string>
@@ -2553,6 +2571,17 @@ index cff98addc..ef5a2466a 100644
      <string name="show_more">Show %1$s more</string>
      <string name="skip_behavior">Skip behavior</string>
      <string name="skip_behavior_summary">For intros, credits, etc</string>
+@@ -906,8 +908,8 @@
+ 
+     <string name="preferred_subtitle_language">Preferred subtitle language</string>
+     <string name="preferred_audio_language">Preferred audio language</string>
+-    <string name="override_user_profile_settings">More user profile settings</string>
+-    <string name="override_user_profile_settings_summary">Override your user profile settings from the server</string>
++    <string name="override_user_profile_settings">Languages and subtitle mode</string>
++    <string name="override_user_profile_settings_summary">Preferred audio and subtitle language, and when subtitles come on, for every server</string>
+     <string name="any_language">Any language</string>
+     <string name="hash_matches">Hash matches</string>
+     <string name="subtitles_hearing_impaired">SDH</string>
 diff --git a/settings.gradle.kts b/settings.gradle.kts
 index 7fddcdcd7..91bf7d845 100644
 --- a/settings.gradle.kts

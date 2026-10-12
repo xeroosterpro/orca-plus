@@ -484,6 +484,12 @@ private fun AllSet(
     }
 }
 
+/** Whose turn it is among the one-time prompts: the cloud offer first ([CloudPrompt]), then the rest. */
+internal object PromptTurn {
+    /** The cloud offer won't show this run, or has been answered. */
+    @Volatile var cloudDone = !com.wholphinplus.sources.sync.ProfileSync.AVAILABLE
+}
+
 /**
  * The one-time offer, a few seconds after the app opens on a TV that doesn't sync yet: "welcome
  * back" when the signed-in account has a cloud profile, else "keep your setup safe". Either
@@ -491,6 +497,8 @@ private fun AllSet(
  */
 @Composable
 fun CloudPrompt() {
+    // The one-time "Tuned for this TV" rides on this hook too (it waits for the cloud offer)
+    com.wholphinplus.sources.welcome.DevicePrompt(LocalContext.current.sourceHook())
     // A build without the cloud (built from source with no -PorcaCloudUrl) never asks
     if (!com.wholphinplus.sources.sync.ProfileSync.AVAILABLE) return
     val hook = LocalContext.current.sourceHook()
@@ -499,17 +507,23 @@ fun CloudPrompt() {
     ResetWarning(hook, status)
     var exists by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
-        if (sync.prompted || status.on) return@LaunchedEffect
-        delay(4_000)
-        // mainConnection may ask the server who's signed in: never on the main thread
-        val signedIn = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { hook.mainConnection() != null }
-        if (sync.prompted || sync.status.value.on || !signedIn) return@LaunchedEffect
-        exists = sync.cloudHasProfile(hook)
+        try {
+            if (sync.prompted || status.on) return@LaunchedEffect
+            delay(4_000)
+            // mainConnection may ask the server who's signed in: never on the main thread
+            val signedIn = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { hook.mainConnection() != null }
+            if (sync.prompted || sync.status.value.on || !signedIn) return@LaunchedEffect
+            exists = sync.cloudHasProfile(hook)
+        } finally {
+            // Decided: other one-time prompts may come once this one isn't on screen
+            if (exists == null) PromptTurn.cloudDone = true
+        }
     }
     val e = exists ?: return
     val close = {
         sync.markPrompted()
         exists = null
+        PromptTurn.cloudDone = true
     }
     PadDialog(onClose = close) { CloudPinFlow(hook, e, onDone = close, onSkip = close, skipLabel = "Not now", modifier = Modifier.fillMaxSize()) }
 }

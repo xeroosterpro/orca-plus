@@ -44,7 +44,6 @@ import com.wholphinplus.sources.core.TmdbType
 import com.wholphinplus.sources.core.label
 import org.jellyfin.sdk.model.api.BaseItemKind
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 /** The server's own name, without its software in front (its tile shows the logo). */
 internal val ServerConnection.plainName: String
@@ -66,7 +65,7 @@ internal object ServerTitles {
         val title: LibraryTitle,
     )
 
-    private val byId = ConcurrentHashMap<UUID, Title>()
+    private val byId = com.wholphinplus.sources.core.lruMap<UUID, Title>(5_000)
 
     fun of(id: UUID): Title? = byId[id]
 

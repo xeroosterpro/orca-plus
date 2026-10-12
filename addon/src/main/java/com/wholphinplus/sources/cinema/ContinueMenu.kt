@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -236,7 +237,7 @@ internal suspend fun applyContinueAction(
     val at = maxOf(hook.overlay.lastPlayed(item.id.toString()) ?: 0L, series?.let { hook.overlay.seriesLastPlayed(it) } ?: 0L, System.currentTimeMillis())
     ContinueEdits.gone[item.key] = ContinueEdits.Gone(item.id.toString(), series, at, watched = action == ContinueAction.WATCHED)
     when (action) {
-        ContinueAction.REMOVE -> runCatching { repo.sendRemoveFromContinue(item) }
+        ContinueAction.REMOVE -> runCatching { repo.sendRemoveFromContinue(item) }.cancellable()
         ContinueAction.WATCHED -> sendWatched(repo, item)
     }
 }
@@ -246,7 +247,7 @@ private suspend fun sendWatched(
     repo: CinemaRepository,
     item: CinemaItem,
 ) {
-    runCatching { repo.sendMarkWatched(item) }
+    runCatching { repo.sendMarkWatched(item) }.cancellable()
 }
 
 private suspend fun focusCard(state: RowState) {
@@ -267,7 +268,7 @@ internal val CloseIcon: ImageVector =
             fill = androidx.compose.ui.graphics.SolidColor(Color.White),
         ).build()
 
-private val CheckIcon: ImageVector =
+internal val CheckIcon: ImageVector =
     ImageVector
         .Builder("Check", 24.dp, 24.dp, 24f, 24f)
         .addPath(

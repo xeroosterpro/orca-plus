@@ -10,6 +10,7 @@ import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.request.allowHardware
+import coil3.request.bitmapConfig
 import coil3.request.crossfade
 import timber.log.Timber
 import java.util.Collections
@@ -186,6 +187,9 @@ internal fun cardRequest(
             // Plain bitmaps: a hardware one is allocated and uploaded on a second GL context per
             // picture, and while posters land the frame on screen waited 50-150 ms for the GPU
             .allowHardware(false)
+            // Light boxes: 16-bit pictures (card pictures have no see-through parts): half the
+            // memory, and half the bytes to upload to the GPU as each card fills
+            .apply { if (com.wholphinplus.sources.DeviceClass.light) bitmapConfig(android.graphics.Bitmap.Config.RGB_565) }
             // Fades in when it arrives mid-glide instead of popping; one already in memory
             // (scrolling back) shows at once, Coil skips the fade for those
             .crossfade(CARD_FADE_MS)

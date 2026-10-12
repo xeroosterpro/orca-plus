@@ -2,6 +2,7 @@
 
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -78,7 +79,7 @@ import java.util.UUID
 
 /** The actor a title page opened, per title: Back from their page lands on them again. */
 internal object CastReturn {
-    private val map = java.util.concurrent.ConcurrentHashMap<UUID, String>()
+    private val map = com.wholphinplus.sources.core.lruMap<UUID, String>(200)
 
     fun mark(
         title: UUID,
@@ -130,7 +131,7 @@ internal fun CastRow(
         if (CastCache[item.detailsId] != null) return@LaunchedEffect
         // The page's own requests first
         delay(CAST_DELAY_MS)
-        cast = runCatching { repo.fullCast(item, people).also { CastCache[item.detailsId] = it } }.getOrDefault(people)
+        cast = runCatching { repo.fullCast(item, people).also { CastCache[item.detailsId] = it } }.cancellable().getOrDefault(people)
     }
     if (cast.isEmpty()) return
     Column {
@@ -287,7 +288,7 @@ fun CinemaPerson(
     ) {
         val d = data
         when {
-            d == null && error != null -> LoadError(error!!, onRetry = { attempt++ }, onClassic = null, modifier = Modifier.align(Alignment.Center))
+            d == null && error != null -> LoadError(error!!, onRetry = { attempt++ }, modifier = Modifier.align(Alignment.Center))
             d == null -> Unit
             grid -> {
                 // Back closes the grid (a key on the Shield, a callback with predictive back)

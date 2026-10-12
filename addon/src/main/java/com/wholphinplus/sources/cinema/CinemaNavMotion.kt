@@ -18,14 +18,15 @@ import androidx.compose.animation.togetherWith
  */
 object CinemaNavMotion {
     /** Opening a screen: it fades in over the one before, which leaves only once it's covered. */
-    fun push(): ContentTransform = fadeIn(tween(OPEN_MS, easing = CinemaFade)) togetherWith fadeOut(tween(1, delayMillis = OPEN_MS))
+    fun push(): ContentTransform = fadeIn(tween(openMs, easing = CinemaFade)) togetherWith fadeOut(tween(1, delayMillis = openMs))
 
     /** Going back: the screen below is there at once, and the top one fades away over it. */
-    fun pop(): ContentTransform = ContentTransform(EnterTransition.None, fadeOut(tween(CLOSE_MS, easing = CinemaFade)), targetContentZIndex = -1f)
+    fun pop(): ContentTransform = ContentTransform(EnterTransition.None, fadeOut(tween(closeMs, easing = CinemaFade)), targetContentZIndex = -1f)
 
     /** Wholphin's own (navigation's default), for the classic look. */
     fun classic(): ContentTransform = fadeIn(tween(700)) togetherWith fadeOut(tween(700))
 
-    private const val OPEN_MS = 500
-    private const val CLOSE_MS = 340
+    // Light boxes: short fades (every frame of one draws both whole screens)
+    private val openMs: Int get() = if (com.wholphinplus.sources.DeviceClass.simpleMotion) 160 else 500
+    private val closeMs: Int get() = if (com.wholphinplus.sources.DeviceClass.simpleMotion) 120 else 340
 }

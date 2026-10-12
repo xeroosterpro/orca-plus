@@ -1,5 +1,6 @@
 package com.wholphinplus.sources
 
+import com.wholphinplus.sources.core.logged
 import android.content.Context
 import com.wholphinplus.sources.core.ExternalSource
 import com.wholphinplus.sources.core.ServerKind
@@ -135,7 +136,7 @@ object PlayerPictures {
         var from = ""
         for (copy in candidates) {
             val connection = hook.connectionFor(copy.connectionId) ?: continue
-            val pictures = runCatching { hook.client.copyPictures(connection, copy.itemId, copy.mediaSourceId) }.getOrNull() ?: continue
+            val pictures = runCatching { hook.client.copyPictures(connection, copy.itemId, copy.mediaSourceId) }.logged("Player pictures from ${connection.label}").getOrNull() ?: continue
             if (wantChapters && chapters.isEmpty() && pictures.chapters.isNotEmpty()) {
                 chapters = pictures.chapters
                 from = copy.serverLabel

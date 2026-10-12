@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -40,6 +41,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -119,6 +121,14 @@ fun CinemaSearch(
     var searching by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
     var sheet by remember { mutableStateOf<TmdbItem?>(null) }
+    // Collections that match: the server's own, film series, MDBList lists ([CollectionSearch])
+    val hook = remember { entry.sourceHook() }
+    val finder = remember { CollectionSearch(hook, CinemaRepository(hook, hook.collections), service.tmdb) }
+    var found by remember { mutableStateOf<List<CollectionSearch.Hit>>(emptyList()) }
+    // Still asking for collections: "No results" waits for them (a list search can find what titles don't)
+    var findingCollections by remember { mutableStateOf(false) }
+    var openHit by remember { mutableStateOf<CollectionSearch.Hit?>(null) }
+    val hitFocus = remember { mutableMapOf<String, FocusRequester>() }
     val scope = rememberCoroutineScope()
     val firstKey = remember { FocusRequester() }
     val micFocus = remember { FocusRequester() }
@@ -148,12 +158,24 @@ fun CinemaSearch(
         snapshotFlow { query.trim() }.distinctUntilChanged().collectLatest { q ->
             if (q.length < 2) {
                 results = null
+                found = emptyList()
                 searching = false
                 return@collectLatest
             }
             delay(300)
             searching = true
             failed = false
+            found = emptyList()
+            findingCollections = true
+            // Collections come on their own: they never hold up the titles
+            val collectionsJob =
+                launch {
+                    try {
+                        found = finder.find(q)
+                    } finally {
+                        findingCollections = false
+                    }
+                }
             results =
                 try {
                     service.search(q)
@@ -164,7 +186,8 @@ fun CinemaSearch(
                 }
             searching = false
             // Look the first results up on the server now, so opening one is instant
-            results?.items?.take(12)?.forEach { launch { runCatching { service.availability(it) } } }
+            results?.items?.take(12)?.forEach { launch { runCatching { service.availability(it) }.cancellable() } }
+            collectionsJob.join()
         }
     }
 
@@ -176,7 +199,7 @@ fun CinemaSearch(
         opening = true
         scope.launch {
             try {
-                when (val a = runCatching { service.availability(item) }.getOrNull()) {
+                when (val a = runCatching { service.availability(item) }.cancellable().getOrNull()) {
                     is Availability.Library -> {
                         val kind = if (a.series) BaseItemKind.SERIES else BaseItemKind.MOVIE
                         DetailsPreview.put(item.toCinemaItem().copy(id = a.itemId, detailsId = a.itemId, kind = kind, detailsKind = kind))
@@ -270,7 +293,7 @@ fun CinemaSearch(
                 r != null -> {
                     // Titles without any art are obscure noise; a streaming app wouldn't show them
                     val all = (r.items + r.people.flatMap { it.knownFor }).distinctBy { it.key }.filter { it.backdropPath != null }
-                    heading = r.interpretation ?: if (all.isEmpty()) "No results for \"${query.trim()}\"" else null
+                    heading = r.interpretation ?: if (all.isEmpty() && found.isEmpty() && !findingCollections) "No results for \"${query.trim()}\"" else null
                     val cards = all.map { it.toCinemaItem() }
                     // The best few matches first, then everything else split into movies and shows
                     val top = cards.take(TOP_RESULTS)
@@ -318,6 +341,8 @@ fun CinemaSearch(
                             verticalArrangement = Arrangement.spacedBy(16.dp),
                             modifier = Modifier.fillMaxSize(),
                         ) {
+                            // No titles matched: collections can still have (a service's lists, a franchise)
+                            if (groups.isEmpty() && r != null) collectionsRow(found, hitFocus) { openHit = it }
                             groups.forEachIndexed { g, (label, groupItems) ->
                                 if (label != null) {
                                     item(key = "label:$label", span = { GridItemSpan(maxLineSpan) }, contentType = "label") {
@@ -346,6 +371,8 @@ fun CinemaSearch(
                                     width = 166.dp,
                                 )
                                 }
+                                // Collections after the first group (Top Results), once they're found
+                                if (g == 0 && r != null) collectionsRow(found, hitFocus) { openHit = it }
                             }
                         }
                     }
@@ -396,6 +423,18 @@ fun CinemaSearch(
     androidx.activity.compose.BackHandler(enabled = voice.active) { voice.cancel() }
     VoiceOverlay(voice, onRetry = toggleVoice)
     sheet?.let { TitleSheet(it, service, onDismiss = { sheet = null }) }
+    openHit?.let { hit ->
+        CompositionLocalProvider(LocalArt provides art, LocalOverlays provides overlays, LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) {
+            CollectionPage(hit, finder, hook, onOpen = onOpen, onClose = {
+                openHit = null
+                // Back on the tile it was opened from
+                scope.launch {
+                    androidx.compose.runtime.withFrameNanos {}
+                    runCatching { hitFocus[hit.key]?.requestFocus() }
+                }
+            })
+        }
+    }
 }
 
 /** The dedicated mic: a round button in front of the search field. */
@@ -558,3 +597,35 @@ private fun TmdbItem.toCinemaItem(): CinemaItem {
 }
 
 private fun CinemaItem.tmdbKey(): String = (if (tmdbTv) TmdbType.TV else TmdbType.MOVIE).name + ":" + tmdbId
+
+/**
+ * Search's Collections: a label and one sideways row of tiles, the full width of the results
+ * (owner, 2026-10-11: "1 row that goes horizontal to save space"). Nothing while there are none.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun androidx.compose.foundation.lazy.grid.LazyGridScope.collectionsRow(
+    found: List<CollectionSearch.Hit>,
+    focus: MutableMap<String, FocusRequester>,
+    onOpen: (CollectionSearch.Hit) -> Unit,
+) {
+    if (found.isEmpty()) return
+    item(key = "label:collections", span = { GridItemSpan(maxLineSpan) }, contentType = "label") {
+        Text("Collections", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+    }
+    item(key = "row:collections", span = { GridItemSpan(maxLineSpan) }, contentType = "collections") {
+        val row = androidx.compose.foundation.lazy.rememberLazyListState()
+        // A row inside the page's grid scrolls itself (an inherited spec would scroll the grid)
+        val spec = remember { pivot(0f) }
+        CompositionLocalProvider(LocalBringIntoViewSpec provides spec.gliding(row)) {
+            androidx.compose.foundation.lazy.LazyRow(
+                state = row,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.staysInRow(),
+            ) {
+                items(found, key = { it.key }) { hit ->
+                    CollectionTile(hit, 166.dp, Modifier.focusRequester(focus.getOrPut(hit.key) { FocusRequester() })) { onOpen(hit) }
+                }
+            }
+        }
+    }
+}

@@ -211,6 +211,26 @@ internal class RowState(
         }
     }
 
+    /** Every title has been loaded (or the row is all there is). */
+    val complete: Boolean get() = end || source == null
+
+    /**
+     * Loads the rest of the row, up to [cap] titles: sorting or filtering a grid needs them all,
+     * not the pages scrolled so far. Stops when a page brings nothing new three times running.
+     */
+    suspend fun all(
+        load: suspend (RowSource, Int) -> RowPage,
+        cap: Int = GRID_ALL_CAP,
+    ) {
+        var stuck = 0
+        while (!complete && items.size < cap && stuck < 3) {
+            val before = items.size
+            // A near-the-end load may be running: let it finish rather than skip a page
+            if (loading) kotlinx.coroutines.delay(150) else more(load)
+            if (!loading) stuck = if (items.size == before) stuck + 1 else 0
+        }
+    }
+
     /** A new order from the top of the row. */
     suspend fun shuffle(load: suspend (RowSource, Int) -> RowPage) {
         val s = source?.copy(seed = kotlin.random.Random.nextLong(), next = 0) ?: return
@@ -430,8 +450,17 @@ internal fun TitleGrid(
     onFocusedAt: (Int) -> Unit = {},
     /** On the first title, for Down from the top menu ([DownTargets]). */
     firstFocus: FocusRequester? = null,
+    /** Loads every title (sorting and filters need them all); null when [items] is already all. */
+    loadAll: (suspend () -> Unit)? = null,
+    /** Which grid's sort and filters these are (kept for the session). */
+    filterKey: String = title,
+    /** Above the filters (My List: your saved collections). */
+    header: (@Composable () -> Unit)? = null,
 ) {
     var focused by remember { mutableStateOf<CinemaItem?>(null) }
+    val g = rememberGridFiltering(items, filterKey, loadAll)
+    val filter = g.filter
+    val visible = g.shown
     var shown by remember { mutableStateOf<CinemaItem?>(null) }
     LaunchedEffect(Unit) {
         snapshotFlow { focused }.collectLatest {
@@ -449,17 +478,23 @@ internal fun TitleGrid(
             Spacer(Modifier.height(TopNavHeight))
             Row(Modifier.padding(start = 48.dp, top = 22.dp, bottom = 6.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(title, color = Ink, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
-                (count ?: items.size.takeIf { it > 0 })?.let { Text(if (it == 1) "1 title" else "$it titles", color = InkDim, fontSize = 16.sp, modifier = Modifier.padding(bottom = 5.dp)) }
+                val all = (count ?: items.size).takeIf { it > 0 }
+                all?.let { Text(g.countLabel(it), color = InkDim, fontSize = 16.sp, modifier = Modifier.padding(bottom = 5.dp)) }
             }
-            if (items.isEmpty()) {
-                Text(emptyText, color = InkDim, fontSize = 15.sp, modifier = Modifier.padding(start = 48.dp, top = 8.dp))
+            header?.invoke()
+            if (items.isNotEmpty()) GridFilterBar(g, items, Modifier.padding(start = 44.dp, top = 6.dp, bottom = 4.dp))
+            if (items.isEmpty() || visible.isEmpty()) {
+                Text(if (items.isEmpty()) emptyText else "No titles match these filters.", color = InkDim, fontSize = 15.sp, modifier = Modifier.padding(start = 48.dp, top = 8.dp))
             } else {
                 // The rows above and below are kept built, so Up and Down find their card at once
                 val grid = androidx.compose.foundation.lazy.grid.rememberLazyGridState(cacheWindow = remember { androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow(ahead = 260.dp * com.wholphinplus.sources.DeviceClass.cacheScale, behind = 260.dp * com.wholphinplus.sources.DeviceClass.cacheScale) })
-                if (onNearEnd != null) LoadNearEnd(onNearEnd) { grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index to grid.layoutInfo.totalItemsCount }
+                if (onNearEnd != null && !filter.active) LoadNearEnd(onNearEnd) { grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index to grid.layoutInfo.totalItemsCount }
+                // A new sort or filter starts from the top
+                val firstFilter = remember { filter }
+                LaunchedEffect(filter) { if (filter != firstFilter) grid.scrollToItem(0) }
                 // Opened over a tab (See all), focus comes here: it stayed on the hidden tab's
                 // button, so the remote moved nothing on screen. Back from a title page: that title.
-                val start = focusAt?.coerceIn(0, items.lastIndex)
+                val start = focusAt?.coerceIn(0, visible.lastIndex)
                 val first = remember { FocusRequester() }
                 if (start != null) {
                     LaunchedEffect(Unit) {
@@ -476,7 +511,7 @@ internal fun TitleGrid(
                 // focus search picked whichever card it built first in the row above
                 val cards = remember { HashMap<Int, FocusRequester>() }
                 val at = remember { intArrayOf(-1, -1) }
-                val titles by androidx.compose.runtime.rememberUpdatedState(items.size)
+                val titles by androidx.compose.runtime.rememberUpdatedState(visible.size)
                 val vertical =
                     remember(grid) {
                         Modifier.onPreviewKeyEvent { e -> e.type == KeyEventType.KeyDown && gridStep(e.key, grid, cards, at, titles) }
@@ -502,7 +537,7 @@ internal fun TitleGrid(
                         verticalArrangement = Arrangement.spacedBy(22.dp),
                         modifier = Modifier.fillMaxSize().then(vertical),
                     ) {
-                        itemsIndexed(items, key = { _, it -> it.key }, contentType = { _, _ -> "card" }) { i, item ->
+                        itemsIndexed(visible, key = { _, it -> it.key }, contentType = { _, _ -> "card" }) { i, item ->
                             val self = remember { FocusRequester() }
                             androidx.compose.runtime.DisposableEffect(i, self) {
                                 cards[i] = self
@@ -621,6 +656,8 @@ internal fun RowGridScreen(
         onNearEnd = { state.more(actions.load) },
         focusAt = state.gridAt,
         onFocusedAt = { state.gridAt = it },
+        loadAll = if (state.complete) null else ({ state.all(actions.load) }),
+        filterKey = "row:" + state.title,
     )
 }
 

@@ -6,6 +6,9 @@
 #   ./build.sh v1.0.8     a specific tag
 #   SHIELD= ./build.sh    build only (no install); echo <ip> > .shield sets the default device
 #   ./build.sh --check-patch   only check that hooks.patch touches every file in hooks.files
+#   WALK=0 ./build.sh     skip the walk-through (personal builds run tools/walk.py on a bench
+#                         emulator when one is running, and stop before the Shield if it fails);
+#                         WALK_DEVICE=emulator-5560 picks the bench (default: the first one up)
 #
 # Shared (public) build, as run by GitHub Actions:
 #   PUBLIC=1 REPO=owner/name UNSIGNED=1 SHIELD= ./build.sh
@@ -203,6 +206,35 @@ SIGNED=dist/Orca+-${TAG#v}${ABI:+-$ABI}.apk
 sign "$APK" "$SIGNED"
 HASH=$(sha256sum "$SIGNED" | cut -d' ' -f1)
 echo "==> Built $SIGNED (v$VERSION, $HASH)"
+
+# Walk-through on a bench emulator (every main screen, crash/ANR/blank checks) before the Shield
+if [ "${WALK:-1}" != 0 ]; then
+    BENCH=${WALK_DEVICE:-}
+    if [ -z "$BENCH" ]; then
+        for d in emulator-5570 emulator-5560; do
+            if [ "$(adb -s "$d" get-state 2>/dev/null)" = device ]; then BENCH=$d; break; fi
+        done
+    fi
+    if [ -n "$BENCH" ]; then
+        BENCH_APK=$SIGNED
+        if [ -n "$ABI" ]; then # the Shield's ARM APK doesn't run on the x86 emulator
+            BENCH_APK=dist/walk-universal.apk
+            sign "$(ls "$OUT"/Wholphin-default-release-*.apk | grep -vE -- '-(arm64-v8a|armeabi-v7a|x86_64)\.apk$' | head -1)" "$BENCH_APK"
+        fi
+        echo "==> Walk-through on $BENCH (WALK=0 skips)"
+        adb -s "$BENCH" install -r "$BENCH_APK" >/dev/null
+        mkdir -p dist/walk
+        WALK_OK=1
+        python3 tools/walk.py --device "$BENCH" > dist/walk/last.log 2>&1 || WALK_OK=0
+        grep -E "FAIL|problem|crash|steps," dist/walk/last.log | tail -12 || true
+        if [ "$WALK_OK" = 0 ]; then
+            echo "!! Walk-through failed on $BENCH: see dist/walk/latest/report.json (not installed on the Shield)" >&2
+            exit 5
+        fi
+    else
+        echo "==> Walk-through skipped: no bench emulator running (firestick-emulator or the Shield AVD)"
+    fi
+fi
 
 [ -n "$SHIELD" ] || exit 0
 adb -s "$SHIELD:5555" install -r "$SIGNED"

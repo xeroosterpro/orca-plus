@@ -1,5 +1,7 @@
 package com.wholphinplus.sources
 
+import com.wholphinplus.sources.core.logged
+import com.wholphinplus.sources.core.cancellable
 import com.wholphinplus.sources.core.ExternalSource
 import com.wholphinplus.sources.core.PlayRequest
 import com.wholphinplus.sources.core.TmdbClient
@@ -14,11 +16,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import timber.log.Timber
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -46,14 +45,14 @@ class SearchService
     ) {
         val tmdb =
             TmdbClient(
-                http = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).build(),
+                http = com.wholphinplus.sources.core.OrcaHttp.client(connect = 8, read = 15),
                 apiKey = { hook.store.tmdbKey.value },
                 proxy = com.wholphinplus.sources.sync.ProfileSync.ENDPOINT.takeIf { it.isNotBlank() }?.let { "$it/v1/tmdb" },
             )
 
         val enabled: Boolean get() = tmdb.available
 
-        private val libraryCache = ConcurrentHashMap<String, Availability>()
+        private val libraryCache = com.wholphinplus.sources.core.lruMap<String, Availability>(2_000)
 
         suspend fun search(query: String): TmdbSearch = withContext(Dispatchers.IO) { tmdb.search(query) }
 
@@ -80,7 +79,7 @@ class SearchService
                         val ids =
                             runCatching {
                                 if (item.type == TmdbType.TV) hook.client.matchSeriesIds(main, request) else hook.client.matchItemIds(main, request)
-                            }.onSuccess { answered = true }
+                            }.cancellable().onSuccess { answered = true }
                                 .onFailure { Timber.w(it, "Library lookup failed for %s", item.title) }
                                 .getOrDefault(emptyList())
                         ids.firstOrNull()?.let { id -> runCatching { UUID.fromString(dashed(id)) }.getOrNull() }
@@ -105,7 +104,7 @@ class SearchService
             progress: ((found: List<ExternalSource>, done: Int, total: Int, misses: List<Miss>) -> Unit)? = null,
         ): List<ExternalSource> =
             withContext(Dispatchers.IO) {
-                val ids = runCatching { tmdb.externalIds(item) }.getOrNull()
+                val ids = runCatching { tmdb.externalIds(item) }.logged("TMDB ids for ${item.title}").getOrNull()
                 val request =
                     PlayRequest(
                         title = item.title,

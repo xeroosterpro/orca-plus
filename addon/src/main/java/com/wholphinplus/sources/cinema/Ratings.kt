@@ -45,11 +45,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import timber.log.Timber
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -127,8 +125,7 @@ class RatingsRepository
             val at: Long,
         )
 
-        private val prefs = context.getSharedPreferences("wholphinplus_ratings", Context.MODE_PRIVATE)
-        private val file = java.io.File(context.filesDir, "cinema_ratings_v1.json")
+        private val file = CacheFiles.at(context, "cinema_ratings_v1.json")
         private val json = Json { ignoreUnknownKeys = true }
         private val cache = ConcurrentHashMap<String, Entry>()
         private val inFlight = ConcurrentHashMap<String, CompletableDeferred<Entry?>>()
@@ -142,7 +139,7 @@ class RatingsRepository
         @Volatile private var pausedUntil = 0L
 
         @Volatile private var pausedKey = ""
-        private val http = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).callTimeout(20, TimeUnit.SECONDS).build()
+        private val http = com.wholphinplus.sources.core.OrcaHttp.client(connect = 8, read = 15, call = 20)
 
         val hasKey: Boolean get() = store.mdblistKey.value.isNotBlank()
 
@@ -241,17 +238,10 @@ class RatingsRepository
 
         private fun load() {
             val saved = CacheFiles.read(file, Entry.serializer())
-            if (saved != null) {
-                saved.items.forEach { (k, v) -> cache.putIfAbsent(k, v) }
-                return
-            }
-            // Carried over once from the preferences they used to live in
-            CacheFiles.legacy(prefs.getString(KEY, null), Entry.serializer()).forEach { (k, v) -> cache.putIfAbsent(k, v) }
-            prefs.edit().remove(KEY).apply()
+            saved?.items?.forEach { (k, v) -> cache.putIfAbsent(k, v) }
         }
 
         private companion object {
-            const val KEY = "ratings_v1"
             const val MAX = 4_000
             const val KEEP_MS = 7 * 24 * 60 * 60 * 1000L
             const val PAUSE_MS = 60 * 60 * 1000L

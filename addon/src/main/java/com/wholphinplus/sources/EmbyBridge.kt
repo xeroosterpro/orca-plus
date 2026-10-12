@@ -200,7 +200,7 @@ object EmbyBridge : Interceptor {
     private const val REFRESH = "X-Orca-Refresh"
     @Volatile private var resumeDir: java.io.File? = null
     private val refreshing = ConcurrentHashMap<String, Boolean>()
-    private val refreshClient by lazy { okhttp3.OkHttpClient.Builder().addInterceptor(this).build() }
+    private val refreshClient by lazy { com.wholphinplus.sources.core.OrcaHttp.base.newBuilder().addInterceptor(this).build() }
     private val _resumeChanged = kotlinx.coroutines.flow.MutableStateFlow(0)
 
     /** Bumped when Continue Watching given from the device turned out different from the server's. */

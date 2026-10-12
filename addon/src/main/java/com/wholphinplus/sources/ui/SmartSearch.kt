@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.ui
 
+import com.wholphinplus.sources.core.logged
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -340,7 +341,7 @@ internal fun TitleSheet(
         if (item.type == TmdbType.MOVIE) {
             findSources(null)
         } else {
-            seasons = withContext(Dispatchers.IO) { runCatching { service.tmdb.seasons(item.id) }.getOrDefault(emptyList()) }
+            seasons = withContext(Dispatchers.IO) { runCatching { service.tmdb.seasons(item.id) }.logged("TMDB seasons").getOrDefault(emptyList()) }
             season = seasons?.firstOrNull { it.number > 0 } ?: seasons?.firstOrNull()
         }
     }
@@ -348,7 +349,7 @@ internal fun TitleSheet(
         val s = season ?: return@LaunchedEffect
         episodes = null
         episode = null
-        episodes = withContext(Dispatchers.IO) { runCatching { service.tmdb.episodes(item.id, s.number) }.getOrDefault(emptyList()) }
+        episodes = withContext(Dispatchers.IO) { runCatching { service.tmdb.episodes(item.id, s.number) }.logged("TMDB episodes").getOrDefault(emptyList()) }
     }
     LaunchedEffect(episodes, episode) { if (episode == null) runCatching { firstFocus.requestFocus() } }
 

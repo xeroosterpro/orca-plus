@@ -1,4 +1,29 @@
-# Orca+ baseline profile: pre-compile the addon's code at install, so Cinema mode, the source
-# picker and smart search run at full speed from the first session (no JIT warm-up jank).
+# Orca+ baseline profile: pre-compile the code browsing and playing run, so Cinema mode, the source
+# picker and smart search run at full speed instead of in the interpreter / JIT.
+#
+# 2026-10-11 (Fire Stick bench): this file used to cover only the addon. The APK's profile then had
+# ~1,900 addon methods but just 65 of Wholphin's and only the libraries' own hot lists: a box ran
+# ~2.5x the CPU per browse until enough had been JIT-compiled and profiled (quicken 2744+1737 ms
+# main+JIT vs speed 1754 ms, same moves). Now the app, the UI toolkit, images, network, parsing and
+# the player. (Rules are merged into the app's profile; R8 renames them with the code.)
 HSPLcom/wholphinplus/sources/**;->**(**)**
 Lcom/wholphinplus/sources/**;
+HSPLcom/github/damontecres/wholphin/**;->**(**)**
+Lcom/github/damontecres/wholphin/**;
+HSPLandroidx/compose/**;->**(**)**
+Landroidx/compose/**;
+HSPLandroidx/tv/**;->**(**)**
+Landroidx/tv/**;
+HSPLandroidx/navigation3/**;->**(**)**
+HSPLandroidx/lifecycle/**;->**(**)**
+HSPLcoil3/**;->**(**)**
+Lcoil3/**;
+HSPLokhttp3/**;->**(**)**
+HSPLokio/**;->**(**)**
+HSPLkotlinx/coroutines/**;->**(**)**
+Lkotlinx/coroutines/**;
+HSPLkotlinx/serialization/**;->**(**)**
+HSPLorg/jellyfin/sdk/**;->**(**)**
+HSPLkotlin/collections/**;->**(**)**
+HSPLkotlin/text/**;->**(**)**
+HSPLandroidx/media3/**;->**(**)**

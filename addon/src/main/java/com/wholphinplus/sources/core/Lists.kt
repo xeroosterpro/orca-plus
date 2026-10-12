@@ -57,9 +57,28 @@ sealed interface ListSource {
         val chartId: String get() = url.split('/').takeLast(2).let { (type, file) -> "ts-$type-${file.removeSuffix(".json")}" }
     }
 
+    /** A TMDB film series saved from search: https://www.themoviedb.org/collection/{id}. */
+    data class TmdbCollection(
+        override val url: String,
+        val id: Int,
+    ) : ListSource
+
+    /** One of the main server's own collections (a box set) saved from search: orcaplus://collection/{item id}. */
+    data class ServerCollection(
+        override val url: String,
+        val itemId: String,
+    ) : ListSource
+
     companion object {
+        const val SERVER_COLLECTION = "orcaplus://collection/"
+
+        fun tmdbCollection(id: Int) = TmdbCollection("https://www.themoviedb.org/collection/$id", id)
+
+        fun serverCollection(itemId: String) = ServerCollection(SERVER_COLLECTION + itemId, itemId)
+
         /** Parse a list link from mdblist.com or trakt.tv; null if it isn't one. */
         fun parse(raw: String): ListSource? {
+            if (raw.trim().startsWith(SERVER_COLLECTION)) return raw.trim().removePrefix(SERVER_COLLECTION).takeIf { it.isNotBlank() }?.let(::serverCollection)
             val text = raw.trim().let { if (it.startsWith("http", true)) it else "https://$it" }
             val url = text.toHttpUrlOrNull() ?: return null
             val host = url.host.lowercase(Locale.US).removePrefix("www.")
@@ -79,6 +98,9 @@ sealed interface ListSource {
 
                 host == TOP_STREAMING_HOST && seg.size == 4 && seg[1] == "catalog" && seg[3].endsWith(".json") ->
                     TopStreaming("https://$TOP_STREAMING_HOST/${seg[0]}/catalog/${seg[2]}/${seg[3]}")
+
+                host == "themoviedb.org" && seg.size >= 2 && seg[0] == "collection" && seg[1].substringBefore('-').toIntOrNull() != null ->
+                    tmdbCollection(seg[1].substringBefore('-').toInt())
 
                 host.endsWith("trakt.tv") && seg.size >= 2 && seg[0] == "lists" ->
                     Trakt("https://trakt.tv/lists/${seg[1]}", "lists/${seg[1]}", prettify(seg[1]))
@@ -114,6 +136,8 @@ class ListClient(
             is ListSource.Trakt -> trakt(source)
             is ListSource.TopStreaming -> topStreaming(source)
             is ListSource.OrcaChart -> FetchedList(source.id, chartsFrom(source.base, entries = true).firstOrNull { it.id == source.id }?.entries ?: error("The Orca+ cloud no longer has this chart"))
+            // Need TMDB and the signed-in server: read by HomeCollections
+            is ListSource.TmdbCollection, is ListSource.ServerCollection -> error("Read by HomeCollections")
         }
 
     /** An Orca+ chart, as the cloud serves it. */

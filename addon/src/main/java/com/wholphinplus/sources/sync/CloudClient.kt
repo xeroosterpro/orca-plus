@@ -8,10 +8,8 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
 
 /** The cloud said no: [error] is its reason ("wrong_pin", "locked", "conflict", "no_profile"…). */
 class CloudException(
@@ -82,13 +80,7 @@ internal class CloudClient(
     private val base: String,
     private val devices: DeviceTokens? = null,
 ) {
-    private val http =
-        OkHttpClient
-            .Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .callTimeout(45, TimeUnit.SECONDS)
-            .build()
+    private val http = com.wholphinplus.sources.core.OrcaHttp.client(connect = 10, read = 30, call = 45)
     private val json = Json { ignoreUnknownKeys = true }
 
     fun state(id: String): CloudState {

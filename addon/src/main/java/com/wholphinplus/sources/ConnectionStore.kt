@@ -134,6 +134,11 @@ class ConnectionStore
          */
         val deviceMode: StateFlow<String> = _deviceMode.asStateFlow()
 
+        /** Whether this TV was asked "Tuned for this TV" (the tour's stop, or the one-time prompt on an older install). */
+        val devicePrompted: Boolean get() = prefs.getBoolean(DEVICE_PROMPTED_KEY, false)
+
+        fun markDevicePrompted() = prefs.edit().putBoolean(DEVICE_PROMPTED_KEY, true).apply()
+
         fun setDeviceMode(mode: String) {
             prefs.edit().putString(DEVICE_MODE_KEY, mode).apply()
             _deviceMode.value = mode
@@ -407,6 +412,7 @@ class ConnectionStore
             const val PLAY_INFO_KEY = "play_info_prefs"
             const val POSTER_SIZE_KEY = "poster_size"
             const val DEVICE_MODE_KEY = "device_mode"
+            const val DEVICE_PROMPTED_KEY = "device_prompted"
             const val POSTER_SLOW_KEY = "poster_slow_since"
             const val ONBOARDING_KEY = "onboarding_stage"
 

@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -148,7 +149,7 @@ internal object StreamCache {
     fun attach(context: android.content.Context) {
         if (file != null) return
         val app = context.applicationContext
-        val f = java.io.File(app.filesDir, "cinema_streams_v3.json")
+        val f = CacheFiles.at(app, "cinema_streams_v3.json")
         file = f
         io.launch {
             try {
@@ -156,11 +157,6 @@ internal object StreamCache {
                 if (saved != null) {
                     saved.items.forEach { (k, v) -> map.putIfAbsent(k, v) }
                     saved.used.forEach { (k, v) -> used.putIfAbsent(k, v) }
-                } else {
-                    // Carried over once from the preferences it used to live in
-                    val p = app.getSharedPreferences("wholphinplus_streams", android.content.Context.MODE_PRIVATE)
-                    CacheFiles.legacy(p.getString(KEY, null), StreamTags.serializer()).forEach { (k, v) -> map.putIfAbsent(k, v) }
-                    p.edit().clear().apply()
                 }
             } finally {
                 ready.complete(Unit)
@@ -210,7 +206,7 @@ internal object StreamCache {
         val waits = wanted.associateWith { kotlinx.coroutines.CompletableDeferred<StreamTags?>() }
         waits.forEach { (id, d) -> inFlight[id.toString()] = d }
         try {
-            val got = gate.withPermit { runCatching { batch.tags(wanted) }.getOrNull() }
+            val got = gate.withPermit { runCatching { batch.tags(wanted) }.cancellable().getOrNull() }
             waits.forEach { (id, d) ->
                 // A title the answer left out has no file facts: remembered as empty
                 val tags = got?.let { it[id] ?: StreamTags(null, null, null) }
@@ -243,7 +239,6 @@ internal object StreamCache {
             }
     }
 
-    private const val KEY = "streams_v3"
     private const val BATCH = 6
     private const val MAX = 6_000
 }
@@ -488,6 +483,12 @@ private val PREVIEW_SAMPLE =
         resumeMs = 0,
         progress = 0.35f,
     )
+
+/**
+ * The wordmark file of the service whose page the cards are on: every card there streams on it,
+ * so its logo is left off them (it's in the page's top bar).
+ */
+internal val LocalPageService = androidx.compose.runtime.staticCompositionLocalOf<String?> { null }
 
 /**
  * Where a title streams: its services' wordmarks, small and white straight on the picture

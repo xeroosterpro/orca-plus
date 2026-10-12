@@ -2,6 +2,8 @@ package com.wholphinplus.sources
 
 import android.content.Context
 import com.wholphinplus.sources.core.ListClient
+import org.jellyfin.sdk.api.client.extensions.itemsApi
+import com.wholphinplus.sources.core.FetchedList
 import com.wholphinplus.sources.core.ListEntry
 import com.wholphinplus.sources.core.ListSource
 import com.wholphinplus.sources.core.PlayRequest
@@ -25,10 +27,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.encodeToStream
-import okhttp3.OkHttpClient
 import timber.log.Timber
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -54,6 +54,8 @@ data class HomeCollection(
     val hidden: Boolean = false,
     /** Each of [itemIds]' place in the list (1 = first), so a Top 10 keeps its real numbers. */
     val ranks: List<Int> = emptyList(),
+    /** A collection saved from search: its tile's picture (null for lists added by link). */
+    val picture: String? = null,
 ) {
     /** Main-server item id (dashes or not) → its place in the list; empty for rows saved before ranks. */
     fun rankById(): Map<String, Int> = if (ranks.size != itemIds.size) emptyMap() else itemIds.zip(ranks).associate { (id, r) -> id.replace("-", "").lowercase() to r }
@@ -95,7 +97,8 @@ class HomeCollections
         private val writer = java.util.concurrent.Executors.newSingleThreadExecutor()
 
         /** The main server's library by TMDB/IMDb id: lists match by id, no search per title. */
-        private val index = LibraryIndex(java.io.File(context.filesDir, "library_index_v1.bin"))
+        private val matchesFile = com.wholphinplus.sources.cinema.CacheFiles.at(context, "list_matches_v1.json")
+        private val index = LibraryIndex(com.wholphinplus.sources.cinema.CacheFiles.at(context, "library_index_v1.bin"))
 
         /** Whose library an index is: the main server and the signed-in user. */
         private fun ownerOf(c: com.wholphinplus.sources.core.ServerConnection) = c.serverUrl.trimEnd('/') + "|" + c.userId
@@ -131,7 +134,7 @@ class HomeCollections
         private val matchesMap = java.util.concurrent.ConcurrentHashMap<String, String>()
         private val matchCache: java.util.concurrent.ConcurrentHashMap<String, String> get() = ready().let { matchesMap }
 
-        val client = ListClient(OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build()) { _traktClientId.value }
+        val client = ListClient(com.wholphinplus.sources.core.OrcaHttp.client(connect = 10, read = 30)) { _traktClientId.value }
 
         fun setTraktClientId(id: String) {
             prefs.edit().putString(TRAKT_KEY, id.trim()).apply()
@@ -400,10 +403,24 @@ class HomeCollections
             return old
         }
 
-        private fun loadMatches(): Map<String, String> =
-            runCatching { prefs.getString(MATCH_KEY, null)?.let { json.decodeFromString<Map<String, String>>(it) } }.getOrNull().orEmpty()
+        /**
+         * A file, not the preferences they used to live in (carried over once): preferences keep
+         * their whole text in memory for the app's life, ~60 KB of ids here.
+         */
+        private fun loadMatches(): Map<String, String> {
+            com.wholphinplus.sources.cinema.CacheFiles.read(matchesFile, kotlinx.serialization.serializer<String>())?.let { return it.items }
+            val old = runCatching { prefs.getString(MATCH_KEY, null)?.let { json.decodeFromString<Map<String, String>>(it) } }.getOrNull().orEmpty()
+            if (prefs.contains(MATCH_KEY)) {
+                writeMatches(old)
+                prefs.edit().remove(MATCH_KEY).apply()
+            }
+            return old
+        }
 
-        private fun saveMatches() = prefs.edit().putString(MATCH_KEY, json.encodeToString(HashMap(matchCache))).apply()
+        private fun writeMatches(m: Map<String, String>) =
+            com.wholphinplus.sources.cinema.CacheFiles.write(matchesFile, kotlinx.serialization.serializer<String>(), com.wholphinplus.sources.cinema.CacheFiles.Saved(m))
+
+        private fun saveMatches() = writeMatches(HashMap(matchCache))
 
         // ------------------------------------------------------------ refresh
 
@@ -516,7 +533,7 @@ class HomeCollections
             val updated =
                 try {
                     val source = ListSource.parse(c.url) ?: error("Not a Trakt, MDBList, Top Streaming or Orca+ chart link")
-                    val all = client.fetch(source)
+                    val all = fetchFor(hook, source)
                     // The cloud keeps a chart's last good titles, so one sent empty is a fault: taken,
                     // it would empty the row (and take it off every page) for six hours
                     if (all.entries.isEmpty() && c.itemIds.isNotEmpty() && source is ListSource.OrcaChart) error("The Orca+ cloud sent no titles for this chart")
@@ -637,6 +654,54 @@ class HomeCollections
             matchCache[e.key] = id.orEmpty()
             return id
         }
+
+        /**
+         * A list's titles. A film series (TMDB's parts) and a server collection (its titles' ids) are
+         * read here, with TMDB and the signed-in server; every other kind by the list client.
+         */
+        private suspend fun fetchFor(
+            hook: SourceHook,
+            source: ListSource,
+        ): FetchedList =
+            when (source) {
+                is ListSource.TmdbCollection -> {
+                    val tmdb =
+                        com.wholphinplus.sources.core.TmdbClient(
+                            http = com.wholphinplus.sources.core.OrcaHttp.client(connect = 8, read = 15),
+                            apiKey = { hook.store.tmdbKey.value },
+                            proxy = com.wholphinplus.sources.sync.ProfileSync.ENDPOINT.takeIf { it.isNotBlank() }?.let { "$it/v1/tmdb" },
+                        )
+                    val parts = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { tmdb.collectionParts(source.id) }
+                    FetchedList("", parts.map { ListEntry(TmdbType.MOVIE, it.title, it.year, it.id, null, null) })
+                }
+                is ListSource.ServerCollection -> {
+                    val main = hook.mainConnection() ?: error("Not signed in")
+                    val items =
+                        hook.jellyfin.itemsApi.getItems(
+                            org.jellyfin.sdk.model.api.request.GetItemsRequest(
+                                userId = UUID.fromString(main.userId),
+                                parentId = UUID.fromString(source.itemId),
+                                limit = 1_000,
+                                fields = listOf(org.jellyfin.sdk.model.api.ItemFields.PROVIDER_IDS),
+                            ),
+                        ).content.items
+                    FetchedList(
+                        "",
+                        items.map {
+                            val ids = it.providerIds.orEmpty()
+                            ListEntry(
+                                if (it.type == org.jellyfin.sdk.model.api.BaseItemKind.SERIES) TmdbType.TV else TmdbType.MOVIE,
+                                it.name.orEmpty(),
+                                it.productionYear,
+                                ids.entries.firstOrNull { e -> e.key.equals("Tmdb", true) }?.value?.toIntOrNull(),
+                                ids.entries.firstOrNull { e -> e.key.equals("Imdb", true) }?.value,
+                                null,
+                            )
+                        },
+                    )
+                }
+                else -> client.fetch(source)
+            }
 
         /** "Refresh now": forget remembered misses so newly added library titles are found. */
         fun forgetMisses() {

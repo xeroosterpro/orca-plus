@@ -1,5 +1,6 @@
 package com.wholphinplus.sources
 
+import com.wholphinplus.sources.core.logged
 import android.content.Context
 import com.wholphinplus.sources.core.ServerConnection
 import com.wholphinplus.sources.core.ServerKind
@@ -106,7 +107,7 @@ internal class WatchSync(
         val target =
             copies
                 .take(4)
-                .map { it to runCatching { hook.client.userData(main, it) }.getOrNull() }
+                .map { it to runCatching { hook.client.userData(main, it) }.logged("Watch state from the main server").getOrNull() }
                 .maxByOrNull { it.second?.lastPlayed ?: Instant.EPOCH }
                 ?: return
         val current = target.second

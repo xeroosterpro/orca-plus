@@ -1,5 +1,6 @@
 package com.wholphinplus.sources
 
+import com.wholphinplus.sources.core.cancellable
 import android.annotation.SuppressLint
 import android.content.Context
 import android.provider.Settings
@@ -30,7 +31,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.OkHttpClient
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
 import org.jellyfin.sdk.model.api.BaseItemDto
@@ -42,7 +42,6 @@ import timber.log.Timber
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -62,6 +61,8 @@ class SourceHook
         val profileSync: com.wholphinplus.sources.sync.ProfileSync,
     ) {
         init {
+            // The once-a-minute health line in the log (memory, CPU, frames, errors)
+            OrcaHealth.start(context)
             // Cinema mode gives memory back when Android asks (see MemoryTrim)
             context.registerComponentCallbacks(com.wholphinplus.sources.cinema.MemoryTrim(context))
             // Leaving the app (Home button, sleep): upload what changed to the cloud profile
@@ -87,6 +88,7 @@ class SourceHook
             serverIdFor?.takeIf { it.first == url }?.let { return it.second }
             return kotlinx.coroutines.withContext(Dispatchers.IO) {
                 runCatching { jellyfin.systemApi.getPublicSystemInfo().content.id }
+                    .cancellable()
                     .onFailure { Timber.w(it, "Cannot read the main server's id") }
                     .getOrNull()
                     ?.takeIf { it.isNotBlank() }
@@ -97,15 +99,9 @@ class SourceHook
         val client: ServerClient by lazy {
             ServerClient(
                 // Our own client: Wholphin's authenticated one would send the Jellyfin token to other servers.
-                http =
-                    OkHttpClient
-                        .Builder()
-                        .connectTimeout(8, TimeUnit.SECONDS)
-                        .readTimeout(20, TimeUnit.SECONDS)
-                        // A blocking call ignores coroutine timeouts: cap the whole call too, so
-                        // one hung server can't hold the picker or watch sync past its budget
-                        .callTimeout(25, TimeUnit.SECONDS)
-                        .build(),
+                // A blocking call ignores coroutine timeouts: cap the whole call too, so one hung
+                // server can't hold the picker or watch sync past its budget
+                http = com.wholphinplus.sources.core.OrcaHttp.client(connect = 8, read = 20, call = 25),
                 deviceId = deviceId(),
                 clientName = "Orca+",
                 clientVersion = "1.0",
@@ -141,7 +137,7 @@ class SourceHook
          * through Wholphin's Continue Watching). What it finds shows on the next refresh.
          */
         fun syncWatchStateLater() {
-            background.launch { runCatching { syncWatchState() }.onFailure { Timber.w(it, "Background watch sync failed") } }
+            background.launch { runCatching { syncWatchState() }.cancellable().onFailure { Timber.w(it, "Background watch sync failed") } }
             profileSync.syncSoon(this)
         }
 
@@ -189,6 +185,7 @@ class SourceHook
                     ?: mainUserPrefs.getString("user_id", null)?.takeIf { mainUserPrefs.getString("sign_in", null) == signInKey(token) }
                         ?.also { mainUserId = token to it }
                     ?: runCatching { client.currentUserId(shell) }
+                        .cancellable()
                         .onFailure { Timber.w(it, "Watch sync: cannot read the main user") }
                         .getOrNull()
                         ?.also {
@@ -547,13 +544,15 @@ class PickSession internal constructor(
         mainSource: org.jellyfin.sdk.model.api.MediaSourceInfo?,
         audioIndex: Int?,
         subtitleIndex: Int?,
+        copyText: org.jellyfin.sdk.model.api.MediaStream? = null,
     ) {
         mainTracks[itemId] = MainTracks(audioIndex, subtitleIndex)
         if (mainSource != null) mainSources[itemId] = mainSource else mainSources.remove(itemId)
         if (!isExternal(itemId)) return restoreTracks()
         val streams = mainSource?.mediaStreams.orEmpty()
         val audio = streams.firstOrNull { it.type == MediaStreamType.AUDIO && it.index == audioIndex }
-        val subtitle = streams.firstOrNull { it.type == MediaStreamType.SUBTITLE && it.index == subtitleIndex }
+        // The main copy's pick, else the pick among this copy's own subtitles ([copyTracks])
+        val subtitle = streams.firstOrNull { it.type == MediaStreamType.SUBTITLE && it.index == subtitleIndex } ?: copyText
         wanted[itemId] = Wanted(audio?.language, subtitle?.let { WantedText(it.language, it.isForced, it) })
         runCatching {
             if (tracksPlayer !== player) {
@@ -563,6 +562,39 @@ class PickSession internal constructor(
             val base = savedParams ?: player.trackSelectionParameters
             player.trackSelectionParameters = externalTrackParams(base, audio?.language, subtitle != null, subtitle?.language)
         }.onFailure { Timber.w(it, "Could not set track languages") }
+    }
+
+    /**
+     * [mainSource] with the subtitles of the extra server's copy of [itemId] in place of its own, so
+     * Wholphin's subtitle rules (mode and preferred language, as on the main copy) can run over
+     * that file. Asked when the main copy's tracks gave no subtitles: the main copy may lack the
+     * language another server has. Null for the main copy or a copy whose tracks aren't known.
+     */
+    fun copyTracks(
+        itemId: UUID,
+        mainSource: org.jellyfin.sdk.model.api.MediaSourceInfo?,
+    ): org.jellyfin.sdk.model.api.MediaSourceInfo? {
+        if (mainSource == null || !isExternal(itemId)) return null
+        val copy = chosen[itemId]?.takeIf { it.subtitles.isNotEmpty() } ?: return null
+        val streams =
+            copy.subtitles.mapIndexed { i, s ->
+                org.jellyfin.sdk.model.api.MediaStream(
+                    type = MediaStreamType.SUBTITLE,
+                    index = i,
+                    language = s.language,
+                    title = s.title,
+                    displayTitle = s.title,
+                    codec = s.codec,
+                    isInterlaced = false,
+                    isDefault = false,
+                    isForced = s.forced,
+                    isHearingImpaired = false,
+                    isExternal = s.url != null,
+                    isTextSubtitleStream = !s.image,
+                    supportsExternalStream = !s.image,
+                )
+            }
+        return mainSource.copy(mediaStreams = mainSource.mediaStreams.orEmpty().filter { it.type != MediaStreamType.SUBTITLE } + streams)
     }
 
     // ------------------------------------------------------------ subtitles and sound in another server's file
@@ -742,6 +774,9 @@ class PickSession internal constructor(
             .firstOrNull()
             ?.index
     }
+
+    /** A server switch carries its languages to [itemId]'s next start (then subtitles follow them, not the rules). */
+    fun carrying(itemId: UUID): Boolean = carry.containsKey(itemId)
 
     /** The carried subtitles as a track of [source], else [chosen] (Wholphin's own choice); used once. */
     fun carriedSubtitle(

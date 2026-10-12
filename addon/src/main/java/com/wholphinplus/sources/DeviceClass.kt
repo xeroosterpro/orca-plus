@@ -27,8 +27,12 @@ import java.util.Locale
  * - **Light** (Fire TV Stick, Stick Lite, 1-1.5 GB boxes): small card pictures from the start, the
  *   backdrop's slow zoom off (it redraws the whole screen for 12 s), much less built off screen.
  *
- * Motion itself ([com.wholphinplus.sources.cinema.CinemaGlide]) is the same everywhere: the glide
- * is cheap, what it moves is what costs. Playback: [fit] judges each copy against the hardware
+ * Light also gets simpler motion (owner, 2026-10-11, after the Fire Stick bench showed every held
+ * move over a stick's frame budget): a shorter glide, no card lift, focus edges and colours that
+ * switch instead of fading, cards that fill only at rest, plain billboard and screen changes.
+ * Full and Balanced move as designed. A box whose frames keep running late while browsing steps
+ * itself down ([FrameWatch], kept in [measured]), so a slow box that looks fine on paper still
+ * gets Light. Playback: [fit] judges each copy against the hardware
  * decoders and the screen, so the picker (and "play the top copy") leads with one this box plays.
  */
 object DeviceClass {
@@ -73,7 +77,18 @@ object DeviceClass {
     var detected by mutableStateOf(Tier.FULL)
         private set
 
-    val tier: Tier get() = if (mode == AUTO) detected else runCatching { Tier.valueOf(mode) }.getOrDefault(detected)
+    /** A step down found by timing this box's frames ([FrameWatch]); never above [detected]. */
+    var measured by mutableStateOf<Tier?>(null)
+        private set
+
+    /** Why [measured] was set, for Settings → This TV. */
+    var measuredWhy: String? = null
+        private set
+
+    /** What [AUTO] runs as: the hardware's class, or lower when the frames said so. */
+    val auto: Tier get() = measured?.takeIf { it.ordinal > detected.ordinal } ?: detected
+
+    val tier: Tier get() = if (mode == AUTO) auto else runCatching { Tier.valueOf(mode) }.getOrDefault(auto)
 
     val light: Boolean get() = tier == Tier.LIGHT
 
@@ -144,6 +159,15 @@ object DeviceClass {
     val settleFrames: Int
         get() = if (tier == Tier.LIGHT) 8 else 4
 
+    /** Light's simpler motion and effects (see the class comment); Full and Balanced unchanged. */
+    val simpleMotion: Boolean get() = light
+
+    /** A held Up/Down's pace, ms per row ([com.wholphinplus.sources.cinema.HoldRepeat]): Light waits for the box. */
+    val holdStepMs: Long get() = if (light) 170L else 105L
+
+    /** Frames drawn after a move before a held key's next repeat is taken ([com.wholphinplus.sources.cinema.HeldKeys]). */
+    val heldFrames: Int get() = if (light) 3 else 2
+
     /** Poster badge lookups at once ([com.wholphinplus.sources.cinema.PosterOverlays]). */
     val lookupsAtOnce: Int
         get() =
@@ -166,6 +190,15 @@ object DeviceClass {
         val app = context.applicationContext
         facts = cheapFacts(app)
         detected = tierOf(facts)
+        val saved = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        measured = saved.getString(MEASURED_KEY, null)?.let { runCatching { Tier.valueOf(it) }.getOrNull() }
+        measuredWhy = saved.getString(MEASURED_WHY_KEY, null)
+        FrameWatch.start(facts) { tierNow, why ->
+            measured = tierNow
+            measuredWhy = why
+            saved.edit().putString(MEASURED_KEY, tierNow.name).putString(MEASURED_WHY_KEY, why).apply()
+            Timber.i("Orca device: %s, runs as %s from now", why, tier.label)
+        }
         Thread {
             try {
                 facts = facts.copy(decoders = decoders(), screenHeight = screenHeight(app), screenHdr = screenHdr(app))
@@ -176,6 +209,18 @@ object DeviceClass {
             com.wholphinplus.sources.core.copyFit = CopyFit { fitOf(facts, it) }
         }.apply { name = "orca-device"; priority = Thread.MIN_PRIORITY }.start()
     }
+
+    /** Forget a measured step down (picking Auto again in Settings): the hardware's class, measured afresh. */
+    fun forgetMeasured(context: Context) {
+        measured = null
+        measuredWhy = null
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(MEASURED_KEY).remove(MEASURED_WHY_KEY).apply()
+        FrameWatch.restart()
+    }
+
+    private const val PREFS = "orca_device_class"
+    private const val MEASURED_KEY = "measured_tier"
+    private const val MEASURED_WHY_KEY = "measured_why"
 
     /**
      * A crash's stack in the log before the crash reporter takes it: the reporter keeps it to
@@ -222,6 +267,45 @@ object DeviceClass {
             f.ramMb >= 3_500 && f.bigCore == null && f.maxGhz >= 2.0f -> Tier.FULL
             else -> Tier.BALANCED
         }
+
+    /** Why [tierOf] picked its class, in plain words for the first-run tour and Settings (pure). */
+    fun reasonOf(f: Facts): String {
+        val gb = "%.1f GB of memory".format(Locale.US, f.ramMb / 1024f)
+        val cpu = if (f.maxGhz >= 0.3f) "%d cores at %.1f GHz".format(Locale.US, f.cores, f.maxGhz) else "${f.cores} cores"
+        return when {
+            f.emulator -> "An emulator: treated like a Shield"
+            f.maker.equals("NVIDIA", ignoreCase = true) -> "An NVIDIA Shield, the box Orca+ is tuned on"
+            f.lowRam || (f.ramMb in 1 until 1_800) -> "$gb, so pages are kept small"
+            f.bigCore == false && f.maxGhz in 0.1f..1.75f -> "A small processor ($cpu)"
+            f.ramMb >= 2_700 && f.bigCore == true -> "A fast processor and $gb"
+            f.ramMb >= 3_500 && f.bigCore == null && f.maxGhz >= 2.0f -> "$gb and $cpu"
+            else -> "A mid-range box ($gb, $cpu)"
+        }
+    }
+
+    /** The box's name as people know it: Fire TV model codes in words, else maker and model (pure). */
+    fun nameOf(f: Facts): String =
+        AMAZON[f.model.uppercase(Locale.US)]
+            ?: (if (f.emulator) "Android TV emulator" else null)
+            ?: listOf(f.maker.takeUnless { it.equals("unknown", ignoreCase = true) }.orEmpty().replaceFirstChar { it.titlecase(Locale.US) }, f.model)
+                .filter { it.isNotBlank() }.distinct().joinToString(" ").ifBlank { "This TV" }
+
+    // Amazon's device spec pages (2026-10-11): the codes Fire TVs report as their model
+    private val AMAZON =
+        mapOf(
+            "AFTSS" to "Fire TV Stick Lite / HD",
+            "AFTSSS" to "Fire TV Stick (3rd gen)",
+            "AFTT" to "Fire TV Stick (2nd gen)",
+            "AFTMM" to "Fire TV Stick 4K",
+            "AFTKM" to "Fire TV Stick 4K (2nd gen)",
+            "AFTMA08C15" to "Fire TV Stick 4K Plus",
+            "AFTKA" to "Fire TV Stick 4K Max",
+            "AFTKRT" to "Fire TV Stick 4K Max (2nd gen)",
+            "AFTA" to "Fire TV Cube (1st gen)",
+            "AFTR" to "Fire TV Cube (2nd gen)",
+            "AFTGAZL" to "Fire TV Cube (3rd gen)",
+            "AFTN" to "Fire TV (3rd gen)",
+        )
 
     /**
      * How well this box plays [s] (pure). A copy plays when a hardware decoder takes its codec at

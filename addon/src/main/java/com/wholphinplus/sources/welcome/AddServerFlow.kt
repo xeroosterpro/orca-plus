@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.welcome
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -238,13 +239,13 @@ internal fun PhoneServerStep(
                         Triple(f("server").trim(), f("username").trim(), f("password"))
                     }.getOrNull()
                 if (details == null || details.first.isBlank() || details.second.isBlank()) {
-                    runCatching { hook.profileSync.setupResult(s, false, "Your TV couldn't read that. Send it again.", false) }
+                    runCatching { hook.profileSync.setupResult(s, false, "Your TV couldn't read that. Send it again.", false) }.cancellable()
                     continue
                 }
                 val (server, username, password) = details
                 status = "Signing in to $server…"
                 problem = null
-                runCatching { hook.profileSync.setupResult(s, true, "Signing in to $server…", false) }
+                runCatching { hook.profileSync.setupResult(s, true, "Signing in to $server…", false) }.cancellable()
                 val result =
                     withContext(Dispatchers.IO) {
                         runCatching {
@@ -259,14 +260,14 @@ internal fun PhoneServerStep(
                     }
                 val connection = result.getOrNull()
                 if (connection != null) {
-                    runCatching { hook.profileSync.setupResult(s, true, "Added ${connection.label} to your TV ✓", true) }
+                    runCatching { hook.profileSync.setupResult(s, true, "Added ${connection.label} to your TV ✓", true) }.cancellable()
                     onConnected(connection)
                     return@LaunchedEffect
                 }
                 val why = result.exceptionOrNull()?.message?.let { if ("401" in it) "Wrong username or password" else it } ?: "Couldn't sign in"
                 problem = why
                 status = "Fix it on your phone and send it again"
-                runCatching { hook.profileSync.setupResult(s, false, why, false) }
+                runCatching { hook.profileSync.setupResult(s, false, why, false) }.cancellable()
             }
         }
     }

@@ -2,6 +2,7 @@
 
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.logged
 import com.wholphinplus.sources.HomeCollections
 import com.wholphinplus.sources.SourceHook
 import kotlinx.coroutines.CancellationException
@@ -14,7 +15,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.UseSerializers
 import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.itemsApi
@@ -39,234 +39,6 @@ import org.jellyfin.sdk.model.serializer.UUIDSerializer
 import timber.log.Timber
 import java.time.LocalDateTime
 import java.util.UUID
-
-/** One title as Cinema mode shows it. Episodes carry their series' art. */
-@androidx.compose.runtime.Immutable
-@Serializable
-data class CinemaItem(
-    val id: UUID,
-    val kind: BaseItemKind,
-    /** What "More Info" opens: the series for an episode, else the item itself. */
-    val detailsId: UUID,
-    val detailsKind: BaseItemKind,
-    val title: String,
-    val subtitle: String?,
-    val meta: List<String>,
-    val rating: String?,
-    val overview: String,
-    val backdropUrl: String?,
-    /** The backdrop at card size: the clean picture a title logo is laid over. */
-    val cleanCardUrl: String? = null,
-    val cardUrl: String?,
-    val cardHasTitleArt: Boolean,
-    val logoUrl: String?,
-    val badge: String?,
-    val resumeMs: Long,
-    val progress: Float?,
-    /** TMDB id of the movie, or of the series for shows and episodes; used for title art. */
-    val tmdbId: Int? = null,
-    val tmdbTv: Boolean = false,
-    /** Portrait poster, for Top 10 rows. */
-    val posterUrl: String? = null,
-    /** Place in a Top 10 list, and how the billboard names it ("#2 in Movies This Week"). */
-    val rank: Int? = null,
-    val rankLabel: String? = null,
-    /** The caption under a card (Poster tags → Title and date): "Apr 24, 2019" or "S2:E18". */
-    val captionDate: String? = null,
-    /** The caption's right side: "2h 23m" or "2 Seasons". */
-    val captionLength: String? = null,
-    /** Poster overlay facts: "4K"/"HD", "DV"/"HDR", "ATMOS"/"5.1", and watched. */
-    val resolution: String? = null,
-    val hdr: String? = null,
-    val audio: String? = null,
-    val played: Boolean = false,
-) {
-    val key: String get() = "$kind:$id"
-}
-
-@androidx.compose.runtime.Immutable
-@Serializable
-data class CinemaRow(
-    val title: String,
-    val items: List<CinemaItem>,
-    /** A Top 10 row: big numbers beside portrait posters. */
-    val ranked: Boolean = false,
-    /** A row of Services or Genres tiles instead of titles. */
-    val tiles: List<PageTile> = emptyList(),
-    /** Where more of its titles come from (null: the row is all there is: Top 10s, Continue Watching). */
-    val source: RowSource? = null,
-    /** The Continue Watching row (it can be renamed): refreshed in place after a play. */
-    val continueWatching: Boolean = false,
-    /** How many titles the whole row has, when known (a list: its titles in the library). */
-    val total: Int? = null,
-    /**
-     * Still on its way: shown as its name and placeholder cards of the real size while the page's
-     * first rows are up, so it fills in where it stands instead of pushing the rows below down.
-     */
-    val loading: Boolean = false,
-    /**
-     * Its request failed this load (after a second try): stands for the row until the copy shown
-     * before takes its place ([withPreviousRows]); never drawn.
-     */
-    val failed: Boolean = false,
-    /** The server whose library this row is (the My Servers tab): [SERVER_MAIN] or an extra server's connection id. */
-    val server: String? = null,
-)
-
-/** [CinemaRow.server] of the main server's rows. */
-internal const val SERVER_MAIN = "main"
-
-/**
- * Where a row's titles come from, so it can keep loading and be shuffled. [seed]: a shuffled
- * order (null: the row's own); [next]: where the next page starts.
- */
-@androidx.compose.runtime.Immutable
-@Serializable
-data class RowSource(
-    val page: RowsPage,
-    val spec: HomeRowSpec,
-    val seed: Long? = null,
-    val next: Int = 0,
-    /** An extra server's library row (My Servers): its connection id; [spec]'s ref is the library. */
-    val server: String? = null,
-) {
-    /** Its "always shuffle" switch, per page. */
-    val lockKey: String get() = page.name + "|" + spec.key
-}
-
-/** One more page of a row; [end] once its source has nothing more. */
-class RowPage(
-    val items: List<CinemaItem>,
-    val next: Int,
-    val end: Boolean,
-)
-
-/** A service's, genre's, decade's or server's tile; it opens that page (with its Movies or Shows side first). */
-@androidx.compose.runtime.Immutable
-@Serializable
-data class PageTile(
-    val id: String,
-    val name: String,
-    /** "service", "genre", "decade" or "server". */
-    val kind: String,
-    val logoUrl: String?,
-    val pictureUrl: String?,
-    /** A server tile's line under its name ("3 libraries", or why it's left out). */
-    val note: String? = null,
-    /** A server tile's software ([com.wholphinplus.sources.core.ServerKind] name), for its logo. */
-    val brand: String? = null,
-) {
-    val service: Boolean get() = kind == "service"
-}
-
-@Serializable
-data class CinemaLibrary(
-    val id: UUID,
-    val name: String,
-    val kind: BaseItemKind,
-    val collectionType: CollectionType?,
-)
-
-@androidx.compose.runtime.Immutable
-@Serializable
-data class CinemaHomeData(
-    val featured: List<CinemaItem>,
-    val rows: List<CinemaRow>,
-    val shows: CinemaLibrary?,
-    val movies: CinemaLibrary?,
-    /**
-     * Rows whose request failed in this load (shown as they were before, or left out): such a
-     * page isn't saved on the device or counted as fresh, so the next visit asks again.
-     */
-    val failed: Int = 0,
-) {
-    /** More rows, or more titles in them, than [other] (null = nothing shown yet). Placeholders don't count. */
-    fun richerThan(other: CinemaHomeData?): Boolean =
-        other == null || rows.count { !it.loading } > other.rows.count { !it.loading } || rows.sumOf { it.items.size + it.tiles.size } > other.rows.sumOf { it.items.size + it.tiles.size }
-}
-
-/**
- * [rows] with each row whose request failed put back as it was on [previous] pages (the one on
- * screen, the last load), so a server blip doesn't take a row away (and move the rows below it)
- * until the next load. A failed row never shown before leaves this load.
- */
-internal fun withPreviousRows(
-    rows: List<CinemaRow>,
-    previous: List<CinemaHomeData>,
-): List<CinemaRow> =
-    rows.mapNotNull { row ->
-        if (!row.failed) {
-            row
-        } else {
-            previous.firstNotNullOfOrNull { p -> p.rows.firstOrNull { it.title == row.title && !it.loading && !it.failed && (it.items.isNotEmpty() || it.tiles.isNotEmpty()) } }
-        }
-    }
-
-/**
- * The fresh [page][this] in place of [shown] (a page saved on the device, or one the background
- * refresh gave more rows): it keeps the shown billboard and the titles of rows that are random
- * each load (genre rows, shuffled rows), so nothing on screen jumps under the remote; Continue
- * Watching, lists and new arrivals take the fresh titles.
- */
-/**
- * This page with [fresh]'s Continue Watching in its place, or null when it's the same (nothing
- * else on the page moves). The row is found by its kind, so a renamed one counts too.
- */
-internal fun CinemaHomeData.withContinueWatching(fresh: CinemaHomeData): CinemaHomeData? {
-    val i = rows.indexOfFirst { it.continueWatching }
-    val row = fresh.rows.firstOrNull { it.continueWatching } ?: return null
-    if (i < 0 || rows[i].loading || rows[i].items == row.items) return null
-    return copy(rows = rows.toMutableList().also { it[i] = row })
-}
-
-internal fun CinemaHomeData.over(shown: CinemaHomeData): CinemaHomeData {
-    val before = shown.rows.associateBy { it.title }
-    // The same billboard titles, in their fresh copies: a show's billboard kept saying S1:E1
-    // while its Continue Watching card below said S2:E14
-    val fresh = HashMap<UUID, CinemaItem>()
-    rows.forEach { row -> row.items.forEach { fresh.putIfAbsent(it.detailsId, it) } }
-    featured.forEach { fresh.putIfAbsent(it.detailsId, it) }
-    return copy(
-        featured = shown.featured.map { fresh[it.detailsId] ?: it }.ifEmpty { featured },
-        rows =
-            rows.map { row ->
-                val old = before[row.title]
-                val random = row.source?.seed != null || row.source?.spec?.type == HomeRowType.GENRE
-                if (old != null && random && old.items.isNotEmpty()) row.copy(items = old.items, source = old.source) else row
-            },
-    )
-}
-
-/**
- * Every card of a Top 10 title gets its place (the first Top 10 row it's in), wherever it shows on
- * the page, so the billboard can say "#2 in Movies This Week". A Top 10 row keeps its own places:
- * the place from another chart used to overwrite them (Hulu's row read 2, 3, 4, 2, 4 with
- * Disney+'s numbers on two of its titles).
- */
-internal fun withRanks(
-    data: CinemaHomeData,
-    label: (CinemaRow) -> String,
-): CinemaHomeData {
-    val ranks = HashMap<UUID, Pair<Int, String>>()
-    data.rows.filter { it.ranked }.forEach { row ->
-        row.items.forEachIndexed { i, item -> ranks.putIfAbsent(item.detailsId, (item.rank ?: (i + 1)) to label(row)) }
-    }
-    if (ranks.isEmpty()) return data
-
-    fun mark(item: CinemaItem) = ranks[item.detailsId]?.let { (n, l) -> item.copy(rank = n, rankLabel = l) } ?: item
-    return data.copy(
-        featured = data.featured.map(::mark),
-        rows =
-            data.rows.map { r ->
-                if (r.ranked) {
-                    val l = label(r)
-                    r.copy(items = r.items.mapIndexed { i, item -> item.copy(rank = item.rank ?: (i + 1), rankLabel = l) })
-                } else {
-                    r.copy(items = r.items.map(::mark))
-                }
-            },
-    )
-}
 
 /** Marks a row's requests: [CinemaRepository.safe] notes here when one gave up, so "failed" isn't taken for "empty". */
 private class RowTrack : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
@@ -1014,7 +786,7 @@ internal class CinemaRepository(
     suspend fun libraries(): List<CinemaLibrary> =
         withContext(Dispatchers.IO) {
             val userId = hook.mainConnection()?.userId?.let { runCatching { UUID.fromString(dash(it)) }.getOrNull() } ?: return@withContext emptyList()
-            runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.getOrDefault(emptyList())
+            runCatching { api.userViewsApi.getUserViews(userId = userId).content.items }.logged("Libraries list").getOrDefault(emptyList())
                 .map { CinemaLibrary(it.id, it.name.orEmpty(), it.type, it.collectionType) }
         }
 
@@ -1142,7 +914,7 @@ internal class CinemaRepository(
     /** Null when the server didn't say who's signed in. */
     private suspend fun continueTitle(userId: UUID): String? {
         val name =
-            userName ?: runCatching { api.userApi.getCurrentUser().content.name }.getOrNull()?.also { userName = it } ?: return null
+            userName ?: runCatching { api.userApi.getCurrentUser().content.name }.logged("User name").getOrNull()?.also { userName = it } ?: return null
         // Account names like "abc123#Name": greet the part people read as the name
         val shown = name.substringAfterLast('#').trim()
         return if (shown.isBlank()) CONTINUE else "$CONTINUE for $shown"
@@ -1219,7 +991,7 @@ internal class CinemaRepository(
         }
         val missing = ids - got.map { it.id }.toSet()
         missing.map { id ->
-            async { runCatching { api.userLibraryApi.getItem(id, userId).content }.getOrNull() }
+            async { runCatching { api.userLibraryApi.getItem(id, userId).content }.logged("Show lookup").getOrNull() }
         }.awaitAll().filterNotNull().forEach { s ->
             tmdbOf(s)?.let { seriesTmdb[s.id] = it }
             s.officialRating?.let { seriesRating[s.id] = it }
@@ -1247,14 +1019,14 @@ internal class CinemaRepository(
         fields: String,
     ): List<BaseItemDto> =
         coroutineScope {
-            ids.chunked(ID_BATCH).map { chunk -> async { runCatching { itemsByIds(chunk, userId, fields) }.getOrDefault(emptyList()) } }.awaitAll().flatten()
+            ids.chunked(ID_BATCH).map { chunk -> async { runCatching { itemsByIds(chunk, userId, fields) }.logged("Titles by id").getOrDefault(emptyList()) } }.awaitAll().flatten()
         }
 
     // ------------------------------------------------------------ details page
 
     /** An episode's show, for opening its page from a card made before the show was known. */
     suspend fun seriesOf(episodeId: UUID): UUID? =
-        withContext(Dispatchers.IO) { runCatching { api.userLibraryApi.getItem(episodeId, userId()).content.seriesId }.getOrNull() }
+        withContext(Dispatchers.IO) { runCatching { api.userLibraryApi.getItem(episodeId, userId()).content.seriesId }.logged("Episode's show").getOrNull() }
 
     // ------------------------------------------------------------ Continue Watching menu
 
@@ -1344,7 +1116,7 @@ internal class CinemaRepository(
             val tmdbId =
                 tmdbOnly
                     ?: server?.providerIds?.entries?.firstOrNull { it.key.equals("Tmdb", true) }?.value?.toIntOrNull()
-                    ?: name.takeIf { it.isNotBlank() && t != null }?.let { n -> runCatching { t!!.findPerson(n) }.getOrNull() }
+                    ?: name.takeIf { it.isNotBlank() && t != null }?.let { n -> runCatching { t!!.findPerson(n) }.logged("TMDB person search").getOrNull() }
             coroutineScope {
                 val about = async { tmdbId?.let { id -> t?.let { runCatching { it.person(id) }.onFailure { e -> if (e is CancellationException) throw e; Timber.w(e, "TMDB person %d failed", id) }.getOrNull() } } }
                 val titles = async { personTitles(server?.id, tmdbId, userId) }
@@ -1538,6 +1310,63 @@ internal class CinemaRepository(
             }
         }
 
+    // ---- Search's Collections (owner, 2026-10-11: "search results will show MDBList/collections")
+
+    /** Titles in the library for [refs] (TMDB id, a show?), in their order, as cards ([limit] at most). */
+    suspend fun titlesFor(
+        refs: List<Pair<Int, Boolean>>,
+        limit: Int = 300,
+        from: Int = 0,
+    ): List<CinemaItem> =
+        withContext(Dispatchers.IO) {
+            val idx = collections.savedIndexFor(hook) ?: return@withContext emptyList()
+            val ids = refs.mapNotNull { (id, tv) -> (if (tv) idx.series else idx.movies).takeIf { it.size > 0 }?.find(id, null) }.distinct().drop(from).take(limit)
+            safe { cards(ids, userId()) }.map(::toItem).filter { it.backdropUrl != null || it.cardUrl != null }.distinctBy { it.key }
+        }
+
+    /** Main-server titles by id, in [ids]' order, as cards ([limit] at most from [from]). */
+    suspend fun titlesById(
+        ids: List<String>,
+        limit: Int = 300,
+        from: Int = 0,
+    ): List<CinemaItem> =
+        withContext(Dispatchers.IO) {
+            safe { cards(ids.drop(from).take(limit), userId()) }.map(::toItem).filter { it.backdropUrl != null || it.cardUrl != null }.distinctBy { it.key }
+        }
+
+    /** How many of [refs] the library has, from the index alone (null: no index yet). */
+    suspend fun countFor(refs: List<Pair<Int, Boolean>>): Int? =
+        withContext(Dispatchers.IO) {
+            val idx = collections.savedIndexFor(hook) ?: return@withContext null
+            refs.mapNotNull { (id, tv) -> (if (tv) idx.series else idx.movies).takeIf { it.size > 0 }?.find(id, null) }.distinct().size
+        }
+
+    /** The server's own collections (box sets), kept for the session. */
+    suspend fun serverCollections(): List<CinemaItem> =
+        boxSets ?: withContext(Dispatchers.IO) {
+            safe {
+                api.itemsApi.getItems(
+                    GetItemsRequest(userId = userId(), includeItemTypes = listOf(BaseItemKind.BOX_SET), recursive = true, limit = 500, fields = fields, enableImageTypes = images, imageTypeLimit = 1),
+                ).content.items
+            }.map(::toItem).also { if (it.isNotEmpty()) boxSets = it }
+        }
+
+    @Volatile private var boxSets: List<CinemaItem>? = null
+
+    /** One of the server's collections' titles, newest first ([limit] at most). */
+    suspend fun serverCollectionTitles(
+        id: UUID,
+        limit: Int = 300,
+        from: Int = 0,
+    ): List<CinemaItem> =
+        withContext(Dispatchers.IO) {
+            safe {
+                api.itemsApi.getItems(
+                    GetItemsRequest(userId = userId(), parentId = id, startIndex = from, limit = limit, sortBy = listOf(ItemSortBy.PREMIERE_DATE), sortOrder = listOf(org.jellyfin.sdk.model.api.SortOrder.DESCENDING), fields = fields, enableImageTypes = images, imageTypeLimit = 1),
+                ).content.items
+            }.map(::toItem).filter { it.backdropUrl != null || it.cardUrl != null }.distinctBy { it.key }
+        }
+
     /**
      * Because You Watched: More Like This for the first title in [watched] (Continue Watching,
      * Orca+'s own progress included) that TMDB knows, without what's already in [watched]. Only
@@ -1557,7 +1386,12 @@ internal class CinemaRepository(
         val source =
             watched.firstOrNull { d -> (if (d.type == BaseItemKind.EPISODE) d.seriesId?.let { seriesTmdb[it] } else tmdbOf(d)) != null }
                 ?.let(::toItem) ?: return "" to emptyList()
-        val found = recommendedInLibrary(source, tmdb, userId).filter { it.detailsId !in seen && (page.series == null || (it.kind == BaseItemKind.SERIES) == page.series) }
+        // Home and Shows both have this row and ask about the same title: the second one reuses it
+        val all =
+            BecauseCache.map[source.key]?.takeIf { System.currentTimeMillis() - it.first < BecauseCache.KEEP_MS }?.second
+                ?: recommendedInLibrary(source, tmdb, userId).also { if (it.isNotEmpty()) BecauseCache.map[source.key] = System.currentTimeMillis() to it }
+        // Kids: kids' ratings only, like its Continue Watching (TMDB's picks for a TV-PG show ran to TV-14)
+        val found = all.filter { it.detailsId !in seen && (page.series == null || (it.kind == BaseItemKind.SERIES) == page.series) && (page != RowsPage.KIDS || it.rating in KID_RATINGS) }
         // An episode's card is titled with its show
         return if (found.size >= 3) "Because You Watched ${source.title}" to found.take(24) else "" to emptyList()
     }
@@ -1652,7 +1486,7 @@ internal class CinemaRepository(
                     if (tmdbId == null || seasonNumber == null || tmdb == null || !tmdb.available) {
                         emptyMap()
                     } else {
-                        runCatching { tmdb.episodes(tmdbId, seasonNumber).mapNotNull { e -> e.stillPath?.let { e.number to "https://image.tmdb.org/t/p/w500$it" } }.toMap() }.getOrDefault(emptyMap())
+                        runCatching { tmdb.episodes(tmdbId, seasonNumber).mapNotNull { e -> e.stillPath?.let { e.number to "https://image.tmdb.org/t/p/w500$it" } }.toMap() }.logged("TMDB episode pictures").getOrDefault(emptyMap())
                     }
                 }
             val tmdbStills = stills.await()
@@ -1691,7 +1525,7 @@ internal class CinemaRepository(
         withContext(Dispatchers.IO) {
             // An extra server's title (My Servers): the main server doesn't know its id
             if (ServerTitles.of(id) != null) return@withContext null
-            runCatching { streamTags(api.userLibraryApi.getItem(id, userId()).content.mediaStreams) }.getOrNull()
+            runCatching { streamTags(api.userLibraryApi.getItem(id, userId()).content.mediaStreams) }.logged("Title streams").getOrNull()
         }
 
     /**
@@ -1899,6 +1733,11 @@ internal class CinemaRepository(
             hdr = tags2.hdr,
             audio = tags2.audio,
             played = d.userData?.played == true,
+            added = d.dateCreated?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli(),
+            releasedDay = d.premiereDate?.toLocalDate()?.toEpochDay(),
+            year = d.productionYear,
+            genres = d.genres.orEmpty(),
+            score = d.communityRating?.takeIf { it > 0 },
         )
     }
 
@@ -1923,10 +1762,10 @@ internal class CinemaRepository(
         private const val ID_BATCH = 5
 
         /** TMDB titles looked up in the library for More Like This (empty = not there). */
-        private val libraryMatches = java.util.concurrent.ConcurrentHashMap<String, LibraryMatch>()
+        private val libraryMatches = com.wholphinplus.sources.core.lruMap<String, LibraryMatch>(3_000)
 
         /** Each title page's cast with TMDB's photos, for the session. */
-        private val castCache = java.util.concurrent.ConcurrentHashMap<UUID, List<CastMember>>()
+        private val castCache = com.wholphinplus.sources.core.lruMap<UUID, List<CastMember>>(60)
         private const val CAST_MAX = 20
 
         /** Cast photos are drawn ~130 px: TMDB's w185 and the server's resize to it. */
@@ -1971,7 +1810,8 @@ internal class CinemaRepository(
         private val LIBRARY_FREE = listOf(HomeRowType.RECENT_MOVIES, HomeRowType.NEW_EPISODES, HomeRowType.NEW_RELEASE_MOVIES, HomeRowType.MY_LIST, HomeRowType.NEW_RELEASE_SHOWS, HomeRowType.NEW_ARRIVALS, HomeRowType.JUST_AIRED)
 
         /** US ratings the Kids tab's Continue Watching keeps. */
-        private val KID_RATINGS = setOf("G", "PG", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "TV-PG")
+        // Owner (2026-10-12): G and TV-Y/Y7/G only; PG and TV-PG let in adult dramas (Doc Martin, Casualty)
+        private val KID_RATINGS = setOf("G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G")
 
         /** A tile page shows once this many of its rows are in. */
         private const val PAGE_FIRST_ROWS = 3
@@ -2047,100 +1887,8 @@ private class LibraryMatch(
     val item: CinemaItem?,
 )
 
-@androidx.compose.runtime.Immutable
-data class CinemaSeason(
-    val id: UUID,
-    val name: String,
-    val number: Int,
-)
-
-@androidx.compose.runtime.Immutable
-data class CinemaEpisode(
-    val id: UUID,
-    val number: Int,
-    val title: String,
-    val overview: String,
-    val runtime: String?,
-    val stillUrl: String?,
-    /** TMDB's still, tried when the server's picture fails. */
-    val tmdbStill: String? = null,
-    val progress: Float?,
-    val played: Boolean,
-    val resumeMs: Long,
-)
-
-/** What the big Play button plays: the movie, or the episode you're up to. */
-@androidx.compose.runtime.Immutable
-data class PlayTarget(
-    val id: UUID,
-    val positionMs: Long,
-    val label: String,
-    val progress: Float?,
-    val remaining: String?,
-    /** True until the real target is known (a show's next episode); Play waits for it. */
-    val pending: Boolean = false,
-)
-
-@androidx.compose.runtime.Immutable
-data class CinemaDetailsData(
-    val item: CinemaItem,
-    val genres: List<String>,
-    val cast: List<String>,
-    val makers: List<String>,
-    val makersLabel: String,
-    val quality: String?,
-    val favorite: Boolean,
-    val series: Boolean,
-    val seasons: List<CinemaSeason>,
-    val play: PlayTarget?,
-    val similar: List<CinemaItem>,
-    val startSeason: Int?,
-    /** The cast row: the server's people (photos completed from TMDB once the row shows). */
-    val people: List<CastMember> = emptyList(),
-    // For Description tags: "2026", "2h 14m" or "3 Seasons", minutes left to watch (movies)
-    val year: String? = null,
-    val length: String? = null,
-    val minutesLeft: Int? = null,
-)
-
-/**
- * One of a title's cast. [serverId]: the server's person (null: known only to TMDB); [photo] the
- * server's picture, [tmdbPhoto] TMDB's (tried when the server has none, or its picture fails).
- */
-@androidx.compose.runtime.Immutable
-data class CastMember(
-    val serverId: UUID?,
-    val tmdbId: Int?,
-    val name: String,
-    val role: String?,
-    val photo: String?,
-    val tmdbPhoto: String?,
-) {
-    val key: String get() = serverId?.toString() ?: "tmdb:$tmdbId:$name"
-
-    /** The id their page opens with: the server's, or one standing for the TMDB person. */
-    val pageId: UUID? get() = serverId ?: tmdbId?.let(::tmdbOnly)
-
-    companion object {
-        /** High bits of an id that stands for a TMDB person the server doesn't know ("tmdb"). */
-        private const val TMDB_MARK = 0x746d6462_00000000L
-
-        fun tmdbOnly(tmdbId: Int): UUID = UUID(TMDB_MARK, tmdbId.toLong())
-
-        fun tmdbIdOf(id: UUID): Int? = if (id.mostSignificantBits == TMDB_MARK) id.leastSignificantBits.toInt() else null
-    }
+/** Because You Watched's library matches by title, for a while ([CinemaRepository.because] per page). */
+internal object BecauseCache {
+    const val KEEP_MS = 10 * 60_000L
+    val map = java.util.concurrent.ConcurrentHashMap<Any, Pair<Long, List<CinemaItem>>>()
 }
-
-/** An actor's page ([CinemaRepository.person]). Dates as TMDB writes them ("1974-01-30"). */
-@androidx.compose.runtime.Immutable
-data class PersonPageData(
-    val name: String,
-    val photo: String?,
-    val tmdbPhoto: String?,
-    val department: String?,
-    val born: String?,
-    val birthPlace: String?,
-    val died: String?,
-    val biography: String,
-    val titles: List<CinemaItem>,
-)

@@ -318,7 +318,7 @@ internal fun CloudPageView(
             val d = loaded["$id:$s"]
             Box(Modifier.fillMaxSize()) {
                 when {
-                    d == null && errors != null -> LoadError(errors.orEmpty(), onRetry = { attempt++ }, onClassic = null, modifier = Modifier.align(Alignment.Center))
+                    d == null && errors != null -> LoadError(errors.orEmpty(), onRetry = { attempt++ }, modifier = Modifier.align(Alignment.Center))
                     d == null -> Unit
                     d.rows.isEmpty() ->
                         Text(
@@ -327,7 +327,10 @@ internal fun CloudPageView(
                             fontSize = 16.sp,
                             modifier = Modifier.align(Alignment.Center),
                         )
-                    else -> CinemaScreen(d, "page:$id:$s", onOpen, onPlay, grabFocus = grab && !covered, rollUp = rollUp, lastInput = lastInput, onGrabbed = { grab = false })
+                    else ->
+                        CompositionLocalProvider(LocalPageService provides page.logo?.substringAfterLast('/')) {
+                            CinemaScreen(d, "page:$id:$s", onOpen, onPlay, grabFocus = grab && !covered, rollUp = rollUp, lastInput = lastInput, onGrabbed = { grab = false })
+                        }
                 }
             }
         }

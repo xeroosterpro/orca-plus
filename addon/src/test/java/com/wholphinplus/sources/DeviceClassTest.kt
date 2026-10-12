@@ -37,6 +37,15 @@ class DeviceClassTest {
         assertEquals(Tier.LIGHT, DeviceClass.tierOf(Facts(ramMb = 4_000, lowRam = true)))
     }
 
+    @Test fun `the reason and the name read like the box`() {
+        assertEquals("1.4 GB of memory, so pages are kept small", DeviceClass.reasonOf(fireStick4k))
+        assertEquals("An NVIDIA Shield, the box Orca+ is tuned on", DeviceClass.reasonOf(shield))
+        assertEquals("A mid-range box (1.9 GB of memory, 4 cores at 2.0 GHz)", DeviceClass.reasonOf(stick4kMax2))
+        assertEquals("Fire TV Stick 4K", DeviceClass.nameOf(fireStick4k))
+        assertEquals("Fire TV Stick Lite / HD", DeviceClass.nameOf(fireStickLite))
+        assertEquals("Xiaomi Box", DeviceClass.nameOf(bigBox))
+    }
+
     @Test fun `mid-range sticks are balanced`() {
         assertEquals(Tier.BALANCED, DeviceClass.tierOf(stick4kMax2))
         assertEquals(Tier.BALANCED, DeviceClass.tierOf(chromecast))

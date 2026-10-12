@@ -2,8 +2,6 @@ package com.wholphinplus.sources.cinema
 
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.MapSerializer
-import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.encodeToStream
@@ -19,6 +17,8 @@ import java.io.File
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 internal object CacheFiles {
     private val json = Json { ignoreUnknownKeys = true }
+
+    @Volatile private var oldPrefsDropped = false
 
     /** A cache as saved: its entries, and when each was last shown (for dropping the oldest). */
     @Serializable
@@ -52,14 +52,28 @@ internal object CacheFiles {
         }.onFailure { Timber.w(it, "Cache %s not saved", file.name) }
     }
 
-    /** An older copy kept in SharedPreferences as one JSON map, read once to carry it over. */
-    fun <V> legacy(
-        text: String?,
-        serializer: KSerializer<V>,
-    ): Map<String, V> =
-        runCatching {
-            text?.let { json.decodeFromString(MapSerializer(String.serializer(), serializer), it) }
-        }.getOrNull().orEmpty()
+    /**
+     * Where the cache [name] lives: the no-backup folder, so what can be fetched again (megabytes
+     * on a big library) isn't copied into the device's backups. A copy from the backed-up folder
+     * it used to live in (and its `name.*` companions) is moved over once.
+     */
+    fun at(
+        context: android.content.Context,
+        name: String,
+    ): File {
+        val app = context.applicationContext
+        if (!oldPrefsDropped) {
+            oldPrefsDropped = true
+            // Emptied when these caches moved to files (2026-10-08); only the files were left
+            for (p in listOf("wholphinplus_art", "wholphinplus_ratings", "wholphinplus_streams")) app.deleteSharedPreferences(p)
+        }
+        val target = File(app.noBackupFilesDir, name)
+        app.filesDir.listFiles { f -> f.name == name || f.name.startsWith("$name.") }?.forEach { old ->
+            val moved = File(app.noBackupFilesDir, old.name)
+            if (moved.exists() || !old.renameTo(moved)) old.delete()
+        }
+        return target
+    }
 }
 
 /**

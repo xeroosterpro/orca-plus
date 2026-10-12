@@ -1,5 +1,6 @@
 package com.wholphinplus.sources.cinema
 
+import com.wholphinplus.sources.core.cancellable
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -197,7 +198,7 @@ internal fun MessageCenter(
                             if (checking) return@HeroButton
                             checking = true
                             scope.launch {
-                                runCatching { check() }.onFailure {
+                                runCatching { check() }.cancellable().onFailure {
                                     Inbox.post(Inbox.Kind.UPDATE, "Couldn't check for updates", "GitHub didn't answer. Try again in a little while.", Inbox.Level.WARN, key = "update:check", popUp = false, unread = false)
                                 }
                                 checking = false

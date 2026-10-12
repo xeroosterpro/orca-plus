@@ -1994,7 +1994,7 @@ index 000000000..18ac7a959
 +    }
 +}
 diff --git a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
-index d95d5abac..5c0a8dba6 100644
+index d95d5abac..d5ff55802 100644
 --- a/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 +++ b/app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesContent.kt
 @@ -96,10 +96,21 @@ fun PreferencesContent(
@@ -2134,6 +2134,15 @@ index d95d5abac..5c0a8dba6 100644
                          item {
                              val interactionSource = remember { MutableInteractionSource() }
                              val focused = interactionSource.collectIsFocusedAsState().value
+@@ -316,7 +340,7 @@ fun PreferencesContent(
+                                         onLongClick = {
+                                             viewModel.navigationManager.navigateTo(Destination.Debug)
+                                         },
+-                                        summary = installedVersion.toString(),
++                                        summary = com.wholphinplus.sources.OrcaVersion.full(installedVersion.toString()), // Orca+: "Orca+ 47 · built on Wholphin 1.0.9"
+                                         interactionSource = interactionSource,
+                                         modifier = focusModifier,
+                                     )
 @@ -641,6 +665,18 @@ fun PreferencesContent(
                                      }
                                  }

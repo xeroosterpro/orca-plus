@@ -121,7 +121,9 @@ jobs:
             NOTICE LICENSE LICENSES README.md UPSTREAM REV_OFFSET \
             -x 'upstream/.git/*' '*/build/*' '*/.gradle/*' '*/.kotlin/*' 'upstream/local.properties' 'addon/build/*'
           {
-            echo "Orca+ built on Wholphin $WHOLPHIN."
+            # People read "Orca+ 47"; the title keeps the updater's form (1.0.9-47-g…)
+            N=$(printf '%s' "$V" | sed -n 's/^v\{0,1\}[0-9.]*-\([0-9]*\)-g.*/\1/p')
+            echo "**Orca+ ${N:-$V}**, built on Wholphin $WHOLPHIN."
             echo
             # A push publishes its own news: the commit's message
             if [ "$GITHUB_EVENT_NAME" = push ]; then

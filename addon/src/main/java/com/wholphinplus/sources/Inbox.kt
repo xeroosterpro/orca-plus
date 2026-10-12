@@ -255,18 +255,18 @@ object Inbox {
         if (_messages.value.any { it.key == key }) return
         // An older offer is out of date
         _messages.update { list -> list.filter { it.key?.startsWith("update:") != true } }
-        post(Kind.UPDATE, "Update available: Orca+ $latest", "You have $installed. It downloads from GitHub and installs in a minute.", Level.GOOD, key, Action.Update())
+        post(Kind.UPDATE, "${OrcaVersion.release(latest)} is ready", "You have ${OrcaVersion.name(installed)}. It downloads from GitHub and installs in a minute.", Level.GOOD, key, Action.Update())
     }
 
     /** This start is the first after an update: an offer for it (or older) is done with. */
     fun updated(version: String) {
         _messages.update { list -> list.filter { it.key?.startsWith("update:") != true } }
-        post(Kind.UPDATE, "Updated to Orca+ $version", "You're on the newest version.", Level.GOOD, key = "updated", popUp = false)
+        post(Kind.UPDATE, "Updated to ${OrcaVersion.name(version)}", "You're on the newest version.", Level.GOOD, key = "updated", popUp = false)
     }
 
     /** A check found nothing newer (asked from the Message Center). */
     fun upToDate(installed: String) {
-        post(Kind.UPDATE, "Orca+ is up to date", "You have the newest version, $installed.", Level.GOOD, key = "update:check", popUp = false, unread = false)
+        post(Kind.UPDATE, "Orca+ is up to date", "You have the newest version, ${OrcaVersion.name(installed)}.", Level.GOOD, key = "update:check", popUp = false, unread = false)
     }
 
     /** Where a play stopped. [episode]: "S4:E6 · Name" for an episode. */

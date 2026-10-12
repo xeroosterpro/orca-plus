@@ -32,12 +32,12 @@ class InboxTest {
     }
 
     @Test fun `an update is offered once per version and replaces an older offer`() {
-        Inbox.update("1.0.8-r41", "1.0.8-r42")
-        Inbox.update("1.0.8-r41", "1.0.8-r42")
-        Inbox.update("1.0.8-r41", "1.0.8-r43")
+        Inbox.update("1.0.8-41-gaaaaaaa", "v1.0.8-42-gbbbbbbb")
+        Inbox.update("1.0.8-41-gaaaaaaa", "v1.0.8-42-gbbbbbbb")
+        Inbox.update("1.0.8-41-gaaaaaaa", "v1.0.8-43-gccccccc")
         val all = Inbox.messages.value
         assertEquals(1, all.size)
-        assertTrue(all[0].title.endsWith("r43"))
+        assertEquals("Orca+ 43 is ready", all[0].title)
         assertTrue(all[0].action is Inbox.Action.Update)
     }
 

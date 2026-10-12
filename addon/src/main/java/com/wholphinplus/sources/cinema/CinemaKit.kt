@@ -900,7 +900,10 @@ private fun BackdropPicture(
     // A Light box (DeviceClass) skips both moves: each redraws the whole screen for seconds
     val still = com.wholphinplus.sources.DeviceClass.light
     val zoom = remember { Animatable(1f) }
-    LaunchedEffect(drift) { if (drift && !still) zoom.animateTo(1.06f, tween(12_000, easing = LinearOutSlowInEasing)) }
+    // Only while someone is using the remote (owner, 2026-10-12): idle on Home each new billboard
+    // picture's zoom redrew the whole screen ~3,500 times a minute for the first 2 minutes. After
+    // 30 s with no key, pictures still change (fade and settle) but hold still
+    LaunchedEffect(drift) { if (drift && !still && Conductor.activeWithin(ZOOM_IDLE_MS)) zoom.animateTo(1.06f, tween(12_000, easing = LinearOutSlowInEasing)) }
     // Each new picture eases back from a touch closer as it fades in: it arrives, not just appears
     // (Not one shown at once: it matches the picture the screen came from)
     val arrive = remember { Animatable(if (settle && !still) 1.035f else 1f) }
@@ -962,6 +965,9 @@ internal fun Wordmark(
         LaunchedEffect(Unit) {
             while (true) {
                 kotlinx.coroutines.delay(SHINE_EVERY_MS)
+                // Not for an empty room: idle on Home it swept every 6.5 s for ever (~650 frames and
+                // 1.2 s of CPU a minute). Rests a minute after the last key; the next one wakes it
+                if (!Conductor.activeWithin(SHINE_IDLE_MS)) continue
                 snapshotFlow { CardFill.anyBusy }.first { !it }
                 sweep.snapTo(0f)
                 sweep.animateTo(1f, tween(SHINE_MS, easing = CinemaFade))
@@ -1004,6 +1010,12 @@ internal fun Wordmark(
 
 /** How often the top bar's logo shines, and how long a sweep takes. */
 private const val SHINE_EVERY_MS = 6_500L
+
+/** The logo's shine rests this long after the last key press. */
+private const val SHINE_IDLE_MS = 60_000L
+
+/** A backdrop's slow zoom only starts within this long of a key press. */
+private const val ZOOM_IDLE_MS = 30_000L
 private const val SHINE_MS = 1_400
 private val SHINE = Color(0xFFB9A3FF)
 

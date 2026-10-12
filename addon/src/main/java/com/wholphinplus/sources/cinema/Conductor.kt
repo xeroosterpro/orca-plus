@@ -26,6 +26,12 @@ internal object Conductor {
     /** A remote key was pressed (called by the Cinema screens' key handlers). */
     fun touch() = lastInput.set(SystemClock.uptimeMillis())
 
+    // Lazy: the JVM unit tests load this object, and they have no Android clock
+    private val startedAt by lazy { SystemClock.uptimeMillis() }
+
+    /** The remote was used (or the app opened) within [ms]: decoration that runs on its own stops after. */
+    fun activeWithin(ms: Long): Boolean = SystemClock.uptimeMillis() - maxOf(lastInput.get(), startedAt) < ms
+
     /** The remote has rested at least [quietMs]. */
     fun quietFor(quietMs: Long = QUIET_MS): Boolean = SystemClock.uptimeMillis() - lastInput.get() >= quietMs
 

@@ -170,7 +170,7 @@ class HomeCollections
         init {
             Thread({
                 try {
-                    listsFlow.value = load()
+                    listsFlow.value = shareIds(load(), emptyList())
                     traktFlow.value = prefs.getString(TRAKT_KEY, "").orEmpty()
                     topStreamingFlow.value = prefs.getString(TOP_STREAMING_KEY, "").orEmpty()
                     cloudPagesFlow.value =
@@ -366,8 +366,25 @@ class HomeCollections
 
         private val writePending = java.util.concurrent.atomic.AtomicBoolean(false)
 
+        /**
+         * One String per title id across all lists: the same title sits on many lists (on a bench
+         * library 104,975 ids were 18,011 titles), and each copy cost ~80 bytes: ~8 MB of a Fire
+         * Stick's heap held the same ids over and over. Only lists whose ids changed are looked at.
+         */
+        private val idPool = HashMap<String, String>()
+
+        private fun shareIds(
+            list: List<HomeCollection>,
+            before: List<HomeCollection>,
+        ): List<HomeCollection> {
+            val old = before.associateBy { it.id }
+            return synchronized(idPool) {
+                list.map { c -> if (c.itemIds.isEmpty() || old[c.id]?.itemIds === c.itemIds) c else c.copy(itemIds = c.itemIds.map { idPool.getOrPut(it) { it } }) }
+            }
+        }
+
         private fun save(list: List<HomeCollection>) {
-            _lists.value = list
+            _lists.value = shareIds(list, _lists.value)
             // Off the caller's thread, and changes close together written once (a refresh updates
             // ~150 lists one after another; the file is several MB). The newest always wins
             // While a refresh runs (~150 lists, one after another) at most every 30 s, not every 2:

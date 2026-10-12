@@ -6,6 +6,7 @@ import com.wholphinplus.sources.core.logged
 import com.wholphinplus.sources.HomeCollections
 import com.wholphinplus.sources.SourceHook
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -258,14 +259,17 @@ internal class CinemaRepository(
                 // Without the library list the page can't be built as arranged (library rows and
                 // Home's defaults depend on it): no answer fails the load, which is tried again,
                 // instead of a page missing rows replacing the one on screen
-                val views = async { retried { api.userViewsApi.getUserViews(userId = userId).content.items } }
+                // Shared by tabs loading together ([TabAnswers]); a play or a Continue Watching edit
+                // here starts fresh answers
+                val plays = hook.overlay.changes.value
+                val views = async { retried { TabAnswers.get("views:$userId") { api.userViewsApi.getUserViews(userId = userId).content.items } } }
                 val resume =
                     async {
-                        if (!page.hasContinueWatching) emptyList() else tracked(failed, HomeRowType.CONTINUE_WATCHING) { safe { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items } }
+                        if (!page.hasContinueWatching) emptyList() else tracked(failed, HomeRowType.CONTINUE_WATCHING) { safe { TabAnswers.get("resume:$userId:$plays") { api.itemsApi.getResumeItems(GetResumeItemsRequest(userId = userId, limit = 24, fields = fields, mediaTypes = listOf(MediaType.VIDEO), enableImageTypes = images, imageTypeLimit = 1)).content.items } } }
                     }
                 val nextUp =
                     async {
-                        if (!page.hasContinueWatching || page.series == false) emptyList() else tracked(failed, HomeRowType.CONTINUE_WATCHING) { safe { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } }
+                        if (!page.hasContinueWatching || page.series == false) emptyList() else tracked(failed, HomeRowType.CONTINUE_WATCHING) { safe { TabAnswers.get("nextup:$userId:$plays") { api.tvShowsApi.getNextUp(GetNextUpRequest(userId = userId, limit = 24, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } } }
                     }
                 // Continue Watching's name as shown before: the greeting's request can fail or be
                 // late, and a row that changes its name is a different row (it can't keep its copy)
@@ -284,7 +288,7 @@ internal class CinemaRepository(
                     wanted.associate { c ->
                         // Same route as Wholphin's own collection rows: the tag is answered by
                         // ProgressOverlay with the list's titles, in list order
-                        c.id to async { c.name to tracked(failed, "list:" + c.id) { safe { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } } }
+                        c.id to async { c.name to tracked(failed, "list:" + c.id) { safe { TabAnswers.get("list:${c.id}:${c.refreshedAt}:$userId:$plays") { api.itemsApi.getItems(GetItemsRequest(userId = userId, tags = listOf(c.tag), recursive = true, limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1)).content.items } } } }
                     }
                 // Rows that don't depend on which libraries there are start now, before the
                 // library list is back (the defaults include them; a saved page if it has them on)
@@ -823,13 +827,13 @@ internal class CinemaRepository(
                 // Every movie library at once; a title in both the HD and 4K library shows once
                 HomeRowType.RECENT_MOVIES ->
                     name to
-                        safe { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, includeItemTypes = listOf(BaseItemKind.MOVIE), limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content }
+                        safe { TabAnswers.get("recentmovies:$userId:${hook.overlay.changes.value}") { api.userLibraryApi.getLatestMedia(GetLatestMediaRequest(userId = userId, includeItemTypes = listOf(BaseItemKind.MOVIE), limit = 40, fields = fields, enableImageTypes = images, imageTypeLimit = 1, groupItems = true)).content } }
                             .distinctBy { tmdbOf(it)?.toString() ?: (it.name.orEmpty().lowercase() + it.productionYear) }
                             .take(24)
                 // Shows by when they last got something new: one request for every TV library
                 // (Silo answers no episodes to a library-wide episode query)
                 HomeRowType.NEW_EPISODES ->
-                    name to safe { api.itemsApi.getItems(newest(listOf(BaseItemKind.SERIES), ItemSortBy.DATE_LAST_CONTENT_ADDED, 40)).content.items }
+                    name to safe { TabAnswers.get("newepisodes:$userId:${hook.overlay.changes.value}") { api.itemsApi.getItems(newest(listOf(BaseItemKind.SERIES), ItemSortBy.DATE_LAST_CONTENT_ADDED, 40)).content.items } }
                         .distinctBy { tmdbOf(it)?.toString() ?: it.name.orEmpty().lowercase() }
                         .take(24)
                 HomeRowType.NEW_RELEASE_MOVIES -> name to safe { api.itemsApi.getItems(newest(listOf(BaseItemKind.MOVIE), ItemSortBy.PREMIERE_DATE)).content.items }
@@ -1891,4 +1895,48 @@ private class LibraryMatch(
 internal object BecauseCache {
     const val KEEP_MS = 10 * 60_000L
     val map = java.util.concurrent.ConcurrentHashMap<Any, Pair<Long, List<CinemaItem>>>()
+}
+
+/**
+ * One answer for the same request asked by several tabs within [KEEP_MS]: a start loads Home and
+ * then preloads the other tabs, and each asked the server for the libraries, Continue Watching and
+ * Next Up again (4, 3 and 2 identical requests in a start's first 30 s). A failed or cancelled
+ * answer isn't kept: the next caller asks again.
+ */
+private object TabAnswers {
+    private const val KEEP_MS = 15_000L
+    private val held = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, kotlinx.coroutines.CompletableDeferred<Any?>>>()
+
+    @Suppress("UNCHECKED_CAST")
+    suspend fun <T> get(
+        key: String,
+        fetch: suspend () -> T,
+    ): T {
+        while (true) {
+            val now = System.currentTimeMillis()
+            held.entries.removeIf { now - it.value.first > KEEP_MS }
+            val mine = now to kotlinx.coroutines.CompletableDeferred<Any?>()
+            val other = held.putIfAbsent(key, mine)
+            if (other != null) {
+                try {
+                    return other.second.await() as T
+                } catch (e: CancellationException) {
+                    // Our own cancellation goes on up; theirs (they left the tab) means ask again
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    held.remove(key, other)
+                    continue
+                } catch (e: Exception) {
+                    held.remove(key, other)
+                    continue
+                }
+            }
+            try {
+                return fetch().also { mine.second.complete(it) }
+            } catch (e: Throwable) {
+                held.remove(key, mine)
+                mine.second.completeExceptionally(e)
+                throw e
+            }
+        }
+    }
 }

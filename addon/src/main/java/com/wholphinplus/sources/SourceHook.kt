@@ -565,6 +565,20 @@ class PickSession internal constructor(
     }
 
     /**
+     * Whether the main server's intro/credits times ([itemId]'s media segments) fit the file playing:
+     * always for the main copy; for an extra server's copy only when it runs as long as the main
+     * copy, within [SEGMENT_FIT_MS]. A release a few seconds longer (a studio logo first) would skip
+     * into the show, or leave the intro's end: no button is better than a wrong skip.
+     */
+    fun segmentsFit(itemId: UUID): Boolean {
+        val copy = chosen[itemId] ?: return true
+        val main = mainSources[itemId]?.runTimeTicks ?: 0L
+        val fits = copy.runTimeTicks > 0 && main > 0 && kotlin.math.abs(copy.runTimeTicks - main) <= SEGMENT_FIT_MS * 10_000L
+        if (!fits) Timber.i("Skip intro/credits off for this copy: %d s vs the main copy's %d s", copy.runTimeTicks / 10_000_000L, main / 10_000_000L)
+        return fits
+    }
+
+    /**
      * [mainSource] with the subtitles of the extra server's copy of [itemId] in place of its own, so
      * Wholphin's subtitle rules (mode and preferred language, as on the main copy) can run over
      * that file. Asked when the main copy's tracks gave no subtitles: the main copy may lack the
@@ -829,6 +843,9 @@ class PickSession internal constructor(
     companion object {
         /** The id of a separate subtitle file Orca+ adds to an extra server's copy. */
         const val SIDECAR_ID = "orca-sidecar"
+
+        /** How far an extra server's copy may run from the main copy for its intro times to be used. */
+        const val SEGMENT_FIT_MS = 2_000L
     }
 
     /** HDR of the picked external file (null: not external, use the main copy's). */

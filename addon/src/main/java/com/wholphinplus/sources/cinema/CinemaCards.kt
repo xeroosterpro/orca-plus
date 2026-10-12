@@ -1,6 +1,7 @@
 package com.wholphinplus.sources.cinema
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +23,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.key
@@ -162,6 +168,7 @@ internal fun CinemaCard(
     /** OK held on the card (Continue Watching's menu); null: a long press is just a press. */
     onLongClick: ((CinemaItem) -> Unit)? = null,
 ) {
+    if (com.wholphinplus.sources.DeviceClass.plainCards) return LightCard(item, onFocused, onClick, width, modifier, onLongClick)
     val shape = RoundedCornerShape(6.dp)
     Column(Modifier.width(width)) {
         // Built while the remote moves: the shell now, the face once still ([CardFill])
@@ -192,6 +199,101 @@ internal fun CinemaCard(
                 CardCaption(item, art?.art)
             }
         }
+    }
+}
+
+/**
+ * Light boxes' card (Fire Sticks): a plain focusable box instead of the TV [Card]. The TV card
+ * keeps an interaction source, a focus state that recomposes it, and scale, border and glow
+ * layers for every card, all switched off here anyway; on a stick that was part of each frame that
+ * brought a row in. Here focus is one value read only where the white edge is drawn, so moving
+ * along a row redraws two cards and recomposes none. Same face and caption as [CinemaCard].
+ */
+@Composable
+internal fun LightCard(
+    item: CinemaItem,
+    onFocused: (CinemaItem) -> Unit,
+    onClick: (CinemaItem) -> Unit,
+    width: Dp,
+    modifier: Modifier,
+    onLongClick: ((CinemaItem) -> Unit)?,
+) {
+    Column(Modifier.width(width)) {
+        val filled = rememberCardFilled(item.key)
+        val art = if (filled) rememberArtState(item) else null
+        val press = remember { PlainPress() }
+        Box(
+            modifier
+                .width(width)
+                .aspectRatio(16f / 9f)
+                .clip(LightCardShape)
+                .background(CardShell)
+                .drawWithContent {
+                    drawContent()
+                    if (press.focused.value) {
+                        val w = 3.dp.toPx()
+                        val r = (6.dp.toPx() - w / 2).coerceAtLeast(0f)
+                        drawRoundRect(
+                            color = Ink,
+                            topLeft = androidx.compose.ui.geometry.Offset(w / 2, w / 2),
+                            size = androidx.compose.ui.geometry.Size(size.width - w, size.height - w),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
+                            style = press.stroke(w),
+                        )
+                    }
+                }.onFocusChanged {
+                    press.focused.value = it.isFocused
+                    if (it.isFocused) onFocused(item)
+                }.onKeyEvent { press.key(it, { onClick(item) }, onLongClick?.let { l -> { l(item) } }) }
+                .focusable()
+                .tapToClick { onClick(item) },
+        ) {
+            if (art != null) CinemaCardFace(item, width, art)
+        }
+        if (LocalOverlays.current.captions) {
+            Box(Modifier.fillMaxWidth().height(captionHeight())) { if (filled) CardCaption(item, art?.art) }
+        }
+    }
+}
+
+private val LightCardShape = RoundedCornerShape(6.dp)
+private val CardShell = Color(0xFF1F1F1F)
+
+/** [LightCard]'s focus and OK key: a press counts only when it went down on this card. */
+private class PlainPress {
+    val focused = mutableStateOf(false)
+    private var down = false
+    private var long = false
+    private var edge: Stroke? = null
+
+    fun stroke(width: Float): Stroke = edge?.takeIf { it.width == width } ?: Stroke(width).also { edge = it }
+
+    fun key(
+        e: androidx.compose.ui.input.key.KeyEvent,
+        onClick: () -> Unit,
+        onLongClick: (() -> Unit)?,
+    ): Boolean {
+        val k = e.key
+        if (k != androidx.compose.ui.input.key.Key.DirectionCenter && k != androidx.compose.ui.input.key.Key.Enter && k != androidx.compose.ui.input.key.Key.NumPadEnter) return false
+        when (e.type) {
+            androidx.compose.ui.input.key.KeyEventType.KeyDown -> {
+                if (e.nativeKeyEvent.repeatCount == 0) {
+                    down = true
+                    long = false
+                } else if (down && !long && onLongClick != null) {
+                    // Held OK: the menu, once, and no click when it's let go
+                    long = true
+                    onLongClick()
+                }
+            }
+            androidx.compose.ui.input.key.KeyEventType.KeyUp -> {
+                if (down && !long) onClick()
+                down = false
+                long = false
+            }
+            else -> return false
+        }
+        return true
     }
 }
 

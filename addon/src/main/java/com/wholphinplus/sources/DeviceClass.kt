@@ -162,6 +162,16 @@ object DeviceClass {
     /** Light's simpler motion and effects (see the class comment); Full and Balanced unchanged. */
     val simpleMotion: Boolean get() = light
 
+    /**
+     * Light's plain card ([com.wholphinplus.sources.cinema.LightCard]) instead of the TV card.
+     * `adb shell setprop debug.orca.lightcard 0` (then restart) brings the TV card back for comparing.
+     */
+    val plainCards: Boolean get() = light && plainCardsAllowed
+
+    private val plainCardsAllowed: Boolean by lazy {
+        runCatching { Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, "debug.orca.lightcard") as String }.getOrDefault("") != "0"
+    }
+
     /** A held Up/Down's pace, ms per row ([com.wholphinplus.sources.cinema.HoldRepeat]): Light waits for the box. */
     val holdStepMs: Long get() = if (light) 170L else 105L
 

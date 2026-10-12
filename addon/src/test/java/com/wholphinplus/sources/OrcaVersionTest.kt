@@ -10,9 +10,10 @@ class OrcaVersionTest {
     }
 
     @Test fun `a personal build says so`() {
-        // Unit tests run the personal (non-public) build
-        assertEquals("Orca+ dev 354", OrcaVersion.name("1.0.9-354-gdc1c2c69b"))
-        assertEquals("Orca+ dev 354  ·  built on Wholphin 1.0.9", OrcaVersion.full("v1.0.9-354-gdc1c2c69b"))
+        // Tests run in both builds: the personal one here, the public one in the release workflow
+        val n = if (BuildConfig.PUBLIC_BUILD) "Orca+ 354" else "Orca+ dev 354"
+        assertEquals(n, OrcaVersion.name("1.0.9-354-gdc1c2c69b"))
+        assertEquals("$n  ·  built on Wholphin 1.0.9", OrcaVersion.full("v1.0.9-354-gdc1c2c69b"))
     }
 
     @Test fun `anything else is shown as it is`() {

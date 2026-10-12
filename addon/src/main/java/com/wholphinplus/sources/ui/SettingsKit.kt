@@ -269,12 +269,17 @@ fun SettingsRailItem(
                     }
                 },
     ) {
-        Column(Modifier.padding(start = 18.dp, end = 12.dp, top = 7.dp, bottom = 7.dp)) {
-            Text(title, color = ink, fontSize = 15.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold, maxLines = 1)
-            Text(hint, color = hintInk, fontSize = 11.5.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
+        // No hint line (2026-10-12 layout): the open topic's header says what it holds
+        Column(Modifier.padding(start = 18.dp, end = 12.dp, top = if (hint.isBlank()) 11.dp else 7.dp, bottom = if (hint.isBlank()) 11.dp else 7.dp)) {
+            Text(title, color = ink, fontSize = if (hint.isBlank()) 17.sp else 15.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold, maxLines = 1)
+            if (hint.isNotBlank()) Text(hint, color = hintInk, fontSize = 11.5.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
         }
     }
 }
+
+/** The "›" at the end of a settings row that opens a page. */
+@Composable
+fun SettingsChevron() = Text("›", style = androidx.tv.material3.MaterialTheme.typography.titleLarge, color = com.wholphinplus.sources.cinema.InkDim)
 
 /** Orca+'s ink, accent and easings for the settings page in Wholphin's module. */
 val SettingsInk: Color get() = Ink

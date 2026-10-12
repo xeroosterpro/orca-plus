@@ -116,7 +116,7 @@ fun ExtraSourcesEntry(modifier: Modifier = Modifier) {
 
 /** Settings topics that start with Orca+ items (names of Wholphin's OrcaSection). */
 object OrcaTopics {
-    fun has(topic: String): Boolean = topic in setOf("ACCOUNT", "APPEARANCE", "SOURCES", "PLAYBACK", "KEYS", "DEVICE", "ABOUT")
+    fun has(topic: String): Boolean = topic in setOf("ACCOUNT", "APPEARANCE", "SOURCES", "PLAYBACK", "PLAYBACK_CARD", "KEYS", "DEVICE", "ABOUT")
 }
 
 /** Cinema mode's "Customize home": the home rows editor as a page of its own. */

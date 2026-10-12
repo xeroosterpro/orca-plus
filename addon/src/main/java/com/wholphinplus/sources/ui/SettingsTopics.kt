@@ -51,16 +51,6 @@ private fun NowPlayingSettings(
     firstModifier: Modifier,
 ) {
     val p by hook.store.playInfoPrefs.collectAsState()
-    val confirmLeave by hook.store.confirmLeave.collectAsState()
-    SettingsHeader("Leaving the player")
-    PlusListItem(
-        onClick = { hook.store.setConfirmLeave(!confirmLeave) },
-        headlineContent = { Text("Ask before closing", style = MaterialTheme.typography.titleMedium) },
-        supportingContent = { Text(if (confirmLeave) "On: Back asks \"Stop watching?\" first, so a stray press never ends the movie" else "Off: Back closes the player at once") },
-        trailingContent = { androidx.tv.material3.Switch(checked = confirmLeave, onCheckedChange = null, colors = plusSwitchColors()) },
-        modifier = firstModifier,
-    )
-    SettingsHeader("Now playing card")
     PlusListItem(
         onClick = { hook.store.setPlayInfoPrefs(p.copy(on = !p.on)) },
         headlineContent = { Text("Show the card", style = MaterialTheme.typography.titleMedium) },
@@ -74,6 +64,7 @@ private fun NowPlayingSettings(
             )
         },
         trailingContent = { androidx.tv.material3.Switch(checked = p.on, onCheckedChange = null, colors = plusSwitchColors()) },
+        modifier = firstModifier,
     )
     if (!p.on) return
     listOf(
@@ -89,6 +80,22 @@ private fun NowPlayingSettings(
             modifier = Modifier.padding(start = 24.dp),
         )
     }
+}
+
+/** Settings → Playback's own switch: Back asks before it closes the player. */
+@Composable
+private fun LeavePlayerSetting(
+    hook: SourceHook,
+    firstModifier: Modifier,
+) {
+    val confirmLeave by hook.store.confirmLeave.collectAsState()
+    PlusListItem(
+        onClick = { hook.store.setConfirmLeave(!confirmLeave) },
+        headlineContent = { Text("Ask before closing the player", style = MaterialTheme.typography.titleMedium) },
+        supportingContent = { Text(if (confirmLeave) "On: Back asks \"Stop watching?\" first, so a stray press never ends the movie" else "Off: Back closes the player at once") },
+        trailingContent = { androidx.tv.material3.Switch(checked = confirmLeave, onCheckedChange = null, colors = plusSwitchColors()) },
+        modifier = firstModifier,
+    )
 }
 
 /**
@@ -324,7 +331,8 @@ fun OrcaTopicItems(
                 // The TMDB key (search) lives in Keys & Services with every other key
                 if (connections.any { it.enabled }) PickerTuning(hook)
             }
-            "PLAYBACK" -> NowPlayingSettings(hook, firstModifier)
+            "PLAYBACK" -> LeavePlayerSetting(hook, firstModifier)
+            "PLAYBACK_CARD" -> NowPlayingSettings(hook, firstModifier)
             "ACCOUNT" -> AccountCard(hook, firstModifier, openCloud = { open = Screen.Cloud })
             "KEYS" -> KeysAndServices(hook, firstModifier, open = { open = it })
             "DEVICE" -> ThisTvPage(hook, firstModifier)

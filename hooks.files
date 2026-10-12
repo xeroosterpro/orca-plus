@@ -31,6 +31,7 @@ app/src/main/java/com/github/damontecres/wholphin/ui/preferences/PreferencesCont
 app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SliderPreference.kt
 app/src/main/java/com/github/damontecres/wholphin/ui/preferences/subtitle/SubtitleStylePage.kt
 app/src/main/java/com/github/damontecres/wholphin/ui/preferences/SwitchPreference.kt
+app/src/main/java/com/github/damontecres/wholphin/ui/preferences/user/UserProfilePreferencesPage.kt
 app/src/main/java/com/github/damontecres/wholphin/ui/setup/OrcaWelcome.kt
 app/src/main/java/com/github/damontecres/wholphin/ui/theme/Theme.kt
 app/src/main/java/com/github/damontecres/wholphin/util/DebugLogTree.kt

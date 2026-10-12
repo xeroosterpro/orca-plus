@@ -303,7 +303,12 @@ internal object CardFill {
     // A D-pad key held (repeating), any direction: Light boxes wait with the faces then ([busy])
     private val heldActive = androidx.compose.runtime.mutableStateOf(false)
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val quiet = Runnable { keyActive.value = false }
+    // Also ends a hold whose release never came (focus left the window mid-hold): Light waited on it for good
+    private val quiet =
+        Runnable {
+            keyActive.value = false
+            heldActive.value = false
+        }
     private val upDownQuiet = Runnable { upDownActive.value = false }
 
     /** A D-pad press was taken ([HeldKeys.behind]); [upDown]: Up or Down; [held]: a repeat. Busy while it's held. */
@@ -625,7 +630,13 @@ internal fun ReportMotion(
                 }
             }
         } finally {
-            if (counted) RowMotion.moving.intValue -= 1
+            // Left while counted (a tab switch or a page opened mid-glide): take back both counts. Only
+            // [RowMotion.moving] was, so a page count stuck above 0 kept [CardFill.busy] on and no new
+            // card ever filled (Light, Shield emulator 2026-10-12)
+            if (counted) {
+                RowMotion.moving.intValue -= 1
+                if (page) RowMotion.pageMoving.intValue -= 1
+            }
         }
     }
 }

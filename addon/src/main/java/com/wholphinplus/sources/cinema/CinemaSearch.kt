@@ -131,6 +131,21 @@ fun CinemaSearch(
     val hitFocus = remember { mutableMapOf<String, FocusRequester>() }
     val scope = rememberCoroutineScope()
     val firstKey = remember { FocusRequester() }
+    // The on-screen keyboard folded away: results take the whole width (kept while the app runs)
+    var keysHidden by remember { mutableStateOf(SearchKeys.hidden) }
+    val showKeys = remember { FocusRequester() }
+    var keysToggled by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val setKeysHidden = { h: Boolean ->
+        keysHidden = h
+        SearchKeys.hidden = h
+        keysToggled++
+    }
+    LaunchedEffect(keysToggled) {
+        if (keysToggled == 0) return@LaunchedEffect
+        // Focus follows: the button that brings the keyboard back, or the keyboard's first key
+        androidx.compose.runtime.withFrameNanos {}
+        runCatching { if (keysHidden) showKeys.requestFocus() else firstKey.requestFocus() }
+    }
     val micFocus = remember { FocusRequester() }
     val (voice, toggleVoice) = rememberCinemaVoice { heard -> query = heard }
     // The mic takes focus when search opens (the keyboard's first key if voice isn't available)
@@ -239,7 +254,7 @@ fun CinemaSearch(
     ) {
         Row(Modifier.fillMaxSize().padding(start = 48.dp, top = 36.dp)) {
             // ---- keyboard column
-            Column(Modifier.width(300.dp).fillMaxHeight()) {
+            if (!keysHidden) Column(Modifier.width(300.dp).fillMaxHeight()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (voice.available) {
                         MicButton(onClick = toggleVoice, modifier = Modifier.focusRequester(micFocus))
@@ -271,6 +286,7 @@ fun CinemaSearch(
                     onClear = { query = "" },
                     imeKey = imeKey,
                     onSystemKeyboard = openSystemKeyboard,
+                    onHide = { setKeysHidden(true) },
                 )
                 Spacer(Modifier.height(18.dp))
                 // Streaming-style "explore" list: people the search matched
@@ -282,7 +298,7 @@ fun CinemaSearch(
                 Spacer(Modifier.weight(1f))
                 Text(TMDB_NOTICE, color = InkDim.copy(alpha = 0.6f), fontSize = 9.sp, lineHeight = 12.sp, modifier = Modifier.padding(bottom = 18.dp, end = 12.dp))
             }
-            Spacer(Modifier.width(36.dp))
+            if (!keysHidden) Spacer(Modifier.width(36.dp))
             // ---- results
             val r = results
             val heading: String?
@@ -296,8 +312,10 @@ fun CinemaSearch(
                     heading = r.interpretation ?: if (all.isEmpty() && found.isEmpty() && !findingCollections) "No results for \"${query.trim()}\"" else null
                     val cards = all.map { it.toCinemaItem() }
                     // The best few matches first, then everything else split into movies and shows
-                    val top = cards.take(TOP_RESULTS)
-                    val rest = cards.drop(TOP_RESULTS)
+                    // A full row of them: five across with the keyboard folded away
+                    val topCount = if (keysHidden) 5 else TOP_RESULTS
+                    val top = cards.take(topCount)
+                    val rest = cards.drop(topCount)
                     sections =
                         listOf(
                             "Top Results" to top,
@@ -318,6 +336,16 @@ fun CinemaSearch(
                 }
             }
             Column(Modifier.weight(1f).fillMaxHeight()) {
+                if (keysHidden) {
+                    // The search so far, and the way back to the keyboard
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 12.dp)) {
+                        Key("SHOW KEYBOARD", width = 150.dp, small = true, modifier = Modifier.focusRequester(showKeys), onClick = { setKeysHidden(false) })
+                        Spacer(Modifier.width(16.dp))
+                        Icon(Icons.Filled.Search, contentDescription = null, tint = InkDim, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text(query.ifEmpty { "Search" }, color = if (query.isEmpty()) InkDim else Ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
                 if (heading != null) {
                     Text(heading, color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.height(28.dp))
                 }
@@ -335,7 +363,7 @@ fun CinemaSearch(
                     CompositionLocalProvider(LocalBringIntoViewSpec provides spec.gliding(grid), LocalArt provides art, LocalOverlays provides overlays, LocalRatingPrefs provides ratingPrefs, LocalRatings provides ratings) {
                         LazyVerticalGrid(
                             state = grid,
-                            columns = GridCells.Fixed(3),
+                            columns = GridCells.Fixed(if (keysHidden) 5 else 3),
                             contentPadding = PaddingValues(top = 10.dp, end = 48.dp, bottom = 80.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -368,7 +396,7 @@ fun CinemaSearch(
                                             onOpen(c.detailsId, c.detailsKind)
                                         }
                                     },
-                                    width = 166.dp,
+                                    width = if (keysHidden) 158.dp else 166.dp,
                                 )
                                 }
                                 // Collections after the first group (Top Results), once they're found
@@ -488,6 +516,11 @@ private const val TOP_RESULTS = 3
 
 private const val KEYS = "abcdefghijklmnopqrstuvwxyz1234567890"
 
+/** Whether search's keyboard is folded away, for the rest of this run. */
+private object SearchKeys {
+    var hidden = false
+}
+
 @Composable
 private fun Keyboard(
     firstKey: FocusRequester,
@@ -497,14 +530,17 @@ private fun Keyboard(
     onClear: () -> Unit,
     imeKey: FocusRequester,
     onSystemKeyboard: () -> Unit,
+    onHide: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Key("SPACE", width = 110.dp, onClick = onSpace)
-            Key("", icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, iconLabel = "Delete", width = 54.dp, onClick = onDelete, onLongClick = onClear)
-            Key("CLEAR", width = 64.dp, small = true, onClick = onClear)
+            Key("SPACE", width = 76.dp, onClick = onSpace)
+            Key("", icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, iconLabel = "Delete", width = 46.dp, onClick = onDelete, onLongClick = onClear)
+            Key("CLEAR", width = 60.dp, small = true, onClick = onClear)
             // Opens the device's own keyboard, for anyone who prefers it
-            Key("", icon = KeyboardIcon, iconLabel = "Use the device keyboard", width = 56.dp, modifier = Modifier.focusRequester(imeKey), onClick = onSystemKeyboard)
+            Key("", icon = KeyboardIcon, iconLabel = "Use the device keyboard", width = 48.dp, modifier = Modifier.focusRequester(imeKey), onClick = onSystemKeyboard)
+            // Folds this keyboard away so the results fill the screen
+            Key("HIDE", width = 50.dp, small = true, onClick = onHide)
         }
         KEYS.chunked(6).forEachIndexed { row, chars ->
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {

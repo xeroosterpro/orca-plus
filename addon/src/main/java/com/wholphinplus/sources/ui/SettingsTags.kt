@@ -53,12 +53,24 @@ internal fun OverlaysScreen(
     val services = if (o.corner == com.wholphinplus.sources.cinema.OverlayCorner.TOP_RIGHT) "Top left" else "Top right"
     Row(horizontalArrangement = Arrangement.spacedBy(36.dp)) {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(top = 4.dp, bottom = 48.dp), modifier = Modifier.width(470.dp)) {
+            // Light boxes: every tag is more work in every card, so say which set runs smoothest
+            val light = com.wholphinplus.sources.DeviceClass.light
             item { Section("Quick start", "Set every tag at once, then fine-tune below") }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(bottom = 6.dp)) {
-                    PresetButton("Clean", Modifier.focusRequester(first)) { preset(com.wholphinplus.sources.cinema.PosterOverlays.CLEAN, false) }
+                    PresetButton(if (light) "Clean · smoothest" else "Clean", Modifier.focusRequester(first)) { preset(com.wholphinplus.sources.cinema.PosterOverlays.CLEAN, false) }
                     PresetButton("Standard") { preset(com.wholphinplus.sources.cinema.PosterOverlays.STANDARD, false) }
                     PresetButton("Everything") { preset(com.wholphinplus.sources.cinema.PosterOverlays.EVERYTHING, true) }
+                }
+            }
+            if (light) {
+                item {
+                    Text(
+                        "This TV runs in Light mode: every tag is more work in every card, so fewer tags scroll smoother.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
+                    )
                 }
             }
             item { Section("Title", "Bottom left") }
@@ -134,10 +146,12 @@ internal fun DescriptionTagsScreen(
     }
     Row(horizontalArrangement = Arrangement.spacedBy(36.dp)) {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(top = 4.dp, bottom = 48.dp), modifier = Modifier.width(470.dp)) {
+            // Light boxes: every tag is more work in every card, so say which set runs smoothest
+            val light = com.wholphinplus.sources.DeviceClass.light
             item { Section("Quick start", "Set every tag at once, then fine-tune below") }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(bottom = 6.dp)) {
-                    PresetButton("Clean", Modifier.focusRequester(first)) { preset(com.wholphinplus.sources.cinema.DescriptionTags.CLEAN, false) }
+                    PresetButton(if (light) "Clean · smoothest" else "Clean", Modifier.focusRequester(first)) { preset(com.wholphinplus.sources.cinema.DescriptionTags.CLEAN, false) }
                     PresetButton("Standard") { preset(com.wholphinplus.sources.cinema.DescriptionTags.STANDARD, true) }
                     PresetButton("Everything") { preset(com.wholphinplus.sources.cinema.DescriptionTags.EVERYTHING, true) }
                 }

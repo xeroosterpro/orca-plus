@@ -143,6 +143,7 @@ class ConnectionStore
             prefs.edit().putString(DEVICE_MODE_KEY, mode).apply()
             _deviceMode.value = mode
             DeviceClass.mode = mode
+            if (!prefs.contains(OVERLAYS_KEY)) _overlays.value = defaultOverlays()
         }
 
         init {
@@ -171,10 +172,17 @@ class ConnectionStore
             on: Boolean,
         ) = setShuffleLocks(if (on) _shuffleLocks.value + key else _shuffleLocks.value - key)
 
+        /**
+         * Tags for a TV whose poster tags were never chosen: Light boxes start Clean (each tag is
+         * more work in every card; on the Fire Stick bench the corner extras were ~40% of a held
+         * Left's CPU), the rest Standard. Follows Settings → This TV until tags are chosen.
+         */
+        private fun defaultOverlays() = if (DeviceClass.light) com.wholphinplus.sources.cinema.PosterOverlays.CLEAN else com.wholphinplus.sources.cinema.PosterOverlays.STANDARD
+
         private val _overlays =
             MutableStateFlow(
                 runCatching { com.wholphinplus.sources.cinema.PosterOverlays.fromSaved(json, prefs.getString(OVERLAYS_KEY, null)!!) }
-                    .getOrDefault(com.wholphinplus.sources.cinema.PosterOverlays()),
+                    .getOrElse { defaultOverlays() },
             )
 
         /** Cinema mode's poster overlays: quality, HDR, audio, rating, Top 10 and watched badges. */

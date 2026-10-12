@@ -168,6 +168,11 @@ object DeviceClass {
      */
     val plainCards: Boolean get() = light && plainCardsAllowed
 
+    /** Bench only: `setprop debug.orca.lightextras 0` leaves out the cards' second pass (measuring its cost). */
+    val skipCardExtras: Boolean by lazy {
+        runCatching { Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, "debug.orca.lightextras") as String }.getOrDefault("") == "0"
+    }
+
     private val plainCardsAllowed: Boolean by lazy {
         runCatching { Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, "debug.orca.lightcard") as String }.getOrDefault("") != "0"
     }

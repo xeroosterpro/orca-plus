@@ -407,7 +407,7 @@ internal fun CinemaCardFace(
         if (o.progress) item.progress?.let { p -> ProgressBar(p, Modifier.align(Alignment.BottomStart)) }
         // A second pass: the streaming logos, quality tags and scores are ~35% of a card's cost,
         // built a frame after the picture and logo so no frame builds a whole card
-        if (rememberCardFilled(CardExtras(item.key))) {
+        if (!com.wholphinplus.sources.DeviceClass.skipCardExtras && rememberCardFilled(CardExtras(item.key))) {
             PosterBadges(item)
             val own = LocalPageService.current
             ServiceLogos(item, art?.serviceUrls().orEmpty().filterNot { own != null && it.endsWith(own) }.take(o.maxServices))

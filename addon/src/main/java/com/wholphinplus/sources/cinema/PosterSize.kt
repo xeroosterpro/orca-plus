@@ -185,11 +185,13 @@ internal fun cardRequest(
             .size(width, height)
             .listener(PosterSize.timing)
             // Plain bitmaps: a hardware one is allocated and uploaded on a second GL context per
-            // picture, and while posters land the frame on screen waited 50-150 ms for the GPU
-            .allowHardware(false)
+            // picture, and while posters land the frame on screen waited 50-150 ms for the GPU.
+            // Light boxes can try hardware ones instead ([DeviceClass.hardwareCards], an experiment)
+            .allowHardware(com.wholphinplus.sources.DeviceClass.hardwareCards)
             // Light boxes: 16-bit pictures (card pictures have no see-through parts): half the
-            // memory, and half the bytes to upload to the GPU as each card fills
-            .apply { if (com.wholphinplus.sources.DeviceClass.light) bitmapConfig(android.graphics.Bitmap.Config.RGB_565) }
+            // memory, and half the bytes to upload to the GPU as each card fills (hardware ones
+            // are always 32-bit, so not with the experiment)
+            .apply { if (com.wholphinplus.sources.DeviceClass.light && !com.wholphinplus.sources.DeviceClass.hardwareCards) bitmapConfig(android.graphics.Bitmap.Config.RGB_565) }
             // Fades in when it arrives mid-glide instead of popping; one already in memory
             // (scrolling back) shows at once, Coil skips the fade for those
             .crossfade(CARD_FADE_MS)

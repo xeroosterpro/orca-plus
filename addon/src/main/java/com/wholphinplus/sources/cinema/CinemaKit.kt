@@ -839,7 +839,7 @@ internal fun StableBackdrop(
             return@LaunchedEffect
         }
         val started = android.os.SystemClock.uptimeMillis()
-        val ok = SingletonImageLoader.get(context).execute(request(context, url)) is SuccessResult
+        val ok = SingletonImageLoader.get(context).execute(backdropRequest(context, url)) is SuccessResult
         if (ok) {
             instant = shown == null && android.os.SystemClock.uptimeMillis() - started < INSTANT_MS
             shown = url
@@ -920,7 +920,7 @@ private fun BackdropPicture(
     val arrive = remember { Animatable(if (settle && !still) 1.035f else 1f) }
     LaunchedEffect(Unit) { if (arrive.value != 1f) arrive.animateTo(1f, tween(1_400, easing = CinemaEase)) }
     AsyncImage(
-        model = request(context, url),
+        model = backdropRequest(context, url),
         contentDescription = null,
         contentScale = ContentScale.Crop,
         alignment = Alignment.TopCenter,
@@ -944,7 +944,7 @@ internal suspend fun preloadBackdrop(
     timeoutMs: Long,
 ) {
     if (url == null) return
-    kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { SingletonImageLoader.get(context).execute(request(context, url)) }
+    kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { SingletonImageLoader.get(context).execute(backdropRequest(context, url)) }
 }
 
 /** A picture that loads this fast came from memory: it can be shown without a fade. */
@@ -961,6 +961,43 @@ internal fun request(
     width: Int = 1280,
     height: Int = 720,
 ) = ImageRequest.Builder(context).data(url).size(width, height).allowHardware(false).build()
+
+/**
+ * A full-screen backdrop's request ([StableBackdrop], [preloadBackdrop]: the same one, so a preload
+ * is a memory hit), sized by [BackdropSize].
+ */
+internal fun backdropRequest(
+    context: android.content.Context,
+    url: String,
+) = request(context, BackdropSize.fit(url), BackdropSize.width, BackdropSize.height)
+
+/**
+ * How big full-screen backdrops are fetched and decoded. A 1280×720 plain bitmap is 3.7 MB, and the
+ * billboard holds two while it fades (more in memory as you browse). Light boxes (Fire TV Stick
+ * class) take 960×540: half the memory and decode time, and on those TVs' 1080p screens, under the
+ * stage's dark fades, the difference doesn't show. Full and Balanced keep 1280.
+ */
+internal object BackdropSize {
+    private const val LIGHT_WIDTH = 960
+
+    val width: Int get() = if (com.wholphinplus.sources.DeviceClass.light) LIGHT_WIDTH else 1280
+    val height: Int get() = width * 9 / 16
+
+    /** [url] asking its server for no more than [width]: TMDB's w780 tier, the servers' maxWidth / width. */
+    fun fit(url: String): String {
+        if (!com.wholphinplus.sources.DeviceClass.light) return url
+        return when {
+            url.contains("image.tmdb.org/t/p/") -> TMDB.replace(url) { m -> if (m.groupValues[1] == "original" || m.groupValues[1].drop(1).toInt() > 780) "/t/p/w780/" else m.value }
+            url.contains("photo/:/transcode") -> PLEX.replace(url) { m -> if (m.groupValues[2].toInt() > LIGHT_WIDTH) "${m.groupValues[1]}$LIGHT_WIDTH" else m.value }.let { u -> PLEX_HEIGHT.replace(u) { m -> if (m.groupValues[2].toInt() > LIGHT_WIDTH * 9 / 16) "${m.groupValues[1]}${LIGHT_WIDTH * 9 / 16}" else m.value } }
+            else -> MAX_WIDTH.replace(url) { m -> if (m.groupValues[1].toInt() > LIGHT_WIDTH) "maxWidth=$LIGHT_WIDTH" else m.value }
+        }
+    }
+
+    private val TMDB = Regex("/t/p/(w\\d+|original)/")
+    private val MAX_WIDTH = Regex("maxWidth=(\\d+)")
+    private val PLEX = Regex("([?&]width=)(\\d+)")
+    private val PLEX_HEIGHT = Regex("([?&]height=)(\\d+)")
+}
 
 @Composable
 internal fun Wordmark(

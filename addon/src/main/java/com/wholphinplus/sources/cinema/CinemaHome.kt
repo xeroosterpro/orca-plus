@@ -922,6 +922,17 @@ internal object StartWarmup {
     private const val CARDS = 6
     private var done = false
 
+    /** Completes once the first screen is up (its pictures in, or the wait given up). */
+    private val firstScreen = kotlinx.coroutines.CompletableDeferred<Unit>()
+
+    /**
+     * Returns once the first screen is up, or after [maxMs] (Cinema mode off, or no page yet): for
+     * background work that shouldn't compete with the app's first seconds ([com.wholphinplus.sources.sync.ProfileSync]).
+     */
+    suspend fun settled(maxMs: Long) {
+        kotlinx.coroutines.withTimeoutOrNull(maxMs) { firstScreen.await() }
+    }
+
     suspend fun once(
         context: android.content.Context,
         page: CinemaHomeData,
@@ -930,6 +941,19 @@ internal object StartWarmup {
     ) {
         if (done) return
         done = true
+        try {
+            warm(context, page, art, overlays)
+        } finally {
+            firstScreen.complete(Unit)
+        }
+    }
+
+    private suspend fun warm(
+        context: android.content.Context,
+        page: CinemaHomeData,
+        art: CinemaArt?,
+        overlays: PosterOverlays,
+    ) {
         val started = android.os.SystemClock.uptimeMillis()
         // The first screen's cards build whole as it appears (nobody is moving yet)
         CardFill.openUntil = started + WAIT_MS + 1_500L

@@ -177,6 +177,20 @@ object DeviceClass {
         runCatching { Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, "debug.orca.lightcard") as String }.getOrDefault("") != "0"
     }
 
+    /**
+     * Experiment, Light boxes only: card pictures as hardware bitmaps instead of 16-bit plain ones
+     * ([com.wholphinplus.sources.cinema.cardRequest]). Plain bitmaps live on the Java heap, and on a
+     * 1-2 GB stick every poster there means more garbage collection; a hardware one lives in graphics
+     * memory, but each is uploaded when decoded, which held frames on the Shield. Which costs a stick
+     * more is for measuring: `adb shell setprop debug.orca.hwcards 1` (then restart) turns it on,
+     * and the health line's frames and memory compare the two. Off by default.
+     */
+    val hardwareCards: Boolean get() = light && hardwareCardsAllowed
+
+    private val hardwareCardsAllowed: Boolean by lazy {
+        runCatching { Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, "debug.orca.hwcards") as String }.getOrDefault("") == "1"
+    }
+
     /** A held Up/Down's pace, ms per row ([com.wholphinplus.sources.cinema.HoldRepeat]): Light waits for the box. */
     val holdStepMs: Long get() = if (light) 170L else 105L
 
@@ -218,6 +232,7 @@ object DeviceClass {
             try {
                 facts = facts.copy(decoders = decoders(), screenHeight = screenHeight(app), screenHdr = screenHdr(app))
                 Timber.i("Orca device: %s, runs as %s", summary(), tier.label)
+                if (hardwareCards) Timber.i("Orca device: hardware card pictures (experiment, debug.orca.hwcards)")
             } catch (e: Throwable) {
                 Timber.w(e, "Orca device: decoder scan failed")
             }

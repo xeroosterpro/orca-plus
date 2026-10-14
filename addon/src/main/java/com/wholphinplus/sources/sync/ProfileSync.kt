@@ -277,7 +277,15 @@ class ProfileSync
             }
         }
 
-        /** Syncs in the background unless it did in the last two minutes ([force]: the app is leaving). */
+        /**
+         * Syncs in the background unless it did in the last two minutes ([force]: the app is leaving).
+         *
+         * Home opening waits first: for the first screen to be up ([com.wholphinplus.sources.cinema.StartWarmup]), then for the
+         * remote to rest with nothing playing ([com.wholphinplus.sources.cinema.Conductor.whenIdle]). It used to start with the
+         * first page's loads, the busiest seconds of a start (worst on a Fire TV Stick), and a merge
+         * that changed rows or lists could land while someone was already moving. Leaving the app
+         * doesn't wait, and replaces a sync still waiting.
+         */
         fun syncSoon(
             hook: SourceHook,
             force: Boolean = false,
@@ -286,8 +294,30 @@ class ProfileSync
             val now = System.currentTimeMillis()
             if (!force && now - lastTry < MIN_GAP_MS) return
             lastTry = now
-            scope.launch { syncNow(hook) }
+            if (force) {
+                if (waiting) pending?.cancel()
+                scope.launch { syncNow(hook) }
+                return
+            }
+            if (pending?.isActive == true) return
+            pending =
+                scope.launch {
+                    waiting = true
+                    try {
+                        com.wholphinplus.sources.cinema.StartWarmup.settled(START_WAIT_MS)
+                        com.wholphinplus.sources.cinema.Conductor.whenIdle()
+                    } finally {
+                        waiting = false
+                    }
+                    syncNow(hook)
+                }
         }
+
+        /** A Home-open sync waiting its turn ([syncSoon]); cancelled if the app leaves first. */
+        @Volatile private var pending: kotlinx.coroutines.Job? = null
+
+        /** [pending] is still waiting, not syncing yet (a sync under way is never cancelled). */
+        @Volatile private var waiting = false
 
         /** Reads the cloud copy, merges it with this TV's, applies the result here and uploads it. */
         private suspend fun syncLocked(
@@ -578,6 +608,9 @@ class ProfileSync
             private val SECTION_WORDS = mapOf(ProfileMerge.WHOLPHIN to "app settings", ProfileMerge.SETTINGS to "Orca+ settings and servers", ProfileMerge.LISTS to "lists and rows")
             private const val DEVICE = "device_"
             private const val MIN_GAP_MS = 2 * 60 * 1000L
+
+            // A Home-open sync waits for the first screen at most this long (Cinema mode off: no first screen)
+            private const val START_WAIT_MS = 5_000L
 
             /**
              * Whether a pending reset due at [at] is the one already answered at [seen]. A reset's
